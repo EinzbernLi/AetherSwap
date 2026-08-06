@@ -343,7 +343,8 @@ sync_sold._fill_assetid_from_inventory 仅比较 Purchase 名称与库存 market
 
 **后续自动报价实现约束**
 
-- 必须把 pending_receipt=True 解释为尚未完成可验证收货；它必须阻止自动上架、售出确认和所有权归属，但在 Purchase 已持久化、方向/SteamID 核验和 durable intent 门禁满足时，允许发送用于完成交付的首次报价。\n- 首次报价发送不得清除 pending_receipt；只有精确 assetid 收货终结才能清除。
+- 必须把 pending_receipt=True 解释为尚未完成可验证收货；它必须阻止自动上架、售出确认和所有权归属，但在 Purchase 已持久化、方向/SteamID 核验和 durable intent 门禁满足时，允许发送用于完成交付的首次报价。
+- 首次报价发送不得清除 pending_receipt；只有精确 assetid 收货终结才能清除。
 - 必须只有统一收货终结流程在验证 baseline、新资产、商品 ID、账户和报价方向后，才能清除 pending_receipt。
 - 禁止 sync_sold 或任何修复流程仅按饰品名称为自动交易清除 pending_receipt。
 - 无法证明 assetid 归属时必须保持 pending_receipt 并进入人工对账。
@@ -549,7 +550,7 @@ PARTIALLY_GUARANTEED：上述行为在各自已检查路径中分别存在，但
 3. 用 git grep 验证引用的函数、类、字段和测试名称；发现并更正了一个测试名称拼写差异。
 4. 用 GitHub compare 验证 base 到 head 的文件列表只有 .agent/CURRENT_INVARIANTS.md。
 5. 回读 Draft PR #9，验证 base、head、Draft 状态和唯一文件。
-6. GitHub Actions 运行 31081881649 的 tests job 已通过；未修改 pytest baseline。
+6. GitHub Actions 运行 31081997834 的 tests job 已通过；统计为 446 total、445 passed、1 registered failure、0 errors、0 collection errors；baseline gate passed；未修改 pytest baseline。
 
 ### 保证等级数量概况
 
