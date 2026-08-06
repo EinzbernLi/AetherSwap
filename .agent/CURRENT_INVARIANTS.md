@@ -1,8 +1,8 @@
 # TASK-002 当前交易安全不变量
 
-> 文档状态：WIP
+> 文档状态：READY_FOR_GPT_REVIEW
 >
-> 本文档是 TASK-002 / Issue #4 的独立顶层执行初始索引，当前内容尚未验收，不得视为 READY、GPT 已审查或业务保证。
+> 本文档是 TASK-002 / Issue #4 的独立顶层执行记录，已完成自检并请求 GPT 验收；不表示已批准、合并或形成业务代码保证。
 
 ## 范围与基线
 
@@ -48,7 +48,7 @@
 
 ## 验收状态
 
-- 当前状态：WIP。
+- 当前状态：READY_FOR_GPT_REVIEW。
 - 12 项结论尚未完成。
 - 代码证据与测试证据尚未完成交叉验证。
 - 本文档不是旧子代理的交付物，也不引用旧子代理作为本次执行证明。
@@ -220,7 +220,7 @@ fetch_buff_steam_trade 和接收映射没有方向/发送方约束；accept_stea
 
 ## 阶段 A 状态
 
-不变量 1—4 已完成初步证据整理；不变量 5—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本文档仍为 WIP，不能据此宣称自检完成。
+不变量 1—4 已完成初步证据整理；不变量 5—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本阶段记录已完成；最终状态和验收请求见阶段 D。
 ## 阶段 B 不变量
 
 ### 5. 收货前库存基线如何建立
@@ -373,7 +373,7 @@ sync_sold._fill_assetid_from_inventory 仅比较 Purchase 名称与库存 market
 
 ## 阶段 B 状态
 
-不变量 5—8 已完成初步证据整理；不变量 9—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本文档仍为 WIP，不能据此宣称自检完成。
+不变量 5—8 已完成初步证据整理；不变量 9—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本阶段记录已完成；最终状态和验收请求见阶段 D。
 ## 阶段 C 不变量
 
 ### 9. steam_confirm.accept_all 的适用范围和风险
@@ -534,4 +534,82 @@ PARTIALLY_GUARANTEED：上述行为在各自已检查路径中分别存在，但
 
 ## 阶段 C 状态
 
-不变量 1—12 已完成初步证据整理；最终交叉验证、远端 diff、CI 状态和 GPT 验收尚未完成。本文档仍为 WIP，不能据此宣称自检完成。
+不变量 1—12 已完成初步证据整理；最终交叉验证、远端 diff、CI 状态和 GPT 验收尚未完成。本阶段记录已完成；最终状态和验收请求见阶段 D。
+## 阶段 D 最终交叉验证与交付记录
+
+- 文档状态：READY_FOR_GPT_REVIEW。
+- 远端目标：EinzbernLi/AetherSwap。
+- TASK / Issue：TASK-002 / #4。
+- base：integration/auto-buyer-offer；base SHA：ce3cfec5d21f5375852a6050582f59debc56048c。
+- head 分支：luna/TASK-002-current-invariants；最终完整 head SHA 以 Draft PR #9 的远端回读为准。
+- 唯一修改文件：.agent/CURRENT_INVARIANTS.md。
+- 未修改：app/**、buff/**、steam/**、web/**、tests/**、.github/**、requirements 文件、.agent/BASELINE.md、integration 分支和 main。
+- 未执行：真实 BUFF 或 Steam 购买、报价、接受报价、上架或其他写操作。
+
+### 12 项完成对照
+
+| 编号 | 状态 | 结论摘要 |
+| --- | --- | --- |
+| 1 | 已完成 | 付款后创建 Purchase；底层追加非幂等，绝对一条记录保证为部分保证。 |
+| 2 | 已完成 | 三类 BUFF 对账 ID 的单笔/批量映射、唯一性边界已记录。 |
+| 3 | 已完成 | checkout guard 写前持久化、未知结果 unresolved、启动阻塞和 fail-closed 已记录。 |
+| 4 | 已完成 | BUFF 卖家发货提醒与本地 Purchase 驱动关系已记录；Steam offer 方向/发送方仍有缺口。 |
+| 5 | 已完成 | 接受前库存 baseline 及失败关闭行为已记录。 |
+| 6 | 已完成 | 买家侧新增 assetid 的差集、去重、商品名分组和未覆盖归属风险已记录。 |
+| 7 | 已完成 | 当前 sell pipeline 精确 assetid ownership guard 已记录。 |
+| 8 | 已完成 | pending_receipt 的真实状态语义及 sync_sold 绕过风险已记录。 |
+| 9 | 已完成 | accept_all 全量接受、适用前提、缺少筛选和测试缺口已记录。 |
+| 10 | 已完成 | sync_sold 名称补 assetid 的错误归属风险已记录。 |
+| 11 | 已完成 | worker/pipeline/checkout 互斥边界及 worker 不承担首次发送已记录。 |
+| 12 | 已完成 | 后续自动报价必须保持的绝对约束、未知路径和未证明项已汇总。 |
+
+### 证据验证方法
+
+1. 以精确 integration SHA ce3cfec5d21f5375852a6050582f59debc56048c 读取源码和测试对象。
+2. 用 git cat-file 验证引用的源码文件真实存在。
+3. 用 git grep 验证引用的函数、类、字段和测试名称；发现并更正了一个测试名称拼写差异。
+4. 用 GitHub compare 验证 base 到 head 的文件列表只有 .agent/CURRENT_INVARIANTS.md。
+5. 回读 Draft PR #9，验证 base、head、Draft 状态和唯一文件。
+6. GitHub Actions 运行 31081881649 的 tests job 已通过；未修改 pytest baseline。
+
+### 保证等级数量概况
+
+以下为 12 个不变量中按章节出现的标签计数，标签可重叠：
+
+- CODE_GUARANTEED：5 项（2、3、5、6、7 的当前代码路径）。
+- TEST_COVERED：11 项（1—8、10—12 均有分散直接测试证据；9 无专门测试）。
+- NOT_GUARANTEED：4 项（8、9、10、12 明确包含未保证性质）。
+- PARTIALLY_GUARANTEED：4 项（1、4、8、11）。
+- UNKNOWN：明确存在于 accept_all 专门覆盖、统一收货终结入口、全局互斥以及 Steam offer 归属等未证明问题中。
+
+### 所有 UNKNOWN 或未确认事项
+
+- SteamConfirmer.accept_all 没有专门测试，不能证明生产 confirmation 集合已筛选。
+- 没有统一覆盖 Purchase、offer、inventory、listing 和售出生命周期的收货终结状态机。
+- receive_flow 没有被证明严格核对 sender、partner、报价方向和 SteamID。
+- 没有被证明排除接受自己发出的 outbound offer。
+- Purchase SteamID、当前凭据 SteamID、BUFF 绑定 SteamID、订单 buyer_steamid 的四方严格相等核对未在关键采购/收货路径完成。
+- sync_sold 可能按名称补 assetid 并清除 pending_receipt。
+- db_append_purchase 没有完整幂等 get-or-create 语义；bill_order_id 和 buff_sell_order_id 没有数据库唯一约束。
+- 未接入 checkout guard 的未来非幂等写入口不受本次代码证据覆盖。
+- worker 的异常循环不等于安全的非幂等写重试；未来首次报价发送职责仍禁止交给 worker。
+
+### 风险与回滚
+
+- 风险等级：HIGH。主要风险是 Steam offer 方向/发送方缺少严格校验、名称-only assetid 补全、全量 accept_all、pending_receipt 可能被维护路径清除，以及关键 SteamID 未完成四方核对。
+- 回滚方式：关闭或删除 Draft PR #9，或将 luna/TASK-002-current-invariants 回退到 base integration/auto-buyer-offer；本任务没有触碰业务代码、测试、依赖、CI、main 或 integration 分支。
+- 回滚不会撤销 Issue #4 的执行恢复记录；该记录是本次执行审计历史。
+
+### 顶层执行器自检
+
+- 当前执行方式：独立顶层执行任务；没有创建或调用下级代理。
+- 当前执行器身份：OWNER_ATTESTED。
+- 声明模型/思考等级：gpt-5.6-luna / high。
+- 平台实际元数据：未提供；不声称 PLATFORM_VERIFIED 或 CONFIG_VERIFIED。
+- 旧子代理仅作为失败历史记录，未被引用为本次执行证明。
+- 同一 Issue #4、同一分支和同一 Draft PR 全程复用。
+- 只修改了唯一允许的远端文档文件。
+- 未执行真实 BUFF/Steam 写操作。
+- 未启动 TASK-003，未批准或合并 PR。
+- Luna 自检：completed；交叉验证、CI、唯一文件和范围检查已完成。
+- 请求网页端 GPT 进行最终验收；READY_FOR_GPT_REVIEW 不表示已验收或已合并。
