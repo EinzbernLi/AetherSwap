@@ -550,7 +550,7 @@ PARTIALLY_GUARANTEED：上述行为在各自已检查路径中分别存在，但
 3. 用 git grep 验证引用的函数、类、字段和测试名称；发现并更正了一个测试名称拼写差异。
 4. 用 GitHub compare 验证 base 到 head 的文件列表只有 .agent/CURRENT_INVARIANTS.md。
 5. 回读 Draft PR #9，验证 base、head、Draft 状态和唯一文件。
-6. GitHub Actions 运行 31081997834 的 tests job 已通过；统计为 446 total、445 passed、1 registered failure、0 errors、0 collection errors；baseline gate passed；未修改 pytest baseline。
+6. GitHub Actions 的 tests check 由 PR #9 当前 head 触发；精确 run 与 446 total、445 passed、1 registered failure、0 errors、0 collection errors、baseline gate passed 的统计见 PR 正文；未修改 pytest baseline。
 
 ### 保证等级数量概况
 
