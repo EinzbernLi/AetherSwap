@@ -559,7 +559,7 @@ PARTIALLY_GUARANTEED：上述行为在各自已检查路径中分别存在，但
 - CODE_GUARANTEED：4 项（3、5、6、7 的当前代码路径）。
 - TEST_COVERED：11 项（1—8、10—12 均有分散直接测试证据；9 无专门测试）。
 - NOT_GUARANTEED：4 项（8、9、10、12 明确包含未保证性质）。
-- PARTIALLY_GUARANTEED：4 项（1、4、8、11）。
+- PARTIALLY_GUARANTEED：5 项（1、2、4、8、11）。
 - UNKNOWN：明确存在于 accept_all 专门覆盖、统一收货终结入口、全局互斥以及 Steam offer 归属等未证明问题中。
 
 ### 所有 UNKNOWN 或未确认事项
