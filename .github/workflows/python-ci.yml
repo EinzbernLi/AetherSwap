@@ -2,61 +2,61 @@ name: Python CI
 
 on:
   pull_request:
-    bran ches:
+    bran  ches:
       - integration/auto-buyer-offer
-   push:
+    push:
     branches:
-      - integration/auto- buyer-offer
-      - luna/TASK-001-ci-baseline 
+      - integration/aut o- buyer-offer
+      - luna/TASK-001-ci-basel ine 
 
 permissions:
   contents: read
 
 jobs:
-  test s:
+   test s:
     runs-on: ubuntu-latest
-    steps:
+    steps: 
        - uses: actions/checkout@v4
-      - uses: a ctions/setup-python@v5
+      - u ses: a ctions/setup-python@v5
         with:
-           python-version: '3.12'
-          cache: pip 
+            python-version: '3.12'
+          ca che: pip 
       - name: Install dependencies
-        r un: |
-          python -m pip install -r requ irements.txt
-          python -m pip install  pytest
-      - name: Run full test suite with  baseline gate
-        shell: bash
+         r un: |
+          python -m pip insta ll -r requ irements.txt
+          python -m p ip install  pytest
+      - name: Run full tes t suite with  baseline gate
+        shell: ba sh
         ru n: |
           set +e
-          python -m pyt est -q --junitxml=pytest.xml
-          test_s tatus=$?
+           python -m pyt est -q --junitxml=pytest.xml
+           test_s tatus=$?
           set -e
-          TEST_STAT US="$test_status" python - <<'PY'
+           TEST_STAT US="$test_status" python - < <'PY'
           i mport os
-          import sys
-          impor t xml.etree.ElementTree as ET
+          import s ys
+          impor t xml.etree.ElementTree as  ET
 
           expe cted = {
-              "tests.test_buff_verif ication::test_make_request_raises_verificatio n_required",
-          }
-          root = ET. parse("pytest.xml").getroot()
-          cases  = list(root.iter("testcase"))
+              "t ests.test_buff_verif ication::test_make_reque st_raises_verificatio n_required",
+           }
+          root = ET. parse("pytest.xml").ge troot()
+          cases  = list(root.iter("te stcase"))
           fail ed = set()
-          errors = set()
-           for case in cases:
-              node_name =  f"{case.attrib.get('classname', '')}::{case. attrib.get('name', '')}"
-              if cas e.find("failure") is not None:
-                   failed.add(node_name)
-              if ca se.find("error") is not None:
-                   errors.add(node_name)
-          test_statu s = int(os.environ["TEST_STATUS"])
-           print(f"Collected test cases: {len(cases)}")
-           print(f"Registered failures: {sorte d(expected)}")
-          print(f"Observed fai lures: {sorted(failed)}")
-          print(f"O bserved errors: {sorted(errors)}")
-           if errors or failed != expected or test_statu s not in (0, 1):
-              print("Baselin e gate failed: observed results differ from t he registered failure baseline.")
-               sys.exit(1)
-          print("Baseline gate  passed: observed failures exactly match the  registered baseline.")
-          PY 
+           errors = set()
+           for case in cases: 
+              node_name =  f"{case.attrib.ge t('classname', '')}::{case. attrib.get('name' , '')}"
+              if cas e.find("failure" ) is not None:
+                   failed.add( node_name)
+              if ca se.find("error ") is not None:
+                   errors.add (node_name)
+          test_statu s = int(os.e nviron["TEST_STATUS"])
+           print(f"Col lected test cases: {len(cases)}")
+            print(f"Registered failures: {sorte d(expecte d)}")
+          print(f"Observed fai lures: { sorted(failed)}")
+          print(f"O bserved  errors: {sorted(errors)}")
+           if err ors or failed != expected or test_statu s not  in (0, 1):
+              print("Baselin e ga te failed: observed results differ from t he  registered failure baseline.")
+                sys.exit(1)
+          print("Baseline gate   passed: observed failures exactly match the   registered baseline.")
+          PY  
