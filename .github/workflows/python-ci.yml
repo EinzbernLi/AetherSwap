@@ -39,26 +39,26 @@ jobs:
           import xml.etree.ElementTree as ET
 
           expected = {
-              "tests.test_buff_verification::test_make_request_raises_verification_required",
+              'tests.test_buff_verification::test_make_request_raises_verification_required',
           }
           expected_total = 446
-          root = ET.parse("pytest.xml").getroot()
-          cases = list(root.iter("testcase"))
+          root = ET.parse('pytest.xml').getroot()
+          cases = list(root.iter('testcase'))
           failed = set()
           errors = set()
           for case in cases:
               node_name = f"{case.attrib.get('classname', '')}::{case.attrib.get('name', '')}"
-              if case.find("failure") is not None:
+              if case.find('failure') is not None:
                   failed.add(node_name)
-              if case.find("error") is not None:
+              if case.find('error') is not None:
                   errors.add(node_name)
-          test_status = int(os.environ["TEST_STATUS"])
-          print(f"Collected test cases: {len(cases)}")
-          print(f"Registered failures: {sorted(expected)}")
-          print(f"Observed failures: {sorted(failed)}")
-          print(f"Observed errors: {sorted(errors)}")
+          test_status = int(os.environ['TEST_STATUS'])
+          print(f'Collected test cases: {len(cases)}')
+          print(f'Registered failures: {sorted(expected)}')
+          print(f'Observed failures: {sorted(failed)}')
+          print(f'Observed errors: {sorted(errors)}')
           if len(cases) != expected_total or errors or failed != expected or test_status not in (0, 1):
-              print("Baseline gate failed: observed results differ from the registered failure baseline.")
+              print('Baseline gate failed: observed results differ from the registered failure baseline.')
               sys.exit(1)
-          print("Baseline gate passed: observed failures exactly match the registered baseline.")
+          print('Baseline gate passed: observed failures exactly match the registered baseline.')
           PY
