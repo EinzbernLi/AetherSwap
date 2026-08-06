@@ -34,44 +34,7 @@ jobs:
           python -m pytest -q --junitxml=pytest.xml
           test_status=$?
           set -e
-          TEST_STATUS="$test_status" python - <<'PY'
-          import os
-          import sys
-          import xml.etree.ElementTree as ET
-
-          expected_total = 447
-          root = ET.parse('pytest.xml').getroot()
-          cases = list(root.iter('testcase'))
-          failed = []
-          errors = []
-          skipped = 0
-          for case in cases:
-              node_name = f"{case.attrib.get('classname', '')}::{case.attrib.get('name', '')}"
-              if case.find('failure') is not None:
-                  failed.append(node_name)
-              if case.find('error') is not None:
-                  errors.append(node_name)
-              if case.find('skipped') is not None:
-                  skipped += 1
-          test_status = int(os.environ['TEST_STATUS'])
-          collection_errors = int(root.attrib.get('errors', '0'))
-          passed = len(cases) - len(failed) - len(errors) - skipped
-          print(f'Collected test cases: {len(cases)}')
-          print(f'Passed: {passed}')
-          print(f'Failed: {len(failed)} ({sorted(failed)})')
-          print(f'Errors: {len(errors)} ({sorted(errors)})')
-          print(f'Collection errors: {collection_errors}')
-          print(f'Skipped: {skipped}')
-          print('Registered failures: 0')
-          if (
-              len(cases) != expected_total
-              or failed
-              or errors
-              or collection_errors
-              or skipped
-              or test_status != 0
-          ):
-              print('Baseline gate failed: the test suite is not strictly green.')
-              sys.exit(1)
-          print('Baseline gate passed: strict zero-failure result.')
-          PY
+          python .github/scripts/check_pytest_baseline.py \
+            --junit pytest.xml \
+            --pytest-status "$test_status" \
+            --minimum-tests 447
