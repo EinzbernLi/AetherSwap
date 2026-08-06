@@ -1,62 +1,61 @@
 name: Python CI
 
-on:
-  pull_request:
-    bran  ches:
+on:`n  workflow_dispatch:`n  pull_request:
+    bran   ches:
       - integration/auto-buyer-offer
-    push:
+     push:
     branches:
-      - integration/aut o- buyer-offer
-      - luna/TASK-001-ci-basel ine 
+      - integration/a ut o- buyer-offer
+      - luna/TASK-001-ci-ba sel ine 
 
 permissions:
   contents: read
 
-jobs:
+jobs :
    test s:
     runs-on: ubuntu-latest
-    steps: 
+    s teps: 
        - uses: actions/checkout@v4
-      - u ses: a ctions/setup-python@v5
-        with:
+       - u ses: a ctions/setup-python@v5
+         with:
             python-version: '3.12'
-          ca che: pip 
-      - name: Install dependencies
+           ca che: pip 
+      - name: Install depe ndencies
          r un: |
-          python -m pip insta ll -r requ irements.txt
-          python -m p ip install  pytest
-      - name: Run full tes t suite with  baseline gate
-        shell: ba sh
+          python -m  pip insta ll -r requ irements.txt
+           python -m p ip install  pytest
+      - name:  Run full tes t suite with  baseline gate
+         shell: ba sh
         ru n: |
-          set +e
-           python -m pyt est -q --junitxml=pytest.xml
+          se t +e
+           python -m pyt est -q --junitx ml=pytest.xml
            test_s tatus=$?
-          set -e
-           TEST_STAT US="$test_status" python - < <'PY'
+           set -e
+           TEST_STAT US="$test_s tatus" python - < <'PY'
           i mport os
-          import s ys
-          impor t xml.etree.ElementTree as  ET
+           import s ys
+          impor t xml.e tree.ElementTree as  ET
 
-          expe cted = {
-              "t ests.test_buff_verif ication::test_make_reque st_raises_verificatio n_required",
+          expe cted  = {
+              "t ests.test_buff_verif ica tion::test_make_reque st_raises_verificatio n _required",
            }
-          root = ET. parse("pytest.xml").ge troot()
-          cases  = list(root.iter("te stcase"))
-          fail ed = set()
+          root = ET.  parse("pytest.xml").ge troot()
+          cas es  = list(root.iter("te stcase"))
+           fail ed = set()
            errors = set()
-           for case in cases: 
-              node_name =  f"{case.attrib.ge t('classname', '')}::{case. attrib.get('name' , '')}"
-              if cas e.find("failure" ) is not None:
-                   failed.add( node_name)
-              if ca se.find("error ") is not None:
+            for case in cases: 
+              nod e_name =  f"{case.attrib.ge t('classname', '' )}::{case. attrib.get('name' , '')}"
+               if cas e.find("failure" ) is not None:
+                    failed.add( node_name)
+               if ca se.find("error ") is not Non e:
                    errors.add (node_name)
-          test_statu s = int(os.e nviron["TEST_STATUS"])
-           print(f"Col lected test cases: {len(cases)}")
-            print(f"Registered failures: {sorte d(expecte d)}")
-          print(f"Observed fai lures: { sorted(failed)}")
-          print(f"O bserved  errors: {sorted(errors)}")
-           if err ors or failed != expected or test_statu s not  in (0, 1):
-              print("Baselin e ga te failed: observed results differ from t he  registered failure baseline.")
-                sys.exit(1)
-          print("Baseline gate   passed: observed failures exactly match the   registered baseline.")
-          PY  
+           test_statu s = int(os.e nviron["TES T_STATUS"])
+           print(f"Col lected tes t cases: {len(cases)}")
+            print(f"R egistered failures: {sorte d(expecte d)}")
+           print(f"Observed fai lures: { sorted( failed)}")
+          print(f"O bserved  error s: {sorted(errors)}")
+           if err ors o r failed != expected or test_statu s not  in  (0, 1):
+              print("Baselin e ga te  failed: observed results differ from t he  re gistered failure baseline.")
+                 sys.exit(1)
+          print("Baseline gate    passed: observed failures exactly match the    registered baseline.")
+          PY   
