@@ -1,17 +1,17 @@
 ## 对应任务
 
-- TASK：
-- Issue：#2
+- TASK：TASK-XXX
+- Issue：Closes #XXX
 - base：integration/auto-buyer-offer
 - 本 PR 只关联/关闭一个任务；默认 Draft。
 
 ## 修改范围
 
-<!-- 实际修改的白名单文件 -->
+<!-- 实际修改的任务白名单文件 -->
 
 ## 未修改范围
 
-确认未修改：业务代码、现有业务测试、依赖、main、BUFF/Steam 实现、数据库迁移、库存和 worker 并发逻辑。
+确认未修改：任务禁止范围、无关业务代码、现有业务测试、依赖和 main。
 
 ## 行为变化
 
@@ -42,6 +42,22 @@
 
 ## 未解决问题
 
+## Luna 自检报告
+
+### 修改范围检查
+
+### 验收标准逐项核对
+
+### 测试命令和真实结果
+
+### 自查过程中发现并修复的问题
+
+<!-- 如未发现，明确填写“未发现”。 -->
+
+### 剩余风险
+
+### 未解决问题
+
 ## 交付声明
 
-我没有审查或合并自己的 PR；已按 [.agent/REVIEW_CHECKLIST.md](../.agent/REVIEW_CHECKLIST.md) 自检，等待独立审查和父代理验收。
+我没有审查或合并自己的 PR；已按 [.agent/REVIEW_CHECKLIST.md](../.agent/REVIEW_CHECKLIST.md) 自检，并按仓库所有者的风险策略等待所需审查和父代理验收。
