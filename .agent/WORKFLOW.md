@@ -15,4 +15,4 @@
 
 ## 交付
 
-按 [REVIEW_CHECKLIST.md](REVIEW_CHECKLIST.md) 检查范围、安全、测试和链接；执行匹配测试并如实报告。使用 [PR 模板](../.github/pull_request_template.md)，创建 Draft PR（base 固定、只关联一个任务）；Luna 不审查或合并自己的 PR。返回 SHA、PR URL、命令结果、风险和未解决问题，等待独立审查。
+按 [REVIEW_CHECKLIST.md](REVIEW_CHECKLIST.md) 检查范围、安全、测试和链接；执行匹配测试并如实报告。使用 [PR 模板](../.github/pull_request_template.md)，创建 Draft PR（base 固定、只关联一个任务）；Luna 不审查或合并自己的 PR。返回 SHA、PR URL、命令结果、风险和未解决问题，按仓库所有者规定的风险等级完成所需审查并等待父代理验收。
