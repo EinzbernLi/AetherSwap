@@ -40,23 +40,11 @@
 11. 后台 worker 与采购流水线之间的互斥关系
 12. 后续自动报价绝对不能破坏的行为
 
-## 证据索引（初始）
-
-| 文件路径 | 类或函数 | 关键字段 | 相关测试 | 初步涉及不变量 |
-|---|---|---|---|---|
-| 待从 `integration/auto-buyer-offer` 逐项读取 | 待核验 | 待核验 | 待核验 | 1–12 |
-
-## 验收状态
-
-- 当前状态：READY_FOR_GPT_REVIEW。
-- 12 项结论尚未完成。
-- 代码证据与测试证据尚未完成交叉验证。
-- 本文档不是旧子代理的交付物，也不引用旧子代理作为本次执行证明。
 ## 分析方法
 
-所有源码结论以 integration/auto-buyer-offer 的精确基线 SHA ce3cfec5d21f5375852a6050582f59debc56048c 为准，并通过远端文件引用与只读源码核对；测试证据只记录真实存在且名称匹配的测试，不把测试覆盖写成代码保证。阶段 A 完成不变量 1—4；阶段 B、C、D 尚未完成。
+所有源码结论以 integration/auto-buyer-offer 的精确基线 SHA ce3cfec5d21f5375852a6050582f59debc56048c 为准，并通过远端文件引用与只读源码核对；测试证据只记录真实存在且名称匹配的测试，不把测试覆盖写成代码保证。阶段 A—D 已完成，当前状态以阶段 D 最终交叉验证与交付记录为准。
 
-## 证据索引（阶段 A）
+## 证据索引
 
 | 文件路径 | 类或函数 | 关键字段/状态 | 相关测试 | 初步涉及不变量 |
 | --- | --- | --- | --- | --- |
@@ -112,7 +100,7 @@ db_append_purchase 不负责去重；单笔 helper 的 for range(num) 在传入�
 
 **保证等级**
 
-CODE_GUARANTEED：字段写入映射和数据库已存在的 buff_order_id 部分唯一索引由当前代码直接给出。TEST_COVERED：持久化往返及批量 ID 完整性有测试覆盖。对字段在所有外部 BUFF 响应形态下的语义，仍只按当前调用方使用方式解释。
+PARTIALLY_GUARANTEED：字段写入映射可由当前代码确认，但 init_db 只是尝试创建 buff_order_id 的非空部分唯一索引，创建异常会被直接吞掉；现有测试未验证索引实际存在或重复写入被拒绝。TEST_COVERED：持久化往返及批量 ID 完整性有测试覆盖。对字段在所有外部 BUFF 响应形态下的语义，仍只按当前调用方使用方式解释。
 
 **代码证据**
 
@@ -130,7 +118,7 @@ CODE_GUARANTEED：字段写入映射和数据库已存在的 buff_order_id 部�
 
 **当前缺口或风险**
 
-bill_order_id 既可能为空（单笔路径），也可能在批量路径按商品项存在；不能把它假设成单笔全局订单号。由于只有 buff_order_id 有部分唯一索引，错误映射或重复写入其他两个字段不会由数据库直接阻止。
+bill_order_id 既可能为空（单笔路径），也可能在批量路径按商品项存在；不能把它假设成单笔全局订单号。由于代码只尝试为 buff_order_id 创建部分唯一索引，且创建异常被吞掉，不能仅凭源码确认该约束实际存在；错误映射或重复写入其他两个字段不会由数据库直接阻止。
 
 **后续自动报价实现约束**
 
@@ -212,15 +200,12 @@ fetch_buff_steam_trade 和接收映射没有方向/发送方约束；accept_stea
 ## 阶段 A 额外安全核查
 
 - 一次购买是否可能产生两条 Purchase：正常流水线按一次付款确认追加一次，批量按匹配项追加；但 db_append_purchase 非幂等，绝对唯一性未被完整证明，结论为 PARTIALLY_GUARANTEED。
-- buff_order_id 是否有数据库唯一约束：有非空、非空字符串条件的部分唯一索引；不是对空值或其他 ID 的全局唯一约束。
+- buff_order_id 是否有数据库唯一约束：init_db 尝试创建只针对非空、非空字符串的部分唯一索引，但创建异常被直接吞掉；现有测试未验证索引实际存在或重复写入被拒绝，因此不能把它视为完整唯一性保证。
 - bill_order_id 是否可能是单笔或批量形态：是；单笔记录当前可为空，批量记录按项保存并由 batch_id 关联。
 - checkout guard 是否持久化并 fail-closed：已看到持久化 journal、写前保护及非法 journal fail-closed；仅适用于已接入 guard 的路径，结论为 CODE_GUARANTEED + TEST_COVERED（范围有限）。
 - 写结果未知后是否存在自动重试路径：对 BUFF 买单、卖家提醒和 Steam 接收 POST，未发现自动重发；接收侧会做库存轮询/对账，不等于重发。未接入 guard 的未来路径仍 NOT_GUARANTEED。
 - buyer-send 与 seller-send 当前是否真正区分：BUFF 买单创建与 ask_seller_to_send 是不同 API；未发现 buyer 侧 Steam outbound send 实现，Steam 接收流程也未做方向核对，完整区分仍 NOT_GUARANTEED。
 
-## 阶段 A 状态
-
-不变量 1—4 已完成初步证据整理；不变量 5—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本阶段记录已完成；最终状态和验收请求见阶段 D。
 ## 阶段 B 不变量
 
 ### 5. 收货前库存基线如何建立
@@ -358,7 +343,7 @@ sync_sold._fill_assetid_from_inventory 仅比较 Purchase 名称与库存 market
 
 **后续自动报价实现约束**
 
-- 必须把 pending_receipt=True 解释为尚未完成可验证收货，禁止自动报价、自动上架和售出确认。
+- 必须把 pending_receipt=True 解释为尚未完成可验证收货；它必须阻止自动上架、售出确认和所有权归属，但在 Purchase 已持久化、方向/SteamID 核验和 durable intent 门禁满足时，允许发送用于完成交付的首次报价。\n- 首次报价发送不得清除 pending_receipt；只有精确 assetid 收货终结才能清除。
 - 必须只有统一收货终结流程在验证 baseline、新资产、商品 ID、账户和报价方向后，才能清除 pending_receipt。
 - 禁止 sync_sold 或任何修复流程仅按饰品名称为自动交易清除 pending_receipt。
 - 无法证明 assetid 归属时必须保持 pending_receipt 并进入人工对账。
@@ -371,9 +356,6 @@ sync_sold._fill_assetid_from_inventory 仅比较 Purchase 名称与库存 market
 - 是否存在统一的收货终结入口：try_receive_once 是主收货入口，但没有覆盖 sync_sold 的状态变更，也没有端到端统一终结测试，结论为 UNKNOWN。
 - 自动上架是否严格使用 assetid：sell pipeline 的已检查路径是；对绕过该 pipeline 的未来调用方不能推断，结论为 CODE_GUARANTEED（当前路径）而非全局保证。
 
-## 阶段 B 状态
-
-不变量 5—8 已完成初步证据整理；不变量 9—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本阶段记录已完成；最终状态和验收请求见阶段 D。
 ## 阶段 C 不变量
 
 ### 9. steam_confirm.accept_all 的适用范围和风险
@@ -527,14 +509,11 @@ PARTIALLY_GUARANTEED：上述行为在各自已检查路径中分别存在，但
 - checkout guard 是否持久化并 fail-closed：已实现且有 guard/integration 测试，但仅保护接入路径；不能扩展成所有未来写 API 的全局保证。
 - 写结果未知后是否存在自动重试路径：未发现 BUFF 买单、卖家提醒或 Steam 接受请求的盲目自动重发；接收侧库存轮询是对账，不是重发。Steam listing 的特定“previous action completes”一次处理不改变此结论。
 - bill_order_id 是否可能是单笔或批量形态：单笔当前可为空，批量按 item 保存并由 batch_id 关联；不能假设全局唯一。
-- buff_order_id 是否有数据库唯一约束：有非空部分唯一索引；bill_order_id 和 buff_sell_order_id 没有对应数据库唯一约束。
+- buff_order_id 是否有数据库唯一约束：init_db 尝试创建非空部分唯一索引，但创建异常被直接吞掉；bill_order_id 和 buff_sell_order_id 没有对应数据库唯一约束。
 - 一次购买是否可能产生两条 Purchase：常规控制流限制为确认后追加，但底层追加非幂等，绝对唯一性仍 PARTIALLY_GUARANTEED。
 - pending_receipt 是否会被 sell pipeline 或 sync_sold 处理：sell pipeline 读取并拒绝；sync_sold 会处理缺失 assetid 并可能清除它，构成已识别风险。
 - 是否存在统一收货终结入口：没有被代码和测试证明，标为 UNKNOWN。
 
-## 阶段 C 状态
-
-不变量 1—12 已完成初步证据整理；最终交叉验证、远端 diff、CI 状态和 GPT 验收尚未完成。本阶段记录已完成；最终状态和验收请求见阶段 D。
 ## 阶段 D 最终交叉验证与交付记录
 
 - 文档状态：READY_FOR_GPT_REVIEW。
@@ -576,7 +555,7 @@ PARTIALLY_GUARANTEED：上述行为在各自已检查路径中分别存在，但
 
 以下为 12 个不变量中按章节出现的标签计数，标签可重叠：
 
-- CODE_GUARANTEED：5 项（2、3、5、6、7 的当前代码路径）。
+- CODE_GUARANTEED：4 项（3、5、6、7 的当前代码路径）。
 - TEST_COVERED：11 项（1—8、10—12 均有分散直接测试证据；9 无专门测试）。
 - NOT_GUARANTEED：4 项（8、9、10、12 明确包含未保证性质）。
 - PARTIALLY_GUARANTEED：4 项（1、4、8、11）。
