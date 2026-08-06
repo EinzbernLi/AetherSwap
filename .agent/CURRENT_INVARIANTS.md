@@ -374,3 +374,164 @@ sync_sold._fill_assetid_from_inventory 仅比较 Purchase 名称与库存 market
 ## 阶段 B 状态
 
 不变量 5—8 已完成初步证据整理；不变量 9—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本文档仍为 WIP，不能据此宣称自检完成。
+## 阶段 C 不变量
+
+### 9. steam_confirm.accept_all 的适用范围和风险
+
+**结论**
+
+SteamConfirmer.accept_all 接受传入的全部 confirmations，不按 listing、交易、订单、assetid 或来源类型筛选；auto_confirm_once 会将 get_confirmations 的全部结果交给它。sell pipeline 在上架后可调用自动确认。因此当前方法只适合“调用方已经完成严格筛选”的前提，代码本身没有提供该筛选；没有发现针对 accept_all 的直接安全测试。
+
+**保证等级**
+
+NOT_GUARANTEED：方法名和控制流明确是全量接受，当前代码不能证明传入集合只包含目标上架确认。UNKNOWN：未发现 accept_all 的专门测试，无法证明生产调用方永远传入安全子集。
+
+**代码证据**
+
+- 文件：app/steam_confirm.py；app/sell_pipeline.py
+- 类/函数：SteamConfirmer.accept_all、auto_confirm_once、_auto_confirm_listings
+- 字段或状态：confirmations、listing、assetid、confirmation type/order 元数据（当前 accept_all 未使用）
+- 关键控制流：auto_confirm_once 获取全部 confirmations 后直接调用 accept_all；accept_all 对每个传入 confirmation 执行接受，没有目标类型、assetid 或订单白名单判断；sell pipeline 在上架流程后可触发自动确认。
+
+**测试证据**
+
+- 测试文件：未发现针对 SteamConfirmer.accept_all 或 auto_confirm_once 的直接测试；tests/test_sell_pipeline_ownership_guard.py 只覆盖上架授权，不覆盖 Steam confirmation 接受范围
+- 测试函数：没有可引用的 accept_all 专门测试
+- 实际覆盖内容：现有 sell ownership 测试证明当前 assetid 上架授权，不证明 confirmation 筛选。
+- 未覆盖内容：全量 confirmation、非上架 confirmation、错误账户和错误 assetid 的拒绝行为均未覆盖。
+
+**当前缺口或风险**
+
+若确认列表包含非目标或非上架确认，accept_all 没有本地防线。自动确认还可能与其他 Steam 操作并行；当前不能将“上架计划按 assetid 正确”推导为“确认操作按 assetid 正确”。
+
+**后续自动报价实现约束**
+
+- 必须按确认类型、目标 assetid、订单/上架上下文和账户 SteamID 建立白名单后，才能接受单个确认。
+- 必须禁止使用未筛选的 accept_all 承担自动报价、收货或其他 confirmation。
+- 必须将确认结果与对应本地 Purchase/Listing 绑定并持久化；不确定结果必须停止自动写入。
+- 在完成专门的 confirmation 安全测试前，禁止扩大自动确认范围。
+
+### 10. sync_sold 按名称补 assetid 的风险
+
+**结论**
+
+sync_sold 的 _fill_assetid_from_inventory 对缺失 assetid 的 Purchase，仅用本地名称与库存 market_hash_name/name 相等来找候选，选择第一个未使用 assetid，并清除 pending_receipt。它没有使用收货 baseline、goods_id、报价 sender/partner、SteamID 或交易 offer 唯一标识；因此同名资产可能被错误关联，并被后续售出同步或上架流程当作本地购买资产。
+
+**保证等级**
+
+NOT_GUARANTEED：当前代码直接存在名称-only 关联路径，不能保证资产归属。TEST_COVERED：该路径的名称匹配行为有 repair 测试，但测试覆盖的是现状而不是安全保证。
+
+**代码证据**
+
+- 文件：app/sync_sold.py；app/sell_pipeline.py
+- 类/函数：_fill_assetid_from_inventory、run_sync_sold_from_history、_find_buy_record
+- 字段或状态：Purchase.name、assetid、pending_receipt、market_hash_name、name、sold_at、listing
+- 关键控制流：对缺失 assetid 的记录遍历库存，名称相等即选第一个未使用资产；写入 assetid 并设 pending_receipt=False；随后按 assetid 处理 sold history。此路径不要求目标报价或商品 ID 证据。
+
+**测试证据**
+
+- 测试文件：tests/test_repair_error_records.py；tests/test_sell_pipeline_ownership_guard.py
+- 测试函数：test_rebuild_uses_exact_name_matching_for_missing_assetid、test_rebuild_keeps_pending_receipt_when_not_seen_anywhere、test_historical_sold_same_name_does_not_authorize_different_asset
+- 实际覆盖内容：repair 名称匹配的现有行为；未发现资产时保留 pending_receipt；sell pipeline 的当前精确 assetid guard 拒绝历史同名错误资产。
+- 未覆盖内容：没有证明 sync_sold 的名称补全不会选错同名资产；没有测试将 sync_sold 与实际收货报价、SteamID 和 goods_id 联合核验。
+
+**当前缺口或风险**
+
+该路径会削弱 pending_receipt 的收货语义，形成“名称补 assetid 后可售”的风险链。不能把 repair 测试中的“使用名称匹配”解释成 ownership 保证。
+
+**后续自动报价实现约束**
+
+- 必须禁止 sync_sold 或等价维护路径仅按名称补 assetid、清除 pending_receipt 或授权后续自动交易。
+- 必须使用精确 assetid 与可验证收货证据；无法证明时保持 pending_receipt。
+- 必须把名称-only 结果标为 UNKNOWN/人工对账，不得作为自动报价前置条件。
+
+### 11. 后台 worker 与采购流水线之间的互斥关系
+
+**结论**
+
+采购流水线使用 auth、BUFF activity 和 pipeline 生命周期锁，并在未解决 checkout、运行中 pipeline 或凭据不安全时阻止相关活动。receive_worker 在安全检查后持有 auth/activity 锁，处理 pending_receipt 收货；listing_check_worker 处理已有 listing/assetid 的售出和维护。worker 不负责首次购买，也不调用 ask_seller_to_send；首次卖家发货提醒由采购路径在记录落库后可选执行。该互斥能阻止当前已接入的并发活动，但不能证明所有未来 Steam/BUFF 写入口都加入同一锁。
+
+**保证等级**
+
+PARTIALLY_GUARANTEED：当前 worker 与 pipeline 的锁和门禁明确，首次报价职责分离明确；全系统互斥因外部/未来入口范围未证明而不是全局 CODE_GUARANTEED。TEST_COVERED：重复 pipeline、checkout 期间后台读取和锁相关路径有测试。
+
+**代码证据**
+
+- 文件：app/services/workers.py；app/pipeline.py；app/services/buff_checkout_guard.py；buff/buyer.py
+- 类/函数：receive_worker、listing_check_worker、_buff_background_request_is_safe、_session_keepalive_is_safe、exclusive_pipeline_maintenance、start_pipeline、ask_seller_to_send
+- 字段或状态：pipeline running、unresolved checkout、pending_receipt、listing、auth/activity locks、buff_activity_guard
+- 关键控制流：worker 在请求前检查 shutdown/unresolved/running/auth 状态并持有共享锁；pipeline 启动和维护使用互斥锁；worker 只做收货、库存/售出、会话维护，不做首次购买或首次卖家提醒。
+
+**测试证据**
+
+- 测试文件：tests/test_pipeline_lock.py；tests/test_buff_checkout_integration.py；tests/test_buff_checkout_guard.py
+- 测试函数：test_start_pipeline_rejects_duplicate_running_pipeline、test_start_pipeline_allows_restart_after_thread_exits、test_durable_guard_freezes_credentials_and_background_reads、test_running_pipeline_freezes_manual_credential_replacement、test_unresolved_checkout_blocks_restart_until_explicit_ack
+- 实际覆盖内容：重复 pipeline 被拒绝；线程退出后可按规则重启；durable guard 冻结后台读取和凭据替换；未解决 checkout 阻止重启。
+- 未覆盖内容：没有覆盖所有 worker 与所有未来写入口的全局锁审计；没有测试 worker 发送首次报价，因为当前实现不承担该职责。
+
+**当前缺口或风险**
+
+后台循环的异常 sleep/recovery 不能被解释为非幂等写请求重试。未来若把首次报价放入 worker，容易绕过当前“付款落库后、购买下一件前”的时序约束；现有代码没有为此提供安全保证。
+
+**后续自动报价实现约束**
+
+- 必须继续由受 guard 和 pipeline 生命周期控制的采购流程承担首次报价时序；worker 禁止承担首次发送。
+- 必须在 auth、BUFF activity、pipeline 和 checkout 状态之间保持同一互斥规则。
+- 必须禁止后台 worker 在 unresolved 或未知结果时自动重发非幂等请求。
+- 新增写入口必须先纳入统一锁和 durable guard，并补充并发测试后才能启用。
+
+### 12. 后续自动报价绝对不能破坏的行为
+
+**结论**
+
+后续自动报价不能破坏以下现有安全行为：非幂等写请求写前建立 durable guard；结果未知进入 unresolved 并停止继续采购；Purchase 及三类 BUFF 对账 ID 按现有映射持久化；收货前保持 pending_receipt；收货使用库存 baseline 和新增 assetid；自动上架使用精确 assetid；sell pipeline 排除待收货和非当前持有资产；worker 不发送首次报价；不使用未筛选的 accept_all；不以名称作为所有权证明。当前代码对 Steam 报价方向、sender/partner 和关键 SteamID 严格相等仍有缺口，因此这些是必须新增的约束而不是当前已实现保证。
+
+**保证等级**
+
+PARTIALLY_GUARANTEED：上述行为在各自已检查路径中分别存在，但没有一个统一状态机覆盖全部 Purchase、BUFF、Steam offer、inventory 和 listing 生命周期。TEST_COVERED：采购未知结果、收货映射、上架 ownership、checkout guard 和锁有分散测试。NOT_GUARANTEED：SteamID 严格四方核对、outbound 自发报价排除、统一收货终结入口和 accept_all 范围均未被当前测试证明。
+
+**代码证据**
+
+- 文件：app/pipeline_steps.py；app/services/buff_checkout_guard.py；app/receive_flow.py；app/sell_pipeline.py；app/sync_sold.py；app/steam_confirm.py；app/services/workers.py；app/database.py
+- 类/函数：_try_single_buy、_do_wait_payment_and_append、try_receive_once、_find_buy_record、_fill_assetid_from_inventory、SteamConfirmer.accept_all、receive_worker、db_append_purchase
+- 字段或状态：unresolved、pending_receipt、assetid、buff_order_id、bill_order_id、buff_sell_order_id、listing、sold_at、SteamID 相关会话字段
+- 关键控制流：购买写前 journal 和未知终止；收货 baseline 差集；精确 assetid 上架 guard；worker/pipeline 互斥；名称-only sync_sold 和全量 accept_all 是当前需限制的反例路径。
+
+**测试证据**
+
+- 测试文件：tests/test_buff_checkout_guard.py；tests/test_buff_checkout_integration.py；tests/test_buff_purchase_flow_safety.py；tests/test_buff_receive_mapping_safety.py；tests/test_sell_pipeline_ownership_guard.py；tests/test_pipeline_lock.py
+- 测试函数：分别覆盖 durable guard、未知结果终止、批量 ID、库存差集、pending_receipt、精确 assetid ownership 和 pipeline 互斥的已列测试集合。
+- 实际覆盖内容：分模块验证当前安全边界和失败关闭行为。
+- 未覆盖内容：没有全流程自动报价测试；没有覆盖接受自己 outbound offer、seller sender/partner、四方 SteamID 严格相等或全量 confirmation 筛选。
+
+**当前缺口或风险**
+
+当前系统并不存在一条被测试证明的“购买—付款—卖家报价—Steam 收货—精确资产—上架—售出”统一终结链。尤其 sync_sold 名称补全、receive_flow 方向缺失、accept_all 全量接受和 SteamID 关键流程未严格相等核对，均不能被未来实现忽略。
+
+**后续自动报价实现约束**
+
+- 必须把报价动作绑定到唯一、已持久化且未终结的 Purchase 和 durable intent。
+- 必须在发送前严格相等核对 Purchase SteamID、当前凭据 SteamID、BUFF 绑定 SteamID、订单 buyer SteamID，并核对 seller/buyer 方向。
+- 必须禁止未知结果自动重试、禁止接受自己发出的 outbound offer、禁止按名称授权 assetid、禁止 accept_all 未筛选 confirmations。
+- 必须在可验证收货终结并清除 pending_receipt 后，才允许精确 assetid 上架；任何不确定性都进入人工对账/阻塞。
+- 必须保持 worker 只做恢复和对账，不承担首次报价发送。
+
+## 阶段 C 额外安全核查
+
+- buyer-send 与 seller-send 当前是否真正区分：BUFF 的 lock_and_get_pay_url（买单创建）与 ask_seller_to_send（卖家发货提醒）是不同调用；未发现买家侧 Steam outbound send；但 receive_flow 未检查方向，因此“真正安全区分”仍 NOT_GUARANTEED。
+- 是否存在接受自己发出的 outbound offer 的风险：存在未被当前代码排除的风险。fetch_buff_steam_trade 主要按 state、tradeofferid 和物品存在筛选，没有 sender/partner/SteamID 方向核对；没有专门测试，结论为 NOT_GUARANTEED。
+- worker 是否承担首次报价发送：当前没有。worker 处理收货、库存/售出、listing 和会话维护；首次买单/卖家提醒在采购流水线。未来不得改变此职责。
+- 是否存在统一的收货终结入口：try_receive_once 是主入口，但 sync_sold 可独立补 assetid 并清 pending_receipt；没有覆盖全链路的统一终结入口，结论为 UNKNOWN。
+- SteamID 是否在关键流程进行严格相等核对：部分账号模块有相等检查，但 BuffBuyer.verify_session 采用 BUFF 返回的绑定 steamid，未与当前凭据 SteamID、Purchase SteamID 和订单 buyer_steamid 做四方严格相等核对；receive_flow 也未以 SteamID 匹配，结论为 NOT_GUARANTEED。
+- 是否存在 assetid 仅按名称关联路径：存在，app/sync_sold.py 的 _fill_assetid_from_inventory 是明确路径；主 receive_flow 也在 goods_id 不可用时允许唯一名称候选。
+- checkout guard 是否持久化并 fail-closed：已实现且有 guard/integration 测试，但仅保护接入路径；不能扩展成所有未来写 API 的全局保证。
+- 写结果未知后是否存在自动重试路径：未发现 BUFF 买单、卖家提醒或 Steam 接受请求的盲目自动重发；接收侧库存轮询是对账，不是重发。Steam listing 的特定“previous action completes”一次处理不改变此结论。
+- bill_order_id 是否可能是单笔或批量形态：单笔当前可为空，批量按 item 保存并由 batch_id 关联；不能假设全局唯一。
+- buff_order_id 是否有数据库唯一约束：有非空部分唯一索引；bill_order_id 和 buff_sell_order_id 没有对应数据库唯一约束。
+- 一次购买是否可能产生两条 Purchase：常规控制流限制为确认后追加，但底层追加非幂等，绝对唯一性仍 PARTIALLY_GUARANTEED。
+- pending_receipt 是否会被 sell pipeline 或 sync_sold 处理：sell pipeline 读取并拒绝；sync_sold 会处理缺失 assetid 并可能清除它，构成已识别风险。
+- 是否存在统一收货终结入口：没有被代码和测试证明，标为 UNKNOWN。
+
+## 阶段 C 状态
+
+不变量 1—12 已完成初步证据整理；最终交叉验证、远端 diff、CI 状态和 GPT 验收尚未完成。本文档仍为 WIP，不能据此宣称自检完成。
