@@ -221,3 +221,156 @@ fetch_buff_steam_trade 和接收映射没有方向/发送方约束；accept_stea
 ## 阶段 A 状态
 
 不变量 1—4 已完成初步证据整理；不变量 5—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本文档仍为 WIP，不能据此宣称自检完成。
+## 阶段 B 不变量
+
+### 5. 收货前库存基线如何建立
+
+**结论**
+
+try_receive_once 在接受 Steam 报价前要求读取当前收件方库存；对每个物品记录收货前 assetid 基线，并在后续轮询中排除基线及已使用 assetid。预收货快照失败时不会接受报价。该基线是一次收货尝试的本地时间点快照，不是跨重启、跨报价或跨账户的持久化所有权证明。
+
+**保证等级**
+
+CODE_GUARANTEED：当前接收控制流在 accept 前取得快照，并按基线过滤新增资产。TEST_COVERED：快照失败不接受、旧同名资产排除和多次轮询等待均有测试。跨进程或快照之后又发生的其他库存变化未被此路径完全证明。
+
+**代码证据**
+
+- 文件：app/receive_flow.py
+- 类/函数：try_receive_once、fetch_buff_steam_trade、accept_steam_trade_offer
+- 字段或状态：pending_receipt、assetid、market_hash_name、baseline_assetids、already_used
+- 关键控制流：先加载 pending Purchase 和远程报价，再读取收件方库存形成 baseline；baseline 缺失或读取失败立即返回；接受成功或结果未知后轮询库存，并只选择不在 baseline/已使用集合中的资产。
+
+**测试证据**
+
+- 测试文件：tests/test_buff_receive_mapping_safety.py
+- 测试函数：test_failed_pre_accept_inventory_snapshot_leaves_offer_unaccepted、test_inventory_poll_waits_for_all_new_assets_and_excludes_old_same_name、test_partial_inventory_visibility_never_persists_seller_assetid、test_unknown_accept_result_is_reconciled_from_inventory
+- 实际覆盖内容：预接受快照失败保持报价未接受；旧同名资产被排除；部分可见库存不提前落库卖家资产 ID；接受结果未知时通过库存对账。
+- 未覆盖内容：没有证明库存快照和 Steam 报价属于同一严格核验的账户；没有跨重启持久化 baseline；没有方向或 sender/partner 校验。
+
+**当前缺口或风险**
+
+库存基线只能说明“本次扫描之前未见的 assetid”，不能单独说明新增资产一定来自目标卖家报价。若账户收到其他并行资产，代码依赖商品名和数量筛选，仍存在归属不确定性。
+
+**后续自动报价实现约束**
+
+- 必须在任何自动收货或后续报价动作前建立并成功读取收货方库存基线。
+- 必须排除基线资产、已分配资产和与目标商品不一致的资产。
+- 必须把快照失败、部分可见和结果未知视为未终结，不得接受后继续购买。
+- 禁止把一次性内存 baseline 当作跨账户或跨报价的所有权证明。
+
+### 6. 买家侧新增 assetid 如何识别
+
+**结论**
+
+当前接收逻辑把收货后库存中不在收货前 baseline、也不在本次已使用集合中的资产视为候选，并按精确 market_hash_name 分组，等待达到目标数量后将新 assetid 写回本地 Purchase，设置 pending_receipt=False。卖家报价中的资产 ID不会直接写入买家记录。
+
+**保证等级**
+
+CODE_GUARANTEED：新增候选的差集、去重、名称分组和按数量等待由 try_receive_once 明确实现。TEST_COVERED：新旧同名资产排除、部分可见和完整数量等待有测试。将新增资产归因于特定卖家报价仍为 PARTIALLY_GUARANTEED，因为代码没有报价发送方/SteamID 方向校验。
+
+**代码证据**
+
+- 文件：app/receive_flow.py
+- 类/函数：_match_purchase_for_item、try_receive_once
+- 字段或状态：assetid、pending_receipt、goods_id、market_hash_name、baseline_assetids、already_used
+- 关键控制流：报价物品先映射到本地 pending Purchase；库存差集按 market_hash_name 聚合；只有数量足够且每个目标记录均可分配时，才逐项写入收件方新 assetid，并将 pending_receipt 置为 false。
+
+**测试证据**
+
+- 测试文件：tests/test_buff_receive_mapping_safety.py
+- 测试函数：test_exact_goods_id_match_beats_older_same_name_fallback、test_ambiguous_name_only_match_is_rejected、test_partial_inventory_visibility_never_persists_seller_assetid、test_inventory_poll_waits_for_all_new_assets_and_excludes_old_same_name
+- 实际覆盖内容：goods ID 优先于较旧的名称候选；名称歧义不接受；部分可见不会保存错误 assetid；轮询等待所有新资产并排除旧资产。
+- 未覆盖内容：没有 sender/partner/SteamID 严格匹配测试；没有证明并行交易或同名外部入账不能被归因到本 Purchase。
+
+**当前缺口或风险**
+
+“新增”是相对本次本地快照的差集，不是 Steam 交易流水中带有唯一交易归属的证明。goods_id 不可用时仍允许唯一名称候选；唯一名称可降低歧义但不能替代账户和报价方向校验。
+
+**后续自动报价实现约束**
+
+- 必须只使用收件方库存中相对可靠 baseline 的新 assetid，并保留逐项分配记录。
+- 必须优先使用经过核验的 goods_id，名称匹配只能在明确唯一且有额外归属证据时使用。
+- 必须禁止直接采用卖方物品清单中的 assetid 作为买家所有权。
+- 在 sender、partner、SteamID 和报价方向未严格核验时，禁止把新增资产用于自动上架或下一笔报价。
+
+### 7. 自动上架为何必须使用精确 assetid
+
+**结论**
+
+sell pipeline 以精确 assetid 查找本地 Purchase 和当前 Steam 库存；缺失、已售、pending_receipt、已上架或 assetid 不再是当前持有资产时会拒绝授权。listing plan 也按精确 assetid 组装并提交 Steam 上架请求。商品名称不是所有权标识。
+
+**保证等级**
+
+CODE_GUARANTEED：当前授权和请求计划均以 assetid 为主键式匹配，并明确拒绝 pending_receipt 和缺失资产。TEST_COVERED：同名错误资产、历史售出资产、当前资产和缺失 assetid 均有安全测试。其他调用方若绕过 sell pipeline 未被这些测试覆盖。
+
+**代码证据**
+
+- 文件：app/sell_pipeline.py
+- 类/函数：_find_buy_record、_build_listing_plan、_submit_listings、_run_sell_phase_impl
+- 字段或状态：assetid、pending_receipt、listing、listing_status、sold_at、sale_price、market_hash_name
+- 关键控制流：_find_buy_record 只按精确 assetid 查 Purchase，并拒绝待收货/已售/已上架；_build_listing_plan 在定价前检查当前库存中同一 assetid；_submit_listings 使用该精确 assetid 发起上架。
+
+**测试证据**
+
+- 测试文件：tests/test_sell_pipeline_ownership_guard.py
+- 测试函数：test_historical_sold_same_name_does_not_authorize_different_asset、test_unsold_same_name_does_not_authorize_different_asset、test_exact_asset_must_still_be_a_current_holding、test_exact_current_asset_is_authorized、test_missing_inventory_assetid_fails_closed、test_listing_plan_never_prices_or_lists_same_name_personal_item
+- 实际覆盖内容：历史同名、当前未购买同名、已不持有的精确资产和缺失 assetid 均不能授权；当前精确资产可授权；计划不会给同名个人物品定价或上架。
+- 未覆盖内容：没有证明所有未来上架入口都调用同一 ownership guard；Steam API 已提交后的外部状态不由本地测试完全证明。
+
+**当前缺口或风险**
+
+卖出请求存在针对 Steam 特定“上一操作完成中”消息的一次特殊重试；这不是 BUFF checkout 的通用重试保证。若其他代码路径只按名称处理库存，仍可能绕过 sell pipeline 的精确所有权保护。
+
+**后续自动报价实现约束**
+
+- 必须使用精确 assetid 进行所有授权、定价、上架和售出对账。
+- 必须在请求前确认该 assetid 仍是当前收件账户持有，且本地 Purchase 未售出、未上架、未 pending_receipt。
+- 禁止按饰品名称替代 assetid，也禁止因同名历史记录授权当前不同资产。
+- 禁止把 Steam 上架请求的特殊恢复重试扩展成未知 BUFF/报价写入的自动重试。
+
+### 8. pending_receipt 的当前真实语义
+
+**结论**
+
+当前代码在购买记录落库时将 pending_receipt 设为 true，表示付款/购买事实已记录但收件方尚未被本地库存差集证明已收到对应资产。receive_flow 成功完成新增 assetid 分配后才设为 false。sell pipeline 明确拒绝 pending_receipt 记录；但 sync_sold 的名称补 assetid 路径可以把缺失 assetid 的记录直接补回并清除 pending_receipt，因而该状态不是全系统不可绕过的收货终结门。
+
+**保证等级**
+
+PARTIALLY_GUARANTEED：主接收路径的状态转换和 sell pipeline 拒绝明确。NOT_GUARANTEED：sync_sold 的名称补全可能绕过基于收货 baseline 的证明。TEST_COVERED：接收映射和 sell ownership guard 有直接测试；没有证明所有后台维护路径均保持 pending_receipt 语义。
+
+**代码证据**
+
+- 文件：app/pipeline_steps.py；app/receive_flow.py；app/sell_pipeline.py；app/sync_sold.py
+- 类/函数：_do_wait_payment_and_append、_do_batch_wait_finalize_and_append、try_receive_once、_find_buy_record、_fill_assetid_from_inventory、run_sync_sold_from_history
+- 字段或状态：pending_receipt、assetid、listing、listing_status、sold_at、market_hash_name
+- 关键控制流：购买追加时 pending_receipt=True；收货库存差集成功分配后改为 false；_find_buy_record 对 pending_receipt 直接拒绝；_fill_assetid_from_inventory 对缺失 assetid 的 Purchase 按名称找库存第一项并写入 assetid、listing=False、listing_status=None、pending_receipt=False。
+
+**测试证据**
+
+- 测试文件：tests/test_buff_receive_mapping_safety.py；tests/test_sell_pipeline_ownership_guard.py；tests/test_repair_error_records.py
+- 测试函数：test_partial_inventory_visibility_never_persists_seller_assetid、test_inventory_poll_waits_for_all_new_assets_and_excludes_old_same_name、test_missing_inventory_assetid_fails_closed、test_rebuild_keeps_pending_receipt_when_not_seen_anywhere、test_rebuild_uses_exact_name_matching_for_missing_assetid
+- 实际覆盖内容：主接收路径不保存卖家 assetid；不足数量时继续等待；sell pipeline 对缺失 assetid fail-closed；repair 在未发现资产时保留 pending_receipt；repair 的名称匹配行为被单独测试。
+- 未覆盖内容：没有证明 sync_sold 名称补全不会把错误的同名资产标成已收货；没有统一的“收货终结”事务或跨模块状态机测试。
+
+**当前缺口或风险**
+
+sync_sold._fill_assetid_from_inventory 仅比较 Purchase 名称与库存 market_hash_name/name，并取第一个未使用 assetid；同名资产可能被错误关联。pending_receipt 因而可能在未验证目标报价归属时被清除，之后 sell pipeline 可能授权错误资产。
+
+**后续自动报价实现约束**
+
+- 必须把 pending_receipt=True 解释为尚未完成可验证收货，禁止自动报价、自动上架和售出确认。
+- 必须只有统一收货终结流程在验证 baseline、新资产、商品 ID、账户和报价方向后，才能清除 pending_receipt。
+- 禁止 sync_sold 或任何修复流程仅按饰品名称为自动交易清除 pending_receipt。
+- 无法证明 assetid 归属时必须保持 pending_receipt 并进入人工对账。
+
+## 阶段 B 额外安全核查
+
+- pending_receipt 是否会被 sell pipeline 处理：会被读取，但 _find_buy_record 明确拒绝，不能进入上架授权。
+- pending_receipt 是否会被 sync_sold 处理：会；sync_sold 处理缺失 assetid 的 Purchase，并可能按名称补回 assetid、清除 pending_receipt，这是当前高风险路径。
+- assetid 是否存在仅按饰品名称关联的路径：存在于 app/sync_sold.py 的 _fill_assetid_from_inventory；repair 路径也存在缺失 assetid 的精确名称匹配逻辑。主 receive_flow 另有 goods_id 优先、唯一名称兜底。
+- 是否存在统一的收货终结入口：try_receive_once 是主收货入口，但没有覆盖 sync_sold 的状态变更，也没有端到端统一终结测试，结论为 UNKNOWN。
+- 自动上架是否严格使用 assetid：sell pipeline 的已检查路径是；对绕过该 pipeline 的未来调用方不能推断，结论为 CODE_GUARANTEED（当前路径）而非全局保证。
+
+## 阶段 B 状态
+
+不变量 5—8 已完成初步证据整理；不变量 9—12、最终交叉验证、CI 状态和 GPT 验收尚未完成。本文档仍为 WIP，不能据此宣称自检完成。
