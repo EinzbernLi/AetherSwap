@@ -9,6 +9,10 @@ config/app.db
 config/app.db-journal
 config/app.db-wal
 config/app.db-shm
+config/auto_offer.db
+config/auto_offer.db-journal
+config/auto_offer.db-wal
+config/auto_offer.db-shm
 config/exchange_rate.json
 config/steam_userdata.json
 config/holdings_report_last.json
