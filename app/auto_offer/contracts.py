@@ -229,6 +229,19 @@ def _transition_statuses(
     if current is DeliveryStatus.RESULT_UNKNOWN and target is DeliveryStatus.OFFER_ATTEMPTED:
         raise DeliveryContractError("result_unknown cannot transition to offer_attempted")
 
+    if current is DeliveryStatus.RESULT_UNKNOWN:
+        if mode is None:
+            raise DeliveryContractError("result_unknown recovery requires a delivery mode")
+        _require_enum(mode, DeliveryMode, "delivery_mode")
+        path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
+        if target not in path or target in {
+            DeliveryStatus.PENDING_DIRECTION,
+            DeliveryStatus.AWAITING_OFFER,
+            DeliveryStatus.OFFER_ATTEMPTED,
+        }:
+            raise DeliveryContractError("result_unknown recovery requires later evidence")
+        return
+
     if mode is None:
         raise DeliveryContractError("this transition requires a delivery mode")
     _require_enum(mode, DeliveryMode, "delivery_mode")
