@@ -65,6 +65,18 @@ TERMINAL_DELIVERY_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
     }
 )
 
+NORMAL_DIRECTION_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
+    {
+        DeliveryStatus.AWAITING_OFFER,
+        DeliveryStatus.OFFER_ATTEMPTED,
+        DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_RECEIVED,
+        DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.AWAITING_INVENTORY,
+        DeliveryStatus.RECEIVED,
+    }
+)
+
 
 @dataclass(frozen=True)
 class DeliverySnapshot:
@@ -141,8 +153,8 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
     if status is DeliveryStatus.PENDING_DIRECTION:
         if mode is not None:
             raise DeliveryContractError("pending_direction requires an unknown mode")
-    elif status is DeliveryStatus.AWAITING_OFFER and mode is None:
-        raise DeliveryContractError("awaiting_offer requires a delivery mode")
+    elif status in NORMAL_DIRECTION_REQUIRED_STATUSES and mode is None:
+        raise DeliveryContractError(f"{status.value} requires a delivery mode")
 
     if status is DeliveryStatus.OFFER_ATTEMPTED:
         if mode is not DeliveryMode.BUYER_SENDS_OFFER:
@@ -366,6 +378,7 @@ __all__ = [
     "DeliveryMode",
     "DeliverySnapshot",
     "DeliveryStatus",
+    "NORMAL_DIRECTION_REQUIRED_STATUSES",
     "TERMINAL_DELIVERY_STATUSES",
     "result_blocks_next_purchase",
     "validate_delivery_snapshot",

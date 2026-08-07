@@ -21,6 +21,7 @@ from app.auto_offer.contracts import (
     DeliveryMode,
     DeliverySnapshot,
     DeliveryStatus,
+    NORMAL_DIRECTION_REQUIRED_STATUSES,
     result_blocks_next_purchase,
     validate_delivery_snapshot,
     validate_delivery_transition,
@@ -265,6 +266,48 @@ def test_pending_direction_requires_unknown_mode():
 def test_awaiting_offer_requires_known_mode():
     with pytest.raises(DeliveryContractError):
         validate_delivery_snapshot(snapshot(delivery_mode=None))
+
+
+@pytest.mark.parametrize(
+    ("status", "changes"),
+    [
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            {
+                "steam_tradeoffer_id": "trade-1",
+                "offer_attempted_at": 1.0,
+                "offer_sent_at": 2.0,
+            },
+        ),
+        (
+            DeliveryStatus.AWAITING_INVENTORY,
+            {
+                "steam_tradeoffer_id": "trade-1",
+                "offer_attempted_at": 1.0,
+                "offer_sent_at": 2.0,
+            },
+        ),
+        (
+            DeliveryStatus.RECEIVED,
+            {
+                "steam_tradeoffer_id": "trade-1",
+                "offer_attempted_at": 1.0,
+                "offer_sent_at": 2.0,
+                "received_at": 3.0,
+                "assetid": "asset-1",
+                "pending_receipt": False,
+            },
+        ),
+    ],
+)
+def test_normal_delivery_statuses_require_known_mode(
+    status: DeliveryStatus, changes: dict[str, object]
+):
+    assert status in NORMAL_DIRECTION_REQUIRED_STATUSES
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_snapshot(
+            snapshot(delivery_status=status, delivery_mode=None, **changes)
+        )
 
 
 @pytest.mark.parametrize("field", ["purchase_id", "buff_order_id", "account_id", "recipient_steam_id"])
