@@ -129,7 +129,17 @@ def test_buyer_path_is_valid():
             delivery_status=status,
             offer_attempted_at=10.0 if index >= 2 else None,
             offer_sent_at=11.0 if index >= 3 else None,
-            steam_tradeoffer_id="trade-1" if status is DeliveryStatus.RECEIVED else None,
+            steam_tradeoffer_id=(
+                "trade-1"
+                if status
+                in {
+                    DeliveryStatus.OFFER_SENT,
+                    DeliveryStatus.OFFER_CONFIRMED,
+                    DeliveryStatus.AWAITING_INVENTORY,
+                    DeliveryStatus.RECEIVED,
+                }
+                else None
+            ),
             assetid="asset-1" if status is DeliveryStatus.RECEIVED else None,
             received_at=12.0 if status is DeliveryStatus.RECEIVED else None,
             pending_receipt=status is not DeliveryStatus.RECEIVED,
@@ -150,7 +160,17 @@ def test_seller_path_is_valid():
         value = snapshot(
             delivery_mode=None if index == 0 else DeliveryMode.SELLER_SENDS_OFFER,
             delivery_status=status,
-            steam_tradeoffer_id="trade-1" if status is DeliveryStatus.RECEIVED else None,
+            steam_tradeoffer_id=(
+                "trade-1"
+                if status
+                in {
+                    DeliveryStatus.OFFER_RECEIVED,
+                    DeliveryStatus.OFFER_CONFIRMED,
+                    DeliveryStatus.AWAITING_INVENTORY,
+                    DeliveryStatus.RECEIVED,
+                }
+                else None
+            ),
             assetid="asset-1" if status is DeliveryStatus.RECEIVED else None,
             received_at=12.0 if status is DeliveryStatus.RECEIVED else None,
             pending_receipt=status is not DeliveryStatus.RECEIVED,
@@ -364,6 +384,186 @@ def test_snapshot_transition_validates_both_endpoints_and_identity():
     validate_delivery_transition(current, target)
     with pytest.raises(DeliveryContractError):
         validate_delivery_transition(current, replace(target, purchase_id="other"))
+
+
+@pytest.mark.parametrize(
+    ("target", "mode"),
+    [
+        (DeliveryStatus.RESULT_UNKNOWN, "buyer_sends_offer"),
+        (DeliveryStatus.BLOCKED, "buyer_sends_offer"),
+        (DeliveryStatus.CANCELLED, 1),
+        (DeliveryStatus.REFUNDED, object()),
+    ],
+)
+def test_exception_targets_reject_non_enum_delivery_mode(
+    target: DeliveryStatus, mode: object
+):
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(DeliveryStatus.AWAITING_OFFER, target, mode)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        DeliveryStatus.RESULT_UNKNOWN,
+        DeliveryStatus.BLOCKED,
+        DeliveryStatus.CANCELLED,
+        DeliveryStatus.REFUNDED,
+    ],
+)
+def test_exception_targets_accept_valid_delivery_mode(target: DeliveryStatus):
+    validate_delivery_transition(
+        DeliveryStatus.AWAITING_OFFER,
+        target,
+        DeliveryMode.BUYER_SENDS_OFFER,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "mode", "valid", "invalid"),
+    [
+        (
+            DeliveryStatus.OFFER_ATTEMPTED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0},
+            {"offer_attempted_at": None},
+        ),
+        (
+            DeliveryStatus.OFFER_ATTEMPTED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0},
+            {"steam_tradeoffer_id": "trade-1"},
+        ),
+        (
+            DeliveryStatus.OFFER_ATTEMPTED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0},
+            {"offer_sent_at": 2.0},
+        ),
+        (
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0, "steam_tradeoffer_id": "trade-1"},
+            {"offer_attempted_at": None},
+        ),
+        (
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0, "steam_tradeoffer_id": "trade-1"},
+            {"offer_sent_at": None},
+        ),
+        (
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0, "steam_tradeoffer_id": "trade-1"},
+            {"steam_tradeoffer_id": None},
+        ),
+        (
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1"},
+            {"steam_tradeoffer_id": None},
+        ),
+        (
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1"},
+            {"offer_attempted_at": 1.0},
+        ),
+        (
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1"},
+            {"offer_sent_at": 2.0},
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1", "offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            {"steam_tradeoffer_id": None},
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1", "offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            {"offer_attempted_at": None},
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1"},
+            {"offer_sent_at": 2.0},
+        ),
+        (
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1", "offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            {"steam_tradeoffer_id": None},
+        ),
+        (
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1", "offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            {"offer_sent_at": None},
+        ),
+        (
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {"steam_tradeoffer_id": "trade-1"},
+            {"offer_attempted_at": 1.0},
+        ),
+    ],
+)
+def test_intermediate_delivery_field_invariants(
+    status: DeliveryStatus,
+    mode: DeliveryMode,
+    valid: dict[str, object],
+    invalid: dict[str, object],
+):
+    validate_delivery_snapshot(snapshot(delivery_status=status, delivery_mode=mode, **valid))
+    changed = dict(valid)
+    changed.update(invalid)
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_snapshot(snapshot(delivery_status=status, delivery_mode=mode, **changed))
+
+
+def test_received_preserves_buyer_timing_and_rejects_seller_timing():
+    validate_delivery_snapshot(
+        snapshot(
+            delivery_status=DeliveryStatus.RECEIVED,
+            delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+            offer_attempted_at=1.0,
+            offer_sent_at=2.0,
+            steam_tradeoffer_id="trade-1",
+            assetid="asset-1",
+            received_at=3.0,
+            pending_receipt=False,
+        )
+    )
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_snapshot(
+            snapshot(
+                delivery_status=DeliveryStatus.RECEIVED,
+                delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+                offer_attempted_at=1.0,
+                steam_tradeoffer_id="trade-1",
+                assetid="asset-1",
+                received_at=3.0,
+                pending_receipt=False,
+            )
+        )
+
+
+def test_recipient_steam_id_is_immutable_across_snapshot_transition():
+    current = snapshot(delivery_status=DeliveryStatus.AWAITING_OFFER)
+    target = replace(
+        current,
+        delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+        offer_attempted_at=1.0,
+        recipient_steam_id="76561198000000001",
+    )
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(current, target)
 
 
 def test_imports_are_pure_and_do_not_reference_external_trade_or_storage_modules():

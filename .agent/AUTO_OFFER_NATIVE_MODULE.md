@@ -68,7 +68,24 @@ asset ID, or timestamp proximity alone is not receipt proof.
 IDs are non-empty strings without leading or trailing whitespace. Timestamps
 are finite, non-negative, non-bool numbers and follow
 `offer_attempted_at <= offer_sent_at <= received_at` whenever the fields are
-present. Delivery errors are restricted to the explicit allowlist.
+present. The immutable delivery identity includes `purchase_id`,
+`buff_order_id`, `account_id`, and `recipient_steam_id`; none may change
+during a snapshot transition. Delivery errors are restricted to the explicit
+allowlist.
+
+Intermediate state fields are strict:
+
+- `offer_attempted` is buyer mode, has `offer_attempted_at`, and has no Trade
+  Offer ID, `offer_sent_at`, or `received_at`.
+- `offer_sent` is buyer mode and has `offer_attempted_at`, `offer_sent_at`,
+  and a Trade Offer ID, but no `received_at`.
+- `offer_received` is seller mode, has a Trade Offer ID, has no buyer timing,
+  and has no `received_at`.
+- `offer_confirmed` and `awaiting_inventory` require a Trade Offer ID;
+  buyer mode requires both buyer timing fields while seller mode forbids
+  them, and `received_at` remains empty.
+- `received` preserves buyer timing in buyer mode and forbids buyer timing in
+  seller mode, in addition to its exact receipt proof.
 
 ## Module boundary
 

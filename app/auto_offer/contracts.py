@@ -147,12 +147,58 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
     if status is DeliveryStatus.OFFER_ATTEMPTED:
         if mode is not DeliveryMode.BUYER_SENDS_OFFER:
             raise DeliveryContractError("offer_attempted requires buyer mode")
+        if snapshot.offer_attempted_at is None:
+            raise DeliveryContractError("offer_attempted requires offer_attempted_at")
+        if snapshot.steam_tradeoffer_id is not None:
+            raise DeliveryContractError("offer_attempted cannot have a trade offer ID")
+        if snapshot.offer_sent_at is not None:
+            raise DeliveryContractError("offer_attempted cannot have offer_sent_at")
+        if snapshot.received_at is not None:
+            raise DeliveryContractError("offer_attempted cannot have received_at")
     elif status is DeliveryStatus.OFFER_SENT:
         if mode is not DeliveryMode.BUYER_SENDS_OFFER:
             raise DeliveryContractError("offer_sent requires buyer mode")
+        if snapshot.offer_attempted_at is None:
+            raise DeliveryContractError("offer_sent requires offer_attempted_at")
+        if snapshot.offer_sent_at is None:
+            raise DeliveryContractError("offer_sent requires offer_sent_at")
+        if snapshot.steam_tradeoffer_id is None:
+            raise DeliveryContractError("offer_sent requires a trade offer ID")
+        if snapshot.received_at is not None:
+            raise DeliveryContractError("offer_sent cannot have received_at")
     elif status is DeliveryStatus.OFFER_RECEIVED:
         if mode is not DeliveryMode.SELLER_SENDS_OFFER:
             raise DeliveryContractError("offer_received requires seller mode")
+        if snapshot.steam_tradeoffer_id is None:
+            raise DeliveryContractError("offer_received requires a trade offer ID")
+        if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
+            raise DeliveryContractError("seller offer_received cannot have buyer timing")
+        if snapshot.received_at is not None:
+            raise DeliveryContractError("offer_received cannot have received_at")
+
+    if status is DeliveryStatus.OFFER_CONFIRMED:
+        if snapshot.steam_tradeoffer_id is None:
+            raise DeliveryContractError("offer_confirmed requires a trade offer ID")
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None:
+                raise DeliveryContractError("buyer offer_confirmed requires buyer timing")
+        elif mode is DeliveryMode.SELLER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
+                raise DeliveryContractError("seller offer_confirmed cannot have buyer timing")
+        if snapshot.received_at is not None:
+            raise DeliveryContractError("offer_confirmed cannot have received_at")
+
+    if status is DeliveryStatus.AWAITING_INVENTORY:
+        if snapshot.steam_tradeoffer_id is None:
+            raise DeliveryContractError("awaiting_inventory requires a trade offer ID")
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None:
+                raise DeliveryContractError("buyer awaiting_inventory requires buyer timing")
+        elif mode is DeliveryMode.SELLER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
+                raise DeliveryContractError("seller awaiting_inventory cannot have buyer timing")
+        if snapshot.received_at is not None:
+            raise DeliveryContractError("awaiting_inventory cannot have received_at")
 
     if status is DeliveryStatus.RECEIVED:
         if snapshot.pending_receipt:
@@ -160,6 +206,12 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
         for field in ("steam_tradeoffer_id", "assetid", "received_at"):
             if getattr(snapshot, field) is None:
                 raise DeliveryContractError(f"received requires {field}")
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None:
+                raise DeliveryContractError("buyer received requires buyer timing")
+        elif mode is DeliveryMode.SELLER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
+                raise DeliveryContractError("seller received cannot have buyer timing")
     elif not snapshot.pending_receipt:
         raise DeliveryContractError("non-received status requires a pending receipt")
 
@@ -213,6 +265,8 @@ def _transition_statuses(
     target: DeliveryStatus,
     mode: DeliveryMode | None,
 ) -> None:
+    if mode is not None:
+        _require_enum(mode, DeliveryMode, "delivery_mode")
     if current in TERMINAL_DELIVERY_STATUSES:
         raise DeliveryContractError("terminal delivery status cannot transition")
     if current is target:
@@ -244,7 +298,6 @@ def _transition_statuses(
 
     if mode is None:
         raise DeliveryContractError("this transition requires a delivery mode")
-    _require_enum(mode, DeliveryMode, "delivery_mode")
     path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
     try:
         current_index = path.index(current)
@@ -270,10 +323,16 @@ def validate_delivery_transition(
             raise DeliveryContractError("transition endpoints must use the same form")
         validate_delivery_snapshot(current)
         validate_delivery_snapshot(target)
-        if (current.purchase_id, current.buff_order_id, current.account_id) != (
+        if (
+            current.purchase_id,
+            current.buff_order_id,
+            current.account_id,
+            current.recipient_steam_id,
+        ) != (
             target.purchase_id,
             target.buff_order_id,
             target.account_id,
+            target.recipient_steam_id,
         ):
             raise DeliveryContractError("transition endpoints must identify one delivery")
         if current.delivery_mode is not None and target.delivery_mode != current.delivery_mode:
