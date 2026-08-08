@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
 
 from app.auto_offer.adapters import (
+    DeliveryDirectionEvidence,
+    InventoryStateEvidence,
+    OfferStateEvidence,
     PlatformAdapter,
     PlatformAdapterProtocolError,
     PlatformAdapterTimeoutError,
@@ -84,8 +87,17 @@ def _result(
     request: PlatformRequest,
     status: PlatformResultStatus,
     detail: str,
+    evidence: DeliveryDirectionEvidence
+    | OfferStateEvidence
+    | InventoryStateEvidence
+    | None = None,
 ) -> PlatformResult:
-    return PlatformResult(request=request, status=status, detail=detail)
+    return PlatformResult(
+        request=request,
+        status=status,
+        detail=detail,
+        evidence=evidence,
+    )
 
 
 def _request_or_raise(request: object) -> PlatformRequest:
@@ -288,7 +300,10 @@ class BuffReadOnlyAdapter:
                     request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
                 )
             return _result(
-                request, PlatformResultStatus.SUCCESS, "seller_sends_offer"
+                request,
+                PlatformResultStatus.SUCCESS,
+                "seller_sends_offer",
+                DeliveryDirectionEvidence(),
             )
 
         offer_id = _trade_offer_id(record)
@@ -301,22 +316,47 @@ class BuffReadOnlyAdapter:
             return _result(
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
-        return _result(request, PlatformResultStatus.SUCCESS, "offer_pending")
+        return _result(
+            request,
+            PlatformResultStatus.SUCCESS,
+            "offer_pending",
+            OfferStateEvidence(offer_id),
+        )
 
 
-def _valid_inventory_snapshot(payload: object) -> bool:
-    if not isinstance(payload, Mapping):
-        return False
-    if payload.get("success") != 1:
-        return False
+def _inventory_evidence(payload: Mapping[str, Any]) -> InventoryStateEvidence | None:
+    """Extract only canonical recipient-side asset IDs from a valid envelope."""
+
+    has_assets = "assets" in payload
     assets = payload.get("assets")
-    if "assets" in payload and not isinstance(assets, list):
-        return False
-    if "total_inventory_count" in payload:
-        count = payload["total_inventory_count"]
-        if type(count) not in (int, float) or count < 0:
-            return False
-    return isinstance(assets, list) or "total_inventory_count" in payload
+    has_count = "total_inventory_count" in payload
+    total_count = payload.get("total_inventory_count")
+
+    if has_assets and not isinstance(assets, list):
+        return None
+    if has_count and (type(total_count) is not int or total_count < 0):
+        return None
+    if not has_assets:
+        if not has_count or total_count != 0:
+            return None
+        return InventoryStateEvidence(assetids=(), total_inventory_count=0)
+
+    assetids: list[str] = []
+    for asset in assets:
+        if not isinstance(asset, Mapping) or "assetid" not in asset:
+            return None
+        assetid = asset["assetid"]
+        if type(assetid) is not str or not assetid or assetid.strip() != assetid:
+            return None
+        assetids.append(assetid)
+    if total_count is None:
+        total_count = 0 if not assetids else None
+    try:
+        return InventoryStateEvidence(
+            assetids=tuple(assetids), total_inventory_count=total_count
+        )
+    except PlatformAdapterProtocolError:
+        return None
 
 
 class SteamInventoryReadOnlyAdapter:
@@ -374,12 +414,16 @@ class SteamInventoryReadOnlyAdapter:
             )
         if raw.get("success") != 1:
             return _result(request, PlatformResultStatus.FAILURE, "network_failure")
-        if not _valid_inventory_snapshot(raw):
+        evidence = _inventory_evidence(raw)
+        if evidence is None:
             return _result(
                 request, PlatformResultStatus.MALFORMED, "malformed_payload"
             )
         return _result(
-            request, PlatformResultStatus.SUCCESS, "inventory_snapshot_readable"
+            request,
+            PlatformResultStatus.SUCCESS,
+            "inventory_snapshot_readable",
+            evidence,
         )
 
 
