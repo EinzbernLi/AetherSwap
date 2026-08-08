@@ -22,6 +22,9 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+    TradeOfferItemEvidence,
 )
 
 
@@ -33,6 +36,9 @@ BUFF_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
 )
 STEAM_INVENTORY_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
     {PlatformCapability.READ_INVENTORY_STATE}
+)
+STEAM_TRADE_OFFER_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
+    {PlatformCapability.READ_STEAM_TRADE_OFFER}
 )
 
 _ORDER_FIELDS: Final[tuple[str, ...]] = ("buff_order_id", "bill_order_id")
@@ -83,6 +89,14 @@ class SteamInventoryReader(Protocol):
         ...
 
 
+@runtime_checkable
+class SteamTradeOfferReader(Protocol):
+    """A host-provided reader for one exact Steam Trade Offer ID."""
+
+    def __call__(self, steam_tradeoffer_id: str) -> object:
+        ...
+
+
 def _result(
     request: PlatformRequest,
     status: PlatformResultStatus,
@@ -90,6 +104,7 @@ def _result(
     evidence: DeliveryDirectionEvidence
     | OfferStateEvidence
     | InventoryStateEvidence
+    | SteamTradeOfferEvidence
     | None = None,
 ) -> PlatformResult:
     return PlatformResult(
@@ -103,6 +118,7 @@ def _result(
 def _request_or_raise(request: object) -> PlatformRequest:
     if type(request) is not PlatformRequest:
         raise PlatformAdapterProtocolError("request must be a PlatformRequest")
+    PlatformRequest.__post_init__(request)
     return request
 
 
@@ -427,6 +443,190 @@ class SteamInventoryReadOnlyAdapter:
         )
 
 
+def _steam_trade_offer_items(
+    payload: Mapping[str, Any], field: str
+) -> tuple[TradeOfferItemEvidence, ...] | None:
+    raw_items = payload.get(field)
+    if type(raw_items) is not list:
+        return None
+    items: list[TradeOfferItemEvidence] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, Mapping):
+            return None
+        required = ("appid", "contextid", "assetid", "amount")
+        if any(key not in raw_item for key in required):
+            return None
+        try:
+            items.append(
+                TradeOfferItemEvidence(
+                    appid=raw_item["appid"],
+                    contextid=raw_item["contextid"],
+                    assetid=raw_item["assetid"],
+                    amount=raw_item["amount"],
+                )
+            )
+        except PlatformAdapterProtocolError:
+            return None
+    return tuple(items)
+
+
+def _steam_trade_offer_evidence(
+    request: PlatformRequest, payload: Mapping[str, Any]
+) -> PlatformResult:
+    required = (
+        "steam_tradeoffer_id",
+        "account_steam_id",
+        "counterparty_steam_id",
+        "is_our_offer",
+        "lifecycle",
+        "items_to_give",
+        "items_to_receive",
+    )
+    if any(key not in payload for key in required):
+        return _result(
+            request, PlatformResultStatus.MALFORMED, "malformed_payload"
+        )
+
+    tradeoffer_id = payload["steam_tradeoffer_id"]
+    account_steam_id = payload["account_steam_id"]
+    counterparty_steam_id = payload["counterparty_steam_id"]
+    if type(tradeoffer_id) is not str or tradeoffer_id != request.steam_tradeoffer_id:
+        return _result(
+            request, PlatformResultStatus.FAILURE, "identity_mismatch"
+        )
+    if type(account_steam_id) is not str or account_steam_id != request.recipient_steam_id:
+        return _result(
+            request, PlatformResultStatus.FAILURE, "identity_mismatch"
+        )
+    if type(counterparty_steam_id) is not str:
+        return _result(
+            request, PlatformResultStatus.MALFORMED, "malformed_payload"
+        )
+    if type(payload["is_our_offer"]) is not bool:
+        return _result(
+            request, PlatformResultStatus.MALFORMED, "malformed_payload"
+        )
+    if (
+        not counterparty_steam_id
+        or counterparty_steam_id.strip() != counterparty_steam_id
+        or counterparty_steam_id == account_steam_id
+    ):
+        return _result(
+            request, PlatformResultStatus.MALFORMED, "malformed_payload"
+        )
+
+    items_to_give = _steam_trade_offer_items(payload, "items_to_give")
+    items_to_receive = _steam_trade_offer_items(payload, "items_to_receive")
+    if items_to_give is None or items_to_receive is None:
+        return _result(
+            request, PlatformResultStatus.MALFORMED, "malformed_payload"
+        )
+    for items in (items_to_give, items_to_receive):
+        identities = [
+            (item.appid, item.contextid, item.assetid) for item in items
+        ]
+        if len(set(identities)) != len(identities):
+            return _result(
+                request, PlatformResultStatus.MALFORMED, "malformed_payload"
+            )
+    if not items_to_give and not items_to_receive:
+        return _result(
+            request, PlatformResultStatus.MALFORMED, "malformed_payload"
+        )
+
+    lifecycle = payload["lifecycle"]
+    if type(lifecycle) is not str:
+        return _result(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "trade_offer_state_not_proven",
+        )
+    lifecycle_value = {
+        "active": SteamTradeOfferLifecycle.ACTIVE,
+        "accepted": SteamTradeOfferLifecycle.ACCEPTED,
+    }.get(lifecycle)
+    if lifecycle_value is None:
+        return _result(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "trade_offer_state_not_proven",
+        )
+
+    try:
+        evidence = SteamTradeOfferEvidence(
+            steam_tradeoffer_id=tradeoffer_id,
+            account_steam_id=account_steam_id,
+            counterparty_steam_id=counterparty_steam_id,
+            is_our_offer=payload["is_our_offer"],
+            lifecycle=lifecycle_value,
+            items_to_give=items_to_give,
+            items_to_receive=items_to_receive,
+        )
+    except PlatformAdapterProtocolError:
+        return _result(
+            request, PlatformResultStatus.MALFORMED, "malformed_payload"
+        )
+    detail = (
+        "trade_offer_active"
+        if lifecycle_value is SteamTradeOfferLifecycle.ACTIVE
+        else "trade_offer_accepted"
+    )
+    return _result(
+        request, PlatformResultStatus.SUCCESS, detail, evidence
+    )
+
+
+class SteamTradeOfferReadOnlyAdapter:
+    """Map one injected exact-ID Steam Trade Offer reader into evidence."""
+
+    def __init__(
+        self,
+        reader: SteamTradeOfferReader,
+        *,
+        account_id: str,
+        recipient_steam_id: str,
+    ) -> None:
+        if not callable(reader):
+            raise PlatformAdapterProtocolError("reader must be callable")
+        self._reader = reader
+        self._account_id = _require_identifier(account_id, "account_id")
+        self._recipient_steam_id = _require_identifier(
+            recipient_steam_id, "recipient_steam_id"
+        )
+
+    @property
+    def capabilities(self) -> frozenset[PlatformCapability]:
+        return STEAM_TRADE_OFFER_CAPABILITIES
+
+    def execute(self, request: PlatformRequest) -> PlatformResult:
+        request = _request_or_raise(request)
+        if request.capability not in self.capabilities:
+            return _result(
+                request, PlatformResultStatus.UNSUPPORTED, "unsupported_capability"
+            )
+        if request.account_id != self._account_id:
+            return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
+        if request.recipient_steam_id != self._recipient_steam_id:
+            return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
+
+        raw = _call_read(
+            lambda: self._reader(request.steam_tradeoffer_id)
+        )
+        if isinstance(raw, _ReadFailure):
+            return _result(request, raw.status, raw.detail)
+        if raw is None:
+            return _result(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "trade_offer_not_proven",
+            )
+        if not isinstance(raw, Mapping):
+            return _result(
+                request, PlatformResultStatus.MALFORMED, "malformed_payload"
+            )
+        return _steam_trade_offer_evidence(request, raw)
+
+
 __all__ = [
     "BUFF_CAPABILITIES",
     "BuffReadOnlyAdapter",
@@ -434,4 +634,7 @@ __all__ = [
     "STEAM_INVENTORY_CAPABILITIES",
     "SteamInventoryReader",
     "SteamInventoryReadOnlyAdapter",
+    "STEAM_TRADE_OFFER_CAPABILITIES",
+    "SteamTradeOfferReader",
+    "SteamTradeOfferReadOnlyAdapter",
 ]
