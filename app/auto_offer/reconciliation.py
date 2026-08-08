@@ -15,6 +15,8 @@ from .adapters import (
     PlatformCapability,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
 )
 from .contracts import (
     AutoOfferResult,
@@ -96,6 +98,72 @@ def _propose(
     validate_delivery_snapshot(target)
     validate_delivery_transition(delivery.snapshot, target)
     return _decision(delivery, target, AutoOfferResult.WAITING, True, detail)
+
+
+def _safe_steam_trade_offer_evidence(
+    delivery: StoredDelivery,
+    platform_result: PlatformResult,
+) -> SteamTradeOfferEvidence | str:
+    """Return exact, direction-safe Trade Offer evidence or a block detail."""
+
+    snapshot = delivery.snapshot
+    request = platform_result.request
+    evidence = platform_result.evidence
+    if (
+        request.capability is not PlatformCapability.READ_STEAM_TRADE_OFFER
+        or snapshot.steam_tradeoffer_id != request.steam_tradeoffer_id
+        or type(evidence) is not SteamTradeOfferEvidence
+    ):
+        return "evidence_not_allowed"
+    expected_is_our_offer = snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+    if evidence.is_our_offer is not expected_is_our_offer:
+        return "trade_offer_direction_mismatch"
+    if evidence.items_to_give != ():
+        return "trade_offer_outgoing_items_present"
+    return evidence
+
+
+def _plan_steam_trade_offer_lifecycle(
+    delivery: StoredDelivery,
+    evidence: SteamTradeOfferEvidence,
+) -> ReconciliationDecision:
+    """Plan the one allowed adjacent transition from typed offer evidence."""
+
+    snapshot = delivery.snapshot
+    if snapshot.delivery_status in {
+        DeliveryStatus.OFFER_RECEIVED,
+        DeliveryStatus.OFFER_SENT,
+    }:
+        if evidence.lifecycle is SteamTradeOfferLifecycle.ACTIVE:
+            detail = "trade_offer_confirmed_active"
+        elif evidence.lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+            detail = "trade_offer_confirmed_accepted"
+        else:
+            return _blocked(delivery, "evidence_not_allowed")
+        return _propose(
+            delivery,
+            replace(snapshot, delivery_status=DeliveryStatus.OFFER_CONFIRMED),
+            detail,
+        )
+    if snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED:
+        if evidence.lifecycle is SteamTradeOfferLifecycle.ACTIVE:
+            return _decision(
+                delivery,
+                None,
+                AutoOfferResult.WAITING,
+                True,
+                "trade_offer_not_accepted",
+            )
+        if evidence.lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+            return _propose(
+                delivery,
+                replace(
+                    snapshot,
+                    delivery_status=DeliveryStatus.AWAITING_INVENTORY,
+                ),
+                "trade_offer_accepted",
+            )
+    return _blocked(delivery, "evidence_not_allowed")
 
 
 def _map_non_success(
@@ -215,6 +283,16 @@ def plan_read_evidence_transition(
                 "purchase_asset_not_proven",
             )
         return _blocked(delivery, "evidence_not_allowed")
+
+    if snapshot.delivery_status in {
+        DeliveryStatus.OFFER_RECEIVED,
+        DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMED,
+    }:
+        safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)
+        if type(safe_evidence) is str:
+            return _blocked(delivery, safe_evidence)
+        return _plan_steam_trade_offer_lifecycle(delivery, safe_evidence)
 
     if snapshot.delivery_status in {
         DeliveryStatus.RECEIVED,

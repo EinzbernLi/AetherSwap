@@ -10,6 +10,9 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+    TradeOfferItemEvidence,
 )
 from app.auto_offer.contracts import (
     AutoOfferResult,
@@ -40,6 +43,8 @@ def snapshot(
     mode=None,
     *,
     steam_tradeoffer_id=None,
+    offer_attempted_at=None,
+    offer_sent_at=None,
     pending_receipt=True,
     received_at=None,
     assetid=None,
@@ -50,8 +55,8 @@ def snapshot(
         delivery_mode=mode,
         delivery_status=status,
         steam_tradeoffer_id=steam_tradeoffer_id,
-        offer_attempted_at=None,
-        offer_sent_at=None,
+        offer_attempted_at=offer_attempted_at,
+        offer_sent_at=offer_sent_at,
         received_at=received_at,
         delivery_error=delivery_error,
         pending_receipt=pending_receipt,
@@ -89,6 +94,26 @@ def non_success(item, status, detail=None):
         request_for(item, PlatformCapability.READ_DELIVERY_DIRECTION),
         status,
         detail,
+    )
+
+
+def steam_offer_evidence(
+    *,
+    is_our_offer,
+    lifecycle,
+    steam_tradeoffer_id="offer-1",
+    items_to_give=(),
+    items_to_receive=None,
+):
+    return SteamTradeOfferEvidence(
+        steam_tradeoffer_id=steam_tradeoffer_id,
+        account_steam_id="steam-1",
+        counterparty_steam_id="counterparty-1",
+        is_our_offer=is_our_offer,
+        lifecycle=lifecycle,
+        items_to_give=items_to_give,
+        items_to_receive=items_to_receive
+        or (TradeOfferItemEvidence(730, "2", "offer-asset-1", 1),),
     )
 
 
@@ -349,6 +374,214 @@ def test_awaiting_inventory_wrong_success_cannot_advance():
     )
     assert decision.result is AutoOfferResult.BLOCKED
     assert decision.target is None
+
+
+@pytest.mark.parametrize(
+    "status,mode,kwargs,is_our_offer,lifecycle,detail",
+    [
+        (
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {},
+            False,
+            SteamTradeOfferLifecycle.ACTIVE,
+            "trade_offer_confirmed_active",
+        ),
+        (
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {},
+            False,
+            SteamTradeOfferLifecycle.ACCEPTED,
+            "trade_offer_confirmed_accepted",
+        ),
+        (
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            True,
+            SteamTradeOfferLifecycle.ACTIVE,
+            "trade_offer_confirmed_active",
+        ),
+        (
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            True,
+            SteamTradeOfferLifecycle.ACCEPTED,
+            "trade_offer_confirmed_accepted",
+        ),
+    ],
+)
+def test_trade_offer_proof_advances_only_to_offer_confirmed(
+    status, mode, kwargs, is_our_offer, lifecycle, detail
+):
+    item = delivery(snapshot(status, mode, steam_tradeoffer_id="offer-1", **kwargs))
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(is_our_offer=is_our_offer, lifecycle=lifecycle),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.retryable is True
+    assert decision.detail == detail
+    assert decision.target is not None
+    assert decision.target.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+    assert decision.target.steam_tradeoffer_id == "offer-1"
+    assert decision.target.assetid is None
+    assert decision.target.received_at is None
+    assert decision.target.pending_receipt is True
+    assert decision.target.offer_attempted_at == item.snapshot.offer_attempted_at
+    assert decision.target.offer_sent_at == item.snapshot.offer_sent_at
+
+
+@pytest.mark.parametrize(
+    "mode,expected_is_our_offer,kwargs",
+    [
+        (DeliveryMode.SELLER_SENDS_OFFER, False, {}),
+        (
+            DeliveryMode.BUYER_SENDS_OFFER,
+            True,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "lifecycle,expected_status,detail",
+    [
+        (SteamTradeOfferLifecycle.ACTIVE, None, "trade_offer_not_accepted"),
+        (
+            SteamTradeOfferLifecycle.ACCEPTED,
+            DeliveryStatus.AWAITING_INVENTORY,
+            "trade_offer_accepted",
+        ),
+    ],
+)
+def test_offer_confirmed_requires_acceptance_before_inventory(
+    mode, expected_is_our_offer, kwargs, lifecycle, expected_status, detail
+):
+    item = delivery(
+        snapshot(
+            DeliveryStatus.OFFER_CONFIRMED,
+            mode,
+            steam_tradeoffer_id="offer-1",
+            **kwargs,
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(
+                is_our_offer=expected_is_our_offer,
+                lifecycle=lifecycle,
+                items_to_receive=(
+                    TradeOfferItemEvidence(730, "2", "offer-asset-1", 1),
+                    TradeOfferItemEvidence(730, "2", "offer-asset-2", 1),
+                ),
+            ),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.retryable is True
+    assert decision.detail == detail
+    if expected_status is None:
+        assert decision.target is None
+    else:
+        assert decision.target is not None
+        assert decision.target.delivery_status is expected_status
+        assert decision.target.assetid is None
+        assert decision.target.received_at is None
+        assert decision.target.pending_receipt is True
+
+
+@pytest.mark.parametrize(
+    "mode,status,kwargs,is_our_offer,items_to_give,expected_detail",
+    [
+        (
+            DeliveryMode.SELLER_SENDS_OFFER,
+            DeliveryStatus.OFFER_RECEIVED,
+            {},
+            True,
+            (),
+            "trade_offer_direction_mismatch",
+        ),
+        (
+            DeliveryMode.BUYER_SENDS_OFFER,
+            DeliveryStatus.OFFER_SENT,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            False,
+            (),
+            "trade_offer_direction_mismatch",
+        ),
+        (
+            DeliveryMode.SELLER_SENDS_OFFER,
+            DeliveryStatus.OFFER_RECEIVED,
+            {},
+            False,
+            (TradeOfferItemEvidence(730, "2", "give-asset-1", 1),),
+            "trade_offer_outgoing_items_present",
+        ),
+    ],
+)
+def test_trade_offer_direction_and_outgoing_items_fail_closed(
+    mode, status, kwargs, is_our_offer, items_to_give, expected_detail
+):
+    item = delivery(snapshot(status, mode, steam_tradeoffer_id="offer-1", **kwargs))
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(
+                is_our_offer=is_our_offer,
+                lifecycle=SteamTradeOfferLifecycle.ACTIVE,
+                items_to_give=items_to_give,
+            ),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.retryable is False
+    assert decision.target is None
+    assert decision.detail == expected_detail
+
+
+def test_trade_offer_requires_exact_snapshot_request_and_evidence_binding():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    mismatched = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(
+                is_our_offer=False,
+                lifecycle=SteamTradeOfferLifecycle.ACTIVE,
+                steam_tradeoffer_id="offer-2",
+            ),
+            steam_tradeoffer_id="offer-2",
+        ),
+    )
+    wrong_capability = plan_read_evidence_transition(
+        item,
+        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1")),
+    )
+    assert mismatched.result is AutoOfferResult.BLOCKED
+    assert mismatched.target is None
+    assert wrong_capability.result is AutoOfferResult.BLOCKED
+    assert wrong_capability.target is None
 
 
 @pytest.mark.parametrize(

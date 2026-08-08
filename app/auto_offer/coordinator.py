@@ -46,6 +46,7 @@ _READ_CAPABILITIES = frozenset(
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_INVENTORY_STATE,
+        PlatformCapability.READ_STEAM_TRADE_OFFER,
     }
 )
 _IDENTITY_FIELDS = (
@@ -89,10 +90,16 @@ def _request_matches_delivery(
     delivery: StoredDelivery,
 ) -> bool:
     snapshot = delivery.snapshot
-    return all(
+    identity_matches = all(
         getattr(request, field) == getattr(snapshot, field)
         for field in _IDENTITY_FIELDS
     ) and request.revision == delivery.revision
+    expected_tradeoffer_id = (
+        snapshot.steam_tradeoffer_id
+        if request.capability is PlatformCapability.READ_STEAM_TRADE_OFFER
+        else None
+    )
+    return identity_matches and request.steam_tradeoffer_id == expected_tradeoffer_id
 
 
 def _request_matches(
@@ -107,6 +114,7 @@ def _request_matches(
         and left.revision == right.revision
         and left.capability is right.capability
         and left.timeout_seconds == right.timeout_seconds
+        and left.steam_tradeoffer_id == right.steam_tradeoffer_id
     )
 
 
@@ -164,6 +172,18 @@ def _required_capability(delivery: StoredDelivery) -> PlatformCapability:
             return PlatformCapability.READ_OFFER_STATE
     if status is DeliveryStatus.AWAITING_INVENTORY:
         return PlatformCapability.READ_INVENTORY_STATE
+    if status is DeliveryStatus.OFFER_RECEIVED:
+        if mode is DeliveryMode.SELLER_SENDS_OFFER:
+            return PlatformCapability.READ_STEAM_TRADE_OFFER
+    if status is DeliveryStatus.OFFER_SENT:
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            return PlatformCapability.READ_STEAM_TRADE_OFFER
+    if status is DeliveryStatus.OFFER_CONFIRMED:
+        if mode in {
+            DeliveryMode.SELLER_SENDS_OFFER,
+            DeliveryMode.BUYER_SENDS_OFFER,
+        }:
+            return PlatformCapability.READ_STEAM_TRADE_OFFER
     raise ReadOnlyCoordinatorBlockedError("read_step_not_available")
 
 
@@ -300,6 +320,11 @@ class ReadOnlyDeliveryCoordinator:
             revision=delivery.revision,
             capability=capability,
             timeout_seconds=self._timeout_seconds,
+            steam_tradeoffer_id=(
+                snapshot.steam_tradeoffer_id
+                if capability is PlatformCapability.READ_STEAM_TRADE_OFFER
+                else None
+            ),
         )
 
     def _execute(
