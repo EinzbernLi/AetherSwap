@@ -627,3 +627,214 @@ def test_imports_are_pure_and_do_not_reference_external_trade_or_storage_modules
             if isinstance(node, ast.ImportFrom) and node.module
         )
         assert not imported.intersection({"buff", "steam", "sqlite3", "requests"})
+
+
+@pytest.mark.parametrize(
+    ("status", "mode", "extra"),
+    [
+        (DeliveryStatus.PENDING_DIRECTION, None, {}),
+        (DeliveryStatus.AWAITING_OFFER, DeliveryMode.BUYER_SENDS_OFFER, {}),
+        (
+            DeliveryStatus.OFFER_ATTEMPTED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0},
+        ),
+    ],
+)
+def test_prebinding_statuses_reject_tradeoffer_id(
+    status: DeliveryStatus,
+    mode: DeliveryMode | None,
+    extra: dict[str, object],
+):
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_snapshot(
+            snapshot(
+                delivery_status=status,
+                delivery_mode=mode,
+                steam_tradeoffer_id="trade-1",
+                **extra,
+            )
+        )
+
+
+def test_legitimate_seller_and_buyer_first_tradeoffer_bindings_are_allowed():
+    seller_current = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+    )
+    seller_target = replace(
+        seller_current,
+        delivery_status=DeliveryStatus.OFFER_RECEIVED,
+        steam_tradeoffer_id="trade-1",
+    )
+    validate_delivery_transition(seller_current, seller_target)
+
+    buyer_current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+        offer_attempted_at=1.0,
+    )
+    buyer_target = replace(
+        buyer_current,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="trade-1",
+        offer_sent_at=2.0,
+    )
+    validate_delivery_transition(buyer_current, buyer_target)
+
+
+def test_bound_tradeoffer_id_is_immutable_across_normal_paths():
+    seller_received = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_RECEIVED,
+        steam_tradeoffer_id="trade-1",
+    )
+    seller_confirmed = replace(
+        seller_received,
+        delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+    )
+    validate_delivery_transition(seller_received, seller_confirmed)
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(
+            seller_received,
+            replace(seller_confirmed, steam_tradeoffer_id="trade-2"),
+        )
+
+    buyer_sent = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="trade-1",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+    )
+    buyer_confirmed = replace(
+        buyer_sent,
+        delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+    )
+    validate_delivery_transition(buyer_sent, buyer_confirmed)
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(
+            buyer_sent,
+            replace(buyer_confirmed, steam_tradeoffer_id="trade-2"),
+        )
+
+    buyer_inventory = replace(
+        buyer_confirmed,
+        delivery_status=DeliveryStatus.AWAITING_INVENTORY,
+    )
+    validate_delivery_transition(buyer_confirmed, buyer_inventory)
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(
+            buyer_confirmed,
+            replace(buyer_inventory, steam_tradeoffer_id="trade-2"),
+        )
+
+    buyer_received = replace(
+        buyer_inventory,
+        delivery_status=DeliveryStatus.RECEIVED,
+        pending_receipt=False,
+        assetid="asset-1",
+        received_at=3.0,
+    )
+    validate_delivery_transition(buyer_inventory, buyer_received)
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(
+            buyer_inventory,
+            replace(buyer_received, steam_tradeoffer_id="trade-2"),
+        )
+
+
+@pytest.mark.parametrize(
+    "target_status",
+    [
+        DeliveryStatus.RESULT_UNKNOWN,
+        DeliveryStatus.BLOCKED,
+        DeliveryStatus.CANCELLED,
+        DeliveryStatus.REFUNDED,
+    ],
+)
+def test_bound_tradeoffer_id_is_preserved_on_exception_targets(
+    target_status: DeliveryStatus,
+):
+    current = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_RECEIVED,
+        steam_tradeoffer_id="trade-1",
+    )
+    target = replace(
+        current,
+        delivery_status=target_status,
+        delivery_error=(
+            "write_result_unknown"
+            if target_status is DeliveryStatus.RESULT_UNKNOWN
+            else None
+        ),
+    )
+    validate_delivery_transition(current, target)
+    for bad_id in ("trade-2", None):
+        with pytest.raises(DeliveryContractError):
+            validate_delivery_transition(
+                current,
+                replace(target, steam_tradeoffer_id=bad_id),
+            )
+
+
+def test_result_unknown_recovery_can_bind_first_tradeoffer_id_for_both_modes():
+    seller_unknown = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    seller_received = replace(
+        seller_unknown,
+        delivery_status=DeliveryStatus.OFFER_RECEIVED,
+        steam_tradeoffer_id="trade-seller",
+        delivery_error=None,
+    )
+    validate_delivery_transition(seller_unknown, seller_received)
+
+    buyer_unknown = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    buyer_sent = replace(
+        buyer_unknown,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="trade-buyer",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+        delivery_error=None,
+    )
+    validate_delivery_transition(buyer_unknown, buyer_sent)
+
+
+def test_arbitrary_first_tradeoffer_binding_is_rejected():
+    seller_awaiting = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+    )
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(
+            seller_awaiting,
+            replace(
+                seller_awaiting,
+                delivery_status=DeliveryStatus.BLOCKED,
+                steam_tradeoffer_id="trade-1",
+            ),
+        )
+
+    seller_unknown = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    with pytest.raises(DeliveryContractError):
+        validate_delivery_transition(
+            seller_unknown,
+            replace(
+                seller_unknown,
+                delivery_status=DeliveryStatus.BLOCKED,
+                steam_tradeoffer_id="trade-1",
+            ),
+        )

@@ -267,3 +267,72 @@ def test_write_failure_rolls_back_old_row(tmp_path):
 def test_store_does_not_expose_bypass_write_apis():
     names = dir(AutoOfferStore)
     assert not any(name in names for name in ("force_status", "force_update", "update_any", "raw_execute", "generic_upsert"))
+
+
+def test_bound_tradeoffer_id_cannot_rebind_or_clear_and_row_stays_unchanged(tmp_path):
+    store = make_store(tmp_path)
+    initial = store.ensure_initial(snapshot())
+    awaiting = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+    )
+    current = store.advance(initial, awaiting)
+    received = replace(
+        awaiting,
+        delivery_status=DeliveryStatus.OFFER_RECEIVED,
+        steam_tradeoffer_id="offer-1",
+    )
+    current = store.advance(current, received)
+
+    with pytest.raises(DeliveryContractError, match="bound steam trade offer ID cannot change"):
+        store.advance(
+            current,
+            replace(
+                received,
+                delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+                steam_tradeoffer_id="offer-2",
+            ),
+        )
+    assert store.get_by_purchase_id("purchase-1") == current
+
+    with pytest.raises(DeliveryContractError, match="bound steam trade offer ID cannot change"):
+        store.advance(
+            current,
+            replace(
+                received,
+                delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+                steam_tradeoffer_id=None,
+                delivery_error="write_result_unknown",
+            ),
+        )
+    assert store.get_by_purchase_id("purchase-1") == current
+
+    confirmed = replace(
+        received,
+        delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+    )
+    advanced = store.advance(current, confirmed)
+    assert advanced.revision == current.revision + 1
+    assert advanced.snapshot.steam_tradeoffer_id == "offer-1"
+
+
+def test_result_unknown_first_binding_remains_supported_in_store(tmp_path):
+    store = make_store(tmp_path)
+    initial = store.ensure_initial(snapshot())
+    unknown = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    unknown_stored = store.advance(initial, unknown)
+    sent = replace(
+        unknown,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="offer-1",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+        delivery_error=None,
+    )
+    advanced = store.advance(unknown_stored, sent)
+    assert advanced.snapshot.steam_tradeoffer_id == "offer-1"
+    assert advanced.revision == unknown_stored.revision + 1

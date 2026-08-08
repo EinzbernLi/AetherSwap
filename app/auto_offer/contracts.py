@@ -77,6 +77,24 @@ NORMAL_DIRECTION_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset
     }
 )
 
+_PRE_BINDING_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
+    {
+        DeliveryStatus.PENDING_DIRECTION,
+        DeliveryStatus.AWAITING_OFFER,
+        DeliveryStatus.OFFER_ATTEMPTED,
+    }
+)
+
+_TRADEOFFER_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
+    {
+        DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_RECEIVED,
+        DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.AWAITING_INVENTORY,
+        DeliveryStatus.RECEIVED,
+    }
+)
+
 
 @dataclass(frozen=True)
 class DeliverySnapshot:
@@ -156,13 +174,14 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
     elif status in NORMAL_DIRECTION_REQUIRED_STATUSES and mode is None:
         raise DeliveryContractError(f"{status.value} requires a delivery mode")
 
+    if status in _PRE_BINDING_STATUSES and snapshot.steam_tradeoffer_id is not None:
+        raise DeliveryContractError(f"{status.value} cannot have a trade offer ID")
+
     if status is DeliveryStatus.OFFER_ATTEMPTED:
         if mode is not DeliveryMode.BUYER_SENDS_OFFER:
             raise DeliveryContractError("offer_attempted requires buyer mode")
         if snapshot.offer_attempted_at is None:
             raise DeliveryContractError("offer_attempted requires offer_attempted_at")
-        if snapshot.steam_tradeoffer_id is not None:
-            raise DeliveryContractError("offer_attempted cannot have a trade offer ID")
         if snapshot.offer_sent_at is not None:
             raise DeliveryContractError("offer_attempted cannot have offer_sent_at")
         if snapshot.received_at is not None:
@@ -272,6 +291,48 @@ _SELLER_PATH: Final[tuple[DeliveryStatus, ...]] = (
 )
 
 
+def _allows_first_tradeoffer_binding(
+    current: DeliveryStatus,
+    target: DeliveryStatus,
+    mode: DeliveryMode | None,
+) -> bool:
+    if (
+        current is DeliveryStatus.AWAITING_OFFER
+        and target is DeliveryStatus.OFFER_RECEIVED
+        and mode is DeliveryMode.SELLER_SENDS_OFFER
+    ):
+        return True
+    if (
+        current is DeliveryStatus.OFFER_ATTEMPTED
+        and target is DeliveryStatus.OFFER_SENT
+        and mode is DeliveryMode.BUYER_SENDS_OFFER
+    ):
+        return True
+    if current is not DeliveryStatus.RESULT_UNKNOWN or mode is None:
+        return False
+    path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
+    return target in _TRADEOFFER_REQUIRED_STATUSES and target in path
+
+
+def _validate_tradeoffer_binding(
+    current: DeliverySnapshot,
+    target: DeliverySnapshot,
+    mode: DeliveryMode | None,
+) -> None:
+    current_id = current.steam_tradeoffer_id
+    target_id = target.steam_tradeoffer_id
+    if current_id is not None:
+        if target_id != current_id:
+            raise DeliveryContractError("bound steam trade offer ID cannot change")
+        return
+    if target_id is not None and not _allows_first_tradeoffer_binding(
+        current.delivery_status,
+        target.delivery_status,
+        mode,
+    ):
+        raise DeliveryContractError("steam trade offer ID cannot be bound on this transition")
+
+
 def _transition_statuses(
     current: DeliveryStatus,
     target: DeliveryStatus,
@@ -352,6 +413,7 @@ def validate_delivery_transition(
         if delivery_mode is not None:
             raise DeliveryContractError("snapshot transitions must derive delivery mode")
         delivery_mode = target.delivery_mode or current.delivery_mode
+        _validate_tradeoffer_binding(current, target, delivery_mode)
         current = current.delivery_status
         target = target.delivery_status
 
