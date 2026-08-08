@@ -234,6 +234,16 @@ class AutoOfferStore:
         try:
             validate_delivery_snapshot(current.snapshot)
             validate_delivery_snapshot(target)
+        except DeliveryContractError:
+            raise
+
+        if (
+            current.snapshot.steam_tradeoffer_id is not None
+            and target.steam_tradeoffer_id != current.snapshot.steam_tradeoffer_id
+        ):
+            raise DeliveryContractError("bound steam trade offer ID cannot change")
+
+        try:
             validate_delivery_transition(current.snapshot, target)
         except DeliveryContractError:
             raise
