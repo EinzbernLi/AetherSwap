@@ -216,13 +216,18 @@ def plan_read_evidence_transition(
             )
         return _blocked(delivery, "evidence_not_allowed")
 
-    if snapshot.delivery_status is DeliveryStatus.RECEIVED:
-        return _decision(delivery, None, AutoOfferResult.COMPLETE, False, "already_received")
     if snapshot.delivery_status in {
-        DeliveryStatus.BLOCKED,
+        DeliveryStatus.RECEIVED,
         DeliveryStatus.CANCELLED,
         DeliveryStatus.REFUNDED,
     }:
+        detail = (
+            "already_received"
+            if snapshot.delivery_status is DeliveryStatus.RECEIVED
+            else "terminal_delivery_state"
+        )
+        return _decision(delivery, None, AutoOfferResult.COMPLETE, False, detail)
+    if snapshot.delivery_status is DeliveryStatus.BLOCKED:
         return _blocked(delivery, "terminal_delivery_state")
 
     return _blocked(delivery, "transition_not_plannable")

@@ -361,8 +361,8 @@ def test_awaiting_inventory_wrong_success_cannot_advance():
             AutoOfferResult.COMPLETE,
         ),
         (DeliveryStatus.BLOCKED, None, {}, AutoOfferResult.BLOCKED),
-        (DeliveryStatus.CANCELLED, None, {}, AutoOfferResult.BLOCKED),
-        (DeliveryStatus.REFUNDED, None, {}, AutoOfferResult.BLOCKED),
+        (DeliveryStatus.CANCELLED, None, {}, AutoOfferResult.COMPLETE),
+        (DeliveryStatus.REFUNDED, None, {}, AutoOfferResult.COMPLETE),
     ],
 )
 def test_terminal_states_never_produce_a_target(status, mode, kwargs, expected_result):
@@ -372,7 +372,34 @@ def test_terminal_states_never_produce_a_target(status, mode, kwargs, expected_r
         result_for(item, PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
     )
     assert decision.result is expected_result
+    assert decision.retryable is False
     assert decision.target is None
+
+
+def test_terminal_result_semantics_match_the_executor_contract():
+    expected = {
+        DeliveryStatus.RECEIVED: AutoOfferResult.COMPLETE,
+        DeliveryStatus.CANCELLED: AutoOfferResult.COMPLETE,
+        DeliveryStatus.REFUNDED: AutoOfferResult.COMPLETE,
+        DeliveryStatus.BLOCKED: AutoOfferResult.BLOCKED,
+    }
+    for status, expected_result in expected.items():
+        kwargs = {}
+        if status is DeliveryStatus.RECEIVED:
+            kwargs = {
+                "steam_tradeoffer_id": "offer-1",
+                "received_at": 3.0,
+                "pending_receipt": False,
+                "assetid": "asset-1",
+            }
+        item = delivery(snapshot(status, DeliveryMode.SELLER_SENDS_OFFER if status is DeliveryStatus.RECEIVED else None, **kwargs))
+        decision = plan_read_evidence_transition(
+            item,
+            result_for(item, PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
+        )
+        assert decision.result is expected_result
+        assert decision.retryable is False
+        assert decision.target is None
 
 
 def test_no_store_or_runtime_side_effect_surface_in_planner():

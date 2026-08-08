@@ -32,7 +32,9 @@ ordering, and approximate IDs are never used for binding.
   `OFFER_RECEIVED` and preserves the exact Steam trade-offer ID.
 - Buyer-side first-send planning is blocked with `write_capability_required`.
 - `RESULT_UNKNOWN` never plans a resend or `OFFER_ATTEMPTED`.
-- Terminal states never produce a target.
+- `RECEIVED`, `CANCELLED`, and `REFUNDED` are terminal `COMPLETE` outcomes;
+  `BLOCKED` remains `BLOCKED`.
+- All terminal states produce no target and are not retryable.
 
 Every proposed target is validated with the existing snapshot and transition
 validators, and all delivery identity fields remain unchanged.
