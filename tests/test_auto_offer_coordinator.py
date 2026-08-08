@@ -15,6 +15,9 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+    TradeOfferItemEvidence,
 )
 from app.auto_offer.contracts import (
     DeliveryMode,
@@ -123,6 +126,18 @@ def success_factory(evidence):
     )
 
 
+def steam_offer_evidence(*, is_our_offer, lifecycle):
+    return SteamTradeOfferEvidence(
+        steam_tradeoffer_id="offer-1",
+        account_steam_id="steam-1",
+        counterparty_steam_id="counterparty-1",
+        is_our_offer=is_our_offer,
+        lifecycle=lifecycle,
+        items_to_give=(),
+        items_to_receive=(TradeOfferItemEvidence(730, "2", "offer-asset-1", 1),),
+    )
+
+
 def coordinator_for(item, adapter=None, *, store=None, timeout=7.5, capability=None):
     store = store or SpyStore(item)
     if adapter is None:
@@ -180,6 +195,31 @@ def test_constructor_rejects_send_offer_and_capability_mismatch():
             {PlatformCapability.SEND_OFFER: SpyAdapter({PlatformCapability.SEND_OFFER})},
             timeout_seconds=1.0,
         )
+
+
+def test_constructor_accepts_read_steam_trade_offer_adapter():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_TRADE_OFFER},
+        success_factory(
+            steam_offer_evidence(
+                is_our_offer=False,
+                lifecycle=SteamTradeOfferLifecycle.ACTIVE,
+            )
+        ),
+    )
+    result = ReadOnlyDeliveryCoordinator(
+        SpyStore(item),
+        {PlatformCapability.READ_STEAM_TRADE_OFFER: adapter},
+        timeout_seconds=1.0,
+    ).step(item)
+    assert result.platform_result.request.capability is PlatformCapability.READ_STEAM_TRADE_OFFER
     with pytest.raises(ReadOnlyCoordinatorError, match="adapter_capability_mismatch"):
         ReadOnlyDeliveryCoordinator(
             SpyStore(make_delivery()),
@@ -311,6 +351,7 @@ def test_direction_routes_exact_request_and_advances_once():
     assert request.revision == item.revision
     assert request.capability is PlatformCapability.READ_DELIVERY_DIRECTION
     assert request.timeout_seconds == 9.25
+    assert request.steam_tradeoffer_id is None
     assert len(adapter.calls) == 1
     assert len(store.advance_calls) == 1
     assert result.persisted is True
@@ -337,6 +378,7 @@ def test_seller_offer_routes_and_persists_exact_tradeoffer_id_once():
     result = coordinator.step(item)
     assert len(adapter.calls) == 1
     assert adapter.calls[0].capability is PlatformCapability.READ_OFFER_STATE
+    assert adapter.calls[0].steam_tradeoffer_id is None
     assert len(store.advance_calls) == 1
     assert result.after.snapshot.steam_tradeoffer_id == "offer-42"
     assert result.after.snapshot == result.decision.target
@@ -362,6 +404,7 @@ def test_inventory_read_waits_without_persistence():
         timeout_seconds=2.0,
     ).step(item)
     assert adapter.calls[0].capability is PlatformCapability.READ_INVENTORY_STATE
+    assert adapter.calls[0].steam_tradeoffer_id is None
     assert result.persisted is False
     assert result.after == item
     assert result.decision.target is None
@@ -391,9 +434,6 @@ def test_buyer_path_blocks_before_adapter_and_advance():
     "status,mode,kwargs",
     [
         (DeliveryStatus.OFFER_ATTEMPTED, DeliveryMode.BUYER_SENDS_OFFER, {"offer_attempted_at": 1.0}),
-        (DeliveryStatus.OFFER_SENT, DeliveryMode.BUYER_SENDS_OFFER, {"steam_tradeoffer_id": "offer-1", "offer_attempted_at": 1.0, "offer_sent_at": 2.0}),
-        (DeliveryStatus.OFFER_RECEIVED, DeliveryMode.SELLER_SENDS_OFFER, {"steam_tradeoffer_id": "offer-1"}),
-        (DeliveryStatus.OFFER_CONFIRMED, DeliveryMode.SELLER_SENDS_OFFER, {"steam_tradeoffer_id": "offer-1"}),
         (DeliveryStatus.RESULT_UNKNOWN, DeliveryMode.BUYER_SENDS_OFFER, {"delivery_error": "write_result_unknown"}),
         (DeliveryStatus.RECEIVED, DeliveryMode.SELLER_SENDS_OFFER, {"steam_tradeoffer_id": "offer-1", "received_at": 3.0, "pending_receipt": False, "assetid": "asset-1"}),
         (DeliveryStatus.BLOCKED, None, {}),
@@ -413,6 +453,180 @@ def test_non_read_ready_states_never_call_adapter_or_advance(status, mode, kwarg
     with pytest.raises(ReadOnlyCoordinatorBlockedError, match="read_step_not_available"):
         coordinator.step(item)
     assert adapter.calls == []
+    assert store.advance_calls == []
+
+
+@pytest.mark.parametrize(
+    "status,mode,kwargs,is_our_offer,lifecycle,expected_status,advance_count",
+    [
+        (
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {},
+            False,
+            SteamTradeOfferLifecycle.ACTIVE,
+            DeliveryStatus.OFFER_CONFIRMED,
+            1,
+        ),
+        (
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {},
+            False,
+            SteamTradeOfferLifecycle.ACCEPTED,
+            DeliveryStatus.OFFER_CONFIRMED,
+            1,
+        ),
+        (
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            True,
+            SteamTradeOfferLifecycle.ACTIVE,
+            DeliveryStatus.OFFER_CONFIRMED,
+            1,
+        ),
+        (
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            True,
+            SteamTradeOfferLifecycle.ACCEPTED,
+            DeliveryStatus.OFFER_CONFIRMED,
+            1,
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {},
+            False,
+            SteamTradeOfferLifecycle.ACTIVE,
+            None,
+            0,
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {},
+            False,
+            SteamTradeOfferLifecycle.ACCEPTED,
+            DeliveryStatus.AWAITING_INVENTORY,
+            1,
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            True,
+            SteamTradeOfferLifecycle.ACTIVE,
+            None,
+            0,
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            True,
+            SteamTradeOfferLifecycle.ACCEPTED,
+            DeliveryStatus.AWAITING_INVENTORY,
+            1,
+        ),
+    ],
+)
+def test_trade_offer_routes_copy_exact_id_and_advance_once(
+    status, mode, kwargs, is_our_offer, lifecycle, expected_status, advance_count
+):
+    item = make_delivery(
+        make_snapshot(status, mode, steam_tradeoffer_id="offer-1", **kwargs)
+    )
+    store = SpyStore(item)
+    adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_TRADE_OFFER},
+        success_factory(steam_offer_evidence(is_our_offer=is_our_offer, lifecycle=lifecycle)),
+    )
+    result = ReadOnlyDeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_STEAM_TRADE_OFFER: adapter},
+        timeout_seconds=1.0,
+    ).step(item)
+    assert len(store.get_calls) == 1
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0].capability is PlatformCapability.READ_STEAM_TRADE_OFFER
+    assert adapter.calls[0].steam_tradeoffer_id == "offer-1"
+    assert len(store.advance_calls) == advance_count
+    assert result.persisted is (advance_count == 1)
+    if expected_status is None:
+        assert result.after == item
+        assert result.decision.target is None
+        assert result.decision.detail == "trade_offer_not_accepted"
+    else:
+        assert result.after.snapshot.delivery_status is expected_status
+        assert result.after.snapshot.assetid is None
+        assert result.after.snapshot.received_at is None
+        assert result.after.snapshot.pending_receipt is True
+
+
+def test_trade_offer_missing_adapter_is_unsupported_without_advance():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    store = SpyStore(item)
+    result = ReadOnlyDeliveryCoordinator(store, {}, timeout_seconds=1.0).step(item)
+    assert result.platform_result.status is PlatformResultStatus.UNSUPPORTED
+    assert result.platform_result.detail == "adapter_not_available"
+    assert result.persisted is False
+    assert store.advance_calls == []
+
+
+def test_trade_offer_forged_request_id_is_normalized_to_malformed():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+
+    def forged_result(request):
+        forged_request = PlatformRequest(
+            purchase_id=request.purchase_id,
+            buff_order_id=request.buff_order_id,
+            account_id=request.account_id,
+            recipient_steam_id=request.recipient_steam_id,
+            revision=request.revision,
+            capability=request.capability,
+            timeout_seconds=request.timeout_seconds,
+            steam_tradeoffer_id="offer-2",
+        )
+        return PlatformResult(
+            forged_request,
+            PlatformResultStatus.SUCCESS,
+            evidence=SteamTradeOfferEvidence(
+                steam_tradeoffer_id="offer-2",
+                account_steam_id="steam-1",
+                counterparty_steam_id="counterparty-1",
+                is_our_offer=False,
+                lifecycle=SteamTradeOfferLifecycle.ACTIVE,
+                items_to_give=(),
+                items_to_receive=(TradeOfferItemEvidence(730, "2", "offer-asset-1", 1),),
+            ),
+        )
+
+    store = SpyStore(item)
+    adapter = SpyAdapter({PlatformCapability.READ_STEAM_TRADE_OFFER}, forged_result)
+    result = ReadOnlyDeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_STEAM_TRADE_OFFER: adapter},
+        timeout_seconds=1.0,
+    ).step(item)
+    assert result.platform_result.status is PlatformResultStatus.MALFORMED
+    assert result.platform_result.detail == "adapter_result_invalid"
+    assert result.platform_result.evidence is None
+    assert result.persisted is False
     assert store.advance_calls == []
 
 
