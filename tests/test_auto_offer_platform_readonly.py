@@ -15,12 +15,16 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
 )
 from app.auto_offer.platform_readonly import (
     BUFF_CAPABILITIES,
     STEAM_INVENTORY_CAPABILITIES,
+    STEAM_TRADE_OFFER_CAPABILITIES,
     BuffReadOnlyAdapter,
     SteamInventoryReadOnlyAdapter,
+    SteamTradeOfferReadOnlyAdapter,
 )
 
 
@@ -63,6 +67,19 @@ class InventoryStub:
         return self.payload
 
 
+class TradeOfferReaderStub:
+    def __init__(self, payload=None, error=None):
+        self.payload = payload
+        self.error = error
+        self.calls = []
+
+    def __call__(self, steam_tradeoffer_id):
+        self.calls.append(steam_tradeoffer_id)
+        if self.error:
+            raise self.error
+        return self.payload
+
+
 def buff_record(**changes):
     value = {
         "buff_order_id": "buff-order-1",
@@ -77,6 +94,43 @@ def buff_record(**changes):
 
 def buff_adapter(client):
     return BuffReadOnlyAdapter(client, account_id="account-1")
+
+
+def steam_trade_offer_adapter(reader):
+    return SteamTradeOfferReadOnlyAdapter(
+        reader,
+        account_id="account-1",
+        recipient_steam_id="steam-1",
+    )
+
+
+def steam_trade_offer_request(**changes):
+    value = request(
+        capability=PlatformCapability.READ_STEAM_TRADE_OFFER,
+        steam_tradeoffer_id="offer-1",
+    )
+    return replace(value, **changes)
+
+
+def steam_trade_offer_payload(**changes):
+    value = {
+        "steam_tradeoffer_id": "offer-1",
+        "account_steam_id": "steam-1",
+        "counterparty_steam_id": "steam-2",
+        "is_our_offer": False,
+        "lifecycle": "active",
+        "items_to_give": [],
+        "items_to_receive": [
+            {
+                "appid": 730,
+                "contextid": "2",
+                "assetid": "asset-1",
+                "amount": 1,
+            }
+        ],
+    }
+    value.update(changes)
+    return value
 
 
 def test_import_and_constructors_have_no_io_or_thread_side_effects(monkeypatch, tmp_path):
@@ -410,3 +464,193 @@ def test_no_platform_write_or_runtime_side_effect_imports():
 def test_existing_request_contract_rejects_invalid_revision(value):
     with pytest.raises(PlatformAdapterProtocolError):
         request(revision=value)
+
+
+def test_steam_trade_offer_adapter_declares_only_exact_read_capability():
+    reader = TradeOfferReaderStub(steam_trade_offer_payload())
+    adapter = steam_trade_offer_adapter(reader)
+
+    assert isinstance(adapter, PlatformAdapter)
+    assert adapter.capabilities == STEAM_TRADE_OFFER_CAPABILITIES
+    assert adapter.capabilities == frozenset(
+        {PlatformCapability.READ_STEAM_TRADE_OFFER}
+    )
+    with pytest.raises(AttributeError):
+        adapter.capabilities.add(PlatformCapability.SEND_OFFER)
+
+
+def test_steam_trade_offer_request_gate_does_not_call_reader():
+    reader = TradeOfferReaderStub(steam_trade_offer_payload())
+    adapter = steam_trade_offer_adapter(reader)
+
+    for item in (
+        request(capability=PlatformCapability.READ_OFFER_STATE),
+        steam_trade_offer_request(account_id="other-account"),
+        steam_trade_offer_request(recipient_steam_id="other-steam"),
+    ):
+        result = adapter.execute(item)
+        assert result.status in {
+            PlatformResultStatus.UNSUPPORTED,
+            PlatformResultStatus.FAILURE,
+        }
+        assert result.is_success is False
+    assert reader.calls == []
+
+
+def test_steam_trade_offer_adapter_uses_one_exact_reader_call_and_typed_evidence():
+    reader = TradeOfferReaderStub(steam_trade_offer_payload())
+    result = steam_trade_offer_adapter(reader).execute(
+        steam_trade_offer_request()
+    )
+
+    assert reader.calls == ["offer-1"]
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "trade_offer_active"
+    assert type(result.evidence) is SteamTradeOfferEvidence
+    assert result.evidence.steam_tradeoffer_id == "offer-1"
+    assert result.evidence.account_steam_id == "steam-1"
+    assert result.evidence.counterparty_steam_id == "steam-2"
+    assert result.evidence.is_our_offer is False
+    assert result.evidence.lifecycle is SteamTradeOfferLifecycle.ACTIVE
+    assert result.evidence.items_to_give == ()
+    assert result.evidence.items_to_receive[0].assetid == "asset-1"
+
+
+def test_steam_trade_offer_adapter_preserves_multi_item_direction_and_accepted():
+    payload = steam_trade_offer_payload(
+        is_our_offer=True,
+        lifecycle="accepted",
+        items_to_give=[
+            {"appid": 730, "contextid": "2", "assetid": "asset-2", "amount": 1},
+            {"appid": 440, "contextid": "2", "assetid": "asset-3", "amount": 1},
+        ],
+        items_to_receive=[],
+    )
+    result = steam_trade_offer_adapter(TradeOfferReaderStub(payload)).execute(
+        steam_trade_offer_request()
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "trade_offer_accepted"
+    assert result.evidence.lifecycle is SteamTradeOfferLifecycle.ACCEPTED
+    assert result.evidence.is_our_offer is True
+    assert [item.appid for item in result.evidence.items_to_give] == [440, 730]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("steam_tradeoffer_id", "other-offer"),
+        ("account_steam_id", "other-steam"),
+    ],
+)
+def test_steam_trade_offer_identity_mismatch_is_failure(field, value):
+    payload = steam_trade_offer_payload(**{field: value})
+    reader = TradeOfferReaderStub(payload)
+    result = steam_trade_offer_adapter(reader).execute(
+        steam_trade_offer_request()
+    )
+
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "identity_mismatch"
+    assert result.evidence is None
+    assert reader.calls == ["offer-1"]
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [
+        "confirmation_need",
+        "countered",
+        "expired",
+        "canceled",
+        "declined",
+        "invalid_items",
+        42,
+    ],
+)
+def test_unknown_trade_offer_lifecycle_is_not_success(lifecycle):
+    result = steam_trade_offer_adapter(
+        TradeOfferReaderStub(steam_trade_offer_payload(lifecycle=lifecycle))
+    ).execute(steam_trade_offer_request())
+
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "trade_offer_state_not_proven"
+    assert result.evidence is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {"steam_tradeoffer_id": "offer-1"},
+        steam_trade_offer_payload(items_to_receive=[{"assetid": "asset-1"}]),
+        steam_trade_offer_payload(items_to_give=[], items_to_receive=[]),
+        steam_trade_offer_payload(
+            items_to_receive=[
+                {"appid": 730, "contextid": "2", "assetid": "asset-1", "amount": 1},
+                {"appid": 730, "contextid": "2", "assetid": "asset-1", "amount": 2},
+            ]
+        ),
+    ],
+)
+def test_steam_trade_offer_malformed_payload_fails_closed(payload):
+    result = steam_trade_offer_adapter(TradeOfferReaderStub(payload)).execute(
+        steam_trade_offer_request()
+    )
+
+    assert result.status in {
+        PlatformResultStatus.RESULT_UNKNOWN,
+        PlatformResultStatus.MALFORMED,
+    }
+    assert result.is_success is False
+    assert result.evidence is None
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (TimeoutError("secret timeout"), PlatformResultStatus.TIMEOUT, "timeout"),
+        (RuntimeError("auth expired secret"), PlatformResultStatus.FAILURE, "network_failure"),
+        (RuntimeError("network secret"), PlatformResultStatus.FAILURE, "network_failure"),
+    ],
+)
+def test_steam_trade_offer_reader_failures_are_normalized(error, status, detail):
+    result = steam_trade_offer_adapter(
+        TradeOfferReaderStub(error=error)
+    ).execute(steam_trade_offer_request())
+
+    assert result.status is status
+    assert result.detail == detail
+    assert "secret" not in str(result.detail)
+    assert result.evidence is None
+
+
+def test_steam_trade_offer_auth_like_exception_is_normalized():
+    class AuthExpiredError(RuntimeError):
+        pass
+
+    result = steam_trade_offer_adapter(
+        TradeOfferReaderStub(error=AuthExpiredError("token secret"))
+    ).execute(steam_trade_offer_request())
+
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "auth_failed"
+    assert "token" not in str(result.detail)
+
+
+def test_steam_trade_offer_reader_platform_result_is_untrusted_payload():
+    reader = TradeOfferReaderStub(
+        PlatformResult(
+            steam_trade_offer_request(),
+            PlatformResultStatus.RESULT_UNKNOWN,
+        )
+    )
+    result = steam_trade_offer_adapter(reader).execute(
+        steam_trade_offer_request()
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None

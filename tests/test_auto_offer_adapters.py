@@ -22,6 +22,9 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+    TradeOfferItemEvidence,
 )
 
 
@@ -340,3 +343,196 @@ def test_evidence_values_are_immutable_validated_and_canonical():
     ):
         with pytest.raises(PlatformAdapterProtocolError):
             InventoryStateEvidence(assetids, total)
+
+
+def steam_request(**changes):
+    values = {
+        "capability": PlatformCapability.READ_STEAM_TRADE_OFFER,
+        "steam_tradeoffer_id": "offer-1",
+    }
+    values.update(changes)
+    return request(**values)
+
+
+def trade_item(**changes):
+    value = TradeOfferItemEvidence(
+        appid=730,
+        contextid="2",
+        assetid="asset-1",
+        amount=1,
+    )
+    return replace(value, **changes)
+
+
+def trade_evidence(**changes):
+    value = SteamTradeOfferEvidence(
+        steam_tradeoffer_id="offer-1",
+        account_steam_id="steam-1",
+        counterparty_steam_id="steam-2",
+        is_our_offer=False,
+        lifecycle=SteamTradeOfferLifecycle.ACTIVE,
+        items_to_give=(),
+        items_to_receive=(trade_item(),),
+    )
+    return replace(value, **changes)
+
+
+def test_steam_trade_offer_request_binding_is_exact_and_legacy_safe():
+    item = steam_request()
+    assert item.steam_tradeoffer_id == "offer-1"
+    assert request().steam_tradeoffer_id is None
+    with pytest.raises(PlatformAdapterProtocolError):
+        request(capability=PlatformCapability.READ_STEAM_TRADE_OFFER)
+    with pytest.raises(PlatformAdapterProtocolError):
+        request(steam_tradeoffer_id="offer-1")
+    with pytest.raises(PlatformAdapterProtocolError):
+        request(capability=PlatformCapability.SEND_OFFER, steam_tradeoffer_id="offer-1")
+    for value in ("", " offer-1", "offer-1 ", True, 1):
+        with pytest.raises(PlatformAdapterProtocolError):
+            steam_request(steam_tradeoffer_id=value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("revision", 0),
+        ("timeout_seconds", math.nan),
+        ("capability", "read_steam_trade_offer"),
+    ],
+)
+def test_platform_result_revalidates_forged_nested_request(field, value):
+    forged = object.__new__(PlatformRequest)
+    source = steam_request()
+    for name in (
+        "purchase_id",
+        "buff_order_id",
+        "account_id",
+        "recipient_steam_id",
+        "revision",
+        "capability",
+        "timeout_seconds",
+        "steam_tradeoffer_id",
+    ):
+        object.__setattr__(forged, name, getattr(source, name))
+    object.__setattr__(forged, field, value)
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(forged, PlatformResultStatus.RESULT_UNKNOWN)
+
+
+def test_platform_result_rejects_forged_missing_or_legacy_trade_offer_id():
+    missing = object.__new__(PlatformRequest)
+    source = steam_request()
+    for name in (
+        "purchase_id",
+        "buff_order_id",
+        "account_id",
+        "recipient_steam_id",
+        "revision",
+        "capability",
+        "timeout_seconds",
+    ):
+        object.__setattr__(missing, name, getattr(source, name))
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(missing, PlatformResultStatus.RESULT_UNKNOWN)
+
+    legacy = object.__new__(PlatformRequest)
+    source = request()
+    for name in (
+        "purchase_id",
+        "buff_order_id",
+        "account_id",
+        "recipient_steam_id",
+        "revision",
+        "capability",
+        "timeout_seconds",
+    ):
+        object.__setattr__(legacy, name, getattr(source, name))
+    object.__setattr__(legacy, "steam_tradeoffer_id", "offer-1")
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(legacy, PlatformResultStatus.RESULT_UNKNOWN)
+
+
+def test_steam_trade_offer_evidence_is_frozen_typed_and_canonical():
+    first = trade_item(assetid="asset-1")
+    second = trade_item(assetid="asset-2")
+    evidence = trade_evidence(
+        items_to_receive=(second, first),
+        items_to_give=(trade_item(appid=440, assetid="asset-3"),),
+    )
+    assert evidence.items_to_receive == (first, second)
+    assert evidence.items_to_give[0].appid == 440
+    with pytest.raises(FrozenInstanceError):
+        evidence.lifecycle = SteamTradeOfferLifecycle.ACCEPTED
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"appid": True},
+        {"appid": 0},
+        {"contextid": " context"},
+        {"assetid": ""},
+        {"amount": False},
+        {"amount": 0},
+    ],
+)
+def test_trade_offer_item_evidence_rejects_invalid_fields(value):
+    with pytest.raises(PlatformAdapterProtocolError):
+        trade_item(**value)
+
+
+def test_steam_trade_offer_evidence_rejects_identity_duplicates_and_empty_offer():
+    with pytest.raises(PlatformAdapterProtocolError):
+        trade_evidence(counterparty_steam_id="steam-1")
+    with pytest.raises(PlatformAdapterProtocolError):
+        trade_evidence(items_to_receive=(trade_item(), trade_item()))
+    with pytest.raises(PlatformAdapterProtocolError):
+        trade_evidence(items_to_give=(), items_to_receive=())
+
+
+def test_platform_result_accepts_new_typed_success_and_rejects_mismatch():
+    item = steam_request()
+    result = PlatformResult(
+        item,
+        PlatformResultStatus.SUCCESS,
+        detail="trade_offer_active",
+        evidence=trade_evidence(),
+    )
+    assert result.is_success is True
+    assert result.evidence.lifecycle is SteamTradeOfferLifecycle.ACTIVE
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            request(),
+            PlatformResultStatus.SUCCESS,
+            evidence=trade_evidence(),
+        )
+
+
+def test_fake_adapter_rejects_forged_nested_platform_result():
+    item = steam_request()
+    forged_request = object.__new__(PlatformRequest)
+    for name in (
+        "purchase_id",
+        "buff_order_id",
+        "account_id",
+        "recipient_steam_id",
+        "revision",
+        "capability",
+        "timeout_seconds",
+        "steam_tradeoffer_id",
+    ):
+        object.__setattr__(forged_request, name, getattr(item, name))
+    object.__delattr__(forged_request, "steam_tradeoffer_id")
+    forged_result = object.__new__(PlatformResult)
+    object.__setattr__(forged_result, "request", forged_request)
+    object.__setattr__(forged_result, "status", PlatformResultStatus.SUCCESS)
+    object.__setattr__(forged_result, "detail", "trade_offer_active")
+    object.__setattr__(forged_result, "evidence", trade_evidence())
+
+    result = FakePlatformAdapter(
+        capabilities={PlatformCapability.READ_STEAM_TRADE_OFFER},
+        outcomes={item: forged_result},
+    ).execute(item)
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.evidence is None
