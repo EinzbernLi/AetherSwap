@@ -2,9 +2,9 @@
 
 TASK-009 adds a thin, fail-closed boundary between the native Auto Offer
 contracts and existing platform readers.  `BuffReadOnlyAdapter` accepts an
-injected object exposing `get_steam_trades()`.  `SteamInventoryReadOnlyAdapter`
-accepts an injected reader bound to one `account_id` and one
-`recipient_steam_id`.
+injected object exposing `get_steam_trades()` and is explicitly bound to one
+host-provided `account_id`.  `SteamInventoryReadOnlyAdapter` accepts an
+injected reader bound to one `account_id` and one `recipient_steam_id`.
 
 The module reuses `PlatformRequest`, `PlatformResult`, `PlatformAdapter`,
 `PlatformCapability`, and `PlatformResultStatus` from TASK-008.  It does not
@@ -20,7 +20,13 @@ runtime registration.
   sends to the exact requested recipient.  `SEND_OFFER` is unsupported and is
   rejected before the injected client is touched.
 - BUFF offer state succeeds only for a unique exact order with a valid offer ID
-  and a known pending state.
+  and a known pending state for the exact requested recipient identity.
+- An account or recipient mismatch fails closed before any platform read where
+  that identity can be checked locally.  Missing recipient proof remains an
+  unknown result.
+- Injected readers return untrusted raw payloads only.  A returned
+  `PlatformResult` is malformed payload, not a result that may bypass exact
+  identity, order, or inventory validation.
 - Steam inventory success means only that a structurally valid snapshot was
   read for the exact bound identity.  It is not receipt proof and does not
   update a purchase, delivery snapshot, Store, or executor.

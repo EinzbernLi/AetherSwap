@@ -10,6 +10,7 @@ from app.auto_offer.adapters import (
     PlatformAdapterProtocolError,
     PlatformCapability,
     PlatformRequest,
+    PlatformResult,
     PlatformResultStatus,
 )
 from app.auto_offer.platform_readonly import (
@@ -71,12 +72,16 @@ def buff_record(**changes):
     return value
 
 
+def buff_adapter(client):
+    return BuffReadOnlyAdapter(client, account_id="account-1")
+
+
 def test_import_and_constructors_have_no_io_or_thread_side_effects(monkeypatch, tmp_path):
     before = tuple(tmp_path.iterdir())
     active = threading.active_count()
     monkeypatch.chdir(tmp_path)
     module = importlib.import_module("app.auto_offer.platform_readonly")
-    BuffReadOnlyAdapter(BuffStub())
+    buff_adapter(BuffStub())
     SteamInventoryReadOnlyAdapter(
         InventoryStub(), account_id="account-1", recipient_steam_id="steam-1"
     )
@@ -86,7 +91,7 @@ def test_import_and_constructors_have_no_io_or_thread_side_effects(monkeypatch, 
 
 
 def test_both_adapters_satisfy_platform_adapter_and_capabilities_are_immutable():
-    buff = BuffReadOnlyAdapter(BuffStub())
+    buff = buff_adapter(BuffStub())
     steam = SteamInventoryReadOnlyAdapter(
         InventoryStub(), account_id="account-1", recipient_steam_id="steam-1"
     )
@@ -100,7 +105,7 @@ def test_both_adapters_satisfy_platform_adapter_and_capabilities_are_immutable()
 
 def test_send_offer_and_unknown_capability_are_unsupported_without_buff_read():
     client = BuffStub([buff_record()])
-    adapter = BuffReadOnlyAdapter(client)
+    adapter = buff_adapter(client)
     for capability in (PlatformCapability.SEND_OFFER, PlatformCapability.READ_INVENTORY_STATE):
         result = adapter.execute(request(capability=capability))
         assert result.status is PlatformResultStatus.UNSUPPORTED
@@ -110,7 +115,7 @@ def test_send_offer_and_unknown_capability_are_unsupported_without_buff_read():
 
 def test_buff_preserves_exact_request_identity_and_revision():
     item = request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
-    result = BuffReadOnlyAdapter(BuffStub([buff_record()])).execute(item)
+    result = buff_adapter(BuffStub([buff_record()])).execute(item)
     assert result.request is item
     assert result.request.purchase_id == "purchase-1"
     assert result.request.buff_order_id == "buff-order-1"
@@ -124,7 +129,7 @@ def test_buff_preserves_exact_request_identity_and_revision():
     [[], [buff_record(buff_order_id="other")], [{"id": "buff-order-1"}]],
 )
 def test_buff_without_one_exact_canonical_order_is_unknown(payload):
-    result = BuffReadOnlyAdapter(BuffStub(payload)).execute(request())
+    result = buff_adapter(BuffStub(payload)).execute(request())
     assert result.status is PlatformResultStatus.RESULT_UNKNOWN
     assert result.detail == "order_not_proven"
 
@@ -138,12 +143,12 @@ def test_buff_generic_id_goods_id_and_name_cannot_prove_order():
             "market_hash_name": "buff-order-1",
         }
     ]
-    result = BuffReadOnlyAdapter(BuffStub(payload)).execute(request())
+    result = buff_adapter(BuffStub(payload)).execute(request())
     assert result.status is PlatformResultStatus.RESULT_UNKNOWN
 
 
 def test_buff_multiple_exact_matches_are_malformed():
-    result = BuffReadOnlyAdapter(
+    result = buff_adapter(
         BuffStub([buff_record(), buff_record(tradeofferid="offer-2")])
     ).execute(request())
     assert result.status is PlatformResultStatus.MALFORMED
@@ -151,21 +156,22 @@ def test_buff_multiple_exact_matches_are_malformed():
 
 
 def test_buff_unique_direction_requires_recipient_and_proves_seller_send():
-    result = BuffReadOnlyAdapter(
+    result = buff_adapter(
         BuffStub([buff_record()])
     ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "seller_sends_offer"
 
-    mismatch = BuffReadOnlyAdapter(
+    mismatch = buff_adapter(
         BuffStub([buff_record(buyer_steam_id="other-steam")])
     ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
-    assert mismatch.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert mismatch.status is PlatformResultStatus.FAILURE
+    assert mismatch.detail == "identity_mismatch"
     assert mismatch.is_success is False
 
 
 def test_buff_offer_state_requires_exact_order_trade_offer_and_known_pending_state():
-    result = BuffReadOnlyAdapter(BuffStub([buff_record()])).execute(request())
+    result = buff_adapter(BuffStub([buff_record()])).execute(request())
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "offer_pending"
 
@@ -173,14 +179,14 @@ def test_buff_offer_state_requires_exact_order_trade_offer_and_known_pending_sta
         buff_record(tradeofferid=None),
         buff_record(state="unknown"),
     ):
-        result = BuffReadOnlyAdapter(BuffStub([record])).execute(request())
+        result = buff_adapter(BuffStub([record])).execute(request())
         assert result.status is PlatformResultStatus.RESULT_UNKNOWN
         assert result.is_success is False
 
 
 @pytest.mark.parametrize("payload", [None, {"code": "OK", "data": []}, ["not-a-record"]])
 def test_buff_unavailable_or_malformed_payload_fails_closed(payload):
-    result = BuffReadOnlyAdapter(BuffStub(payload)).execute(request())
+    result = buff_adapter(BuffStub(payload)).execute(request())
     assert result.is_success is False
     assert result.status in {
         PlatformResultStatus.RESULT_UNKNOWN,
@@ -189,8 +195,8 @@ def test_buff_unavailable_or_malformed_payload_fails_closed(payload):
 
 
 def test_buff_timeout_and_exception_are_not_success():
-    timeout = BuffReadOnlyAdapter(BuffStub(error=TimeoutError())).execute(request())
-    failure = BuffReadOnlyAdapter(BuffStub(error=RuntimeError("secret"))).execute(request())
+    timeout = buff_adapter(BuffStub(error=TimeoutError())).execute(request())
+    failure = buff_adapter(BuffStub(error=RuntimeError("secret"))).execute(request())
     assert timeout.status is PlatformResultStatus.TIMEOUT
     assert timeout.detail == "timeout"
     assert failure.status is PlatformResultStatus.FAILURE
@@ -213,6 +219,14 @@ def test_steam_identity_mismatch_does_not_call_reader():
     assert reader.calls == []
 
 
+def test_buff_account_mismatch_does_not_call_client():
+    client = BuffStub([buff_record()])
+    result = buff_adapter(client).execute(request(account_id="other-account"))
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "identity_mismatch"
+    assert client.calls == 0
+
+
 def test_steam_unsupported_capability_does_not_call_reader():
     reader = InventoryStub({"success": 1, "assets": []})
     adapter = SteamInventoryReadOnlyAdapter(
@@ -221,6 +235,39 @@ def test_steam_unsupported_capability_does_not_call_reader():
     result = adapter.execute(request(capability=PlatformCapability.SEND_OFFER))
     assert result.status is PlatformResultStatus.UNSUPPORTED
     assert reader.calls == []
+
+
+def test_buff_offer_state_requires_exact_recipient_identity():
+    record_without_recipient = buff_record()
+    del record_without_recipient["buyer_steam_id"]
+    wrong_recipient = buff_adapter(
+        BuffStub([buff_record(buyer_steam_id="other-steam")])
+    ).execute(request())
+    missing_recipient = buff_adapter(
+        BuffStub([record_without_recipient])
+    ).execute(request())
+    assert wrong_recipient.status is PlatformResultStatus.FAILURE
+    assert wrong_recipient.detail == "identity_mismatch"
+    assert wrong_recipient.is_success is False
+    assert missing_recipient.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert missing_recipient.detail == "order_not_proven"
+    assert missing_recipient.is_success is False
+
+
+def test_injected_platform_result_is_untrusted_raw_payload():
+    item = request()
+    buff = buff_adapter(
+        BuffStub(PlatformResult(item, PlatformResultStatus.SUCCESS, "forged"))
+    ).execute(item)
+    steam = SteamInventoryReadOnlyAdapter(
+        InventoryStub(PlatformResult(item, PlatformResultStatus.SUCCESS, "forged")),
+        account_id="account-1",
+        recipient_steam_id="steam-1",
+    ).execute(request(capability=PlatformCapability.READ_INVENTORY_STATE))
+    assert buff.status is PlatformResultStatus.MALFORMED
+    assert buff.detail == "malformed_payload"
+    assert steam.status is PlatformResultStatus.MALFORMED
+    assert steam.detail == "malformed_payload"
 
 
 def test_steam_none_malformed_auth_and_valid_snapshot_mapping():
@@ -262,7 +309,9 @@ def test_steam_timeout_and_generic_exception_fail_closed():
 
 def test_constructor_rejects_non_callable_or_invalid_identity():
     with pytest.raises(PlatformAdapterProtocolError):
-        BuffReadOnlyAdapter(object())
+        BuffReadOnlyAdapter(object(), account_id="account-1")
+    with pytest.raises(PlatformAdapterProtocolError):
+        BuffReadOnlyAdapter(BuffStub(), account_id=" account-1")
     with pytest.raises(PlatformAdapterProtocolError):
         SteamInventoryReadOnlyAdapter(
             object(), account_id="account-1", recipient_steam_id="steam-1"

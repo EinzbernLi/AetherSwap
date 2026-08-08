@@ -8,11 +8,11 @@ state, retry, or execute platform mutations.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
 
 from app.auto_offer.adapters import (
     PlatformAdapter,
-    PlatformAdapterError,
     PlatformAdapterProtocolError,
     PlatformAdapterTimeoutError,
     PlatformCapability,
@@ -101,22 +101,33 @@ def _normalize_identifier(value: object) -> str | None:
     return normalized or None
 
 
+def _require_identifier(value: object, field: str) -> str:
+    if type(value) is not str or not value or value.strip() != value:
+        raise PlatformAdapterProtocolError(f"{field} must be a non-whitespace string")
+    return value
+
+
 def _is_auth_error(error: BaseException) -> bool:
     name = type(error).__name__.lower()
     return any(token in name for token in ("auth", "unauthor", "forbidden"))
 
 
-def _call_read(
-    request: PlatformRequest,
-    operation: Callable[[], object],
-) -> object | PlatformResult:
+@dataclass(frozen=True)
+class _ReadFailure:
+    """A private exception mapping that cannot be forged as a result."""
+
+    status: PlatformResultStatus
+    detail: str
+
+
+def _call_read(operation: Callable[[], object]) -> object | _ReadFailure:
     try:
         return operation()
     except (PlatformAdapterTimeoutError, TimeoutError):
-        return _result(request, PlatformResultStatus.TIMEOUT, "timeout")
+        return _ReadFailure(PlatformResultStatus.TIMEOUT, "timeout")
     except Exception as error:
         detail = "auth_failed" if _is_auth_error(error) else "network_failure"
-        return _result(request, PlatformResultStatus.FAILURE, detail)
+        return _ReadFailure(PlatformResultStatus.FAILURE, detail)
 
 
 def _records_from_payload(payload: object) -> list[Mapping[str, Any]] | PlatformResultStatus:
@@ -170,12 +181,20 @@ def _identity_values(
     return tuple(values)
 
 
-def _proves_seller_direction(record: Mapping[str, Any], recipient: str) -> bool | None:
+def _recipient_binding_failure(
+    record: Mapping[str, Any], recipient: str
+) -> tuple[PlatformResultStatus, str] | None:
     recipient_values = _identity_values(record, _RECIPIENT_FIELDS)
     if recipient_values is None:
-        return None
-    if not recipient_values or recipient not in recipient_values:
-        return False
+        return (PlatformResultStatus.MALFORMED, "malformed_payload")
+    if not recipient_values:
+        return (PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven")
+    if recipient_values[0] != recipient:
+        return (PlatformResultStatus.FAILURE, "identity_mismatch")
+    return None
+
+
+def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
 
     direction_values = _identity_values(record, _DIRECTION_FIELDS)
     if direction_values is None:
@@ -208,12 +227,13 @@ def _trade_offer_id(record: Mapping[str, Any]) -> str | None:
 class BuffReadOnlyAdapter:
     """Map one injected BUFF trade reader into the normalized result contract."""
 
-    def __init__(self, client: BuffReadOnlyClient) -> None:
+    def __init__(self, client: BuffReadOnlyClient, *, account_id: str) -> None:
         if not callable(getattr(client, "get_steam_trades", None)):
             raise PlatformAdapterProtocolError(
                 "client must provide get_steam_trades"
             )
         self._client = client
+        self._account_id = _require_identifier(account_id, "account_id")
 
     @property
     def capabilities(self) -> frozenset[PlatformCapability]:
@@ -225,10 +245,12 @@ class BuffReadOnlyAdapter:
             return _result(
                 request, PlatformResultStatus.UNSUPPORTED, "unsupported_capability"
             )
+        if request.account_id != self._account_id:
+            return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
 
-        raw = _call_read(request, self._client.get_steam_trades)
-        if isinstance(raw, PlatformResult):
-            return raw
+        raw = _call_read(self._client.get_steam_trades)
+        if isinstance(raw, _ReadFailure):
+            return _result(request, raw.status, raw.detail)
         parsed = _records_from_payload(raw)
         if isinstance(parsed, PlatformResultStatus):
             if parsed is PlatformResultStatus.RESULT_UNKNOWN:
@@ -250,8 +272,13 @@ class BuffReadOnlyAdapter:
             )
 
         record = matches[0]
+        recipient_failure = _recipient_binding_failure(
+            record, request.recipient_steam_id
+        )
+        if recipient_failure is not None:
+            return _result(request, *recipient_failure)
         if request.capability is PlatformCapability.READ_DELIVERY_DIRECTION:
-            proven = _proves_seller_direction(record, request.recipient_steam_id)
+            proven = _proves_seller_direction(record)
             if proven is None:
                 return _result(
                     request, PlatformResultStatus.MALFORMED, "malformed_payload"
@@ -304,17 +331,11 @@ class SteamInventoryReadOnlyAdapter:
     ) -> None:
         if not callable(reader):
             raise PlatformAdapterProtocolError("reader must be callable")
-        for value, field in (
-            (account_id, "account_id"),
-            (recipient_steam_id, "recipient_steam_id"),
-        ):
-            if type(value) is not str or not value or value.strip() != value:
-                raise PlatformAdapterProtocolError(
-                    f"{field} must be a non-whitespace string"
-                )
         self._reader = reader
-        self._account_id = account_id
-        self._recipient_steam_id = recipient_steam_id
+        self._account_id = _require_identifier(account_id, "account_id")
+        self._recipient_steam_id = _require_identifier(
+            recipient_steam_id, "recipient_steam_id"
+        )
 
     @property
     def capabilities(self) -> frozenset[PlatformCapability]:
@@ -334,11 +355,9 @@ class SteamInventoryReadOnlyAdapter:
                 request, PlatformResultStatus.FAILURE, "identity_mismatch"
             )
 
-        raw = _call_read(
-            request, lambda: self._reader(self._recipient_steam_id)
-        )
-        if isinstance(raw, PlatformResult):
-            return raw
+        raw = _call_read(lambda: self._reader(self._recipient_steam_id))
+        if isinstance(raw, _ReadFailure):
+            return _result(request, raw.status, raw.detail)
         if isinstance(raw, Mapping) and raw.get("auth_expired") is True:
             return _result(request, PlatformResultStatus.FAILURE, "auth_failed")
         if raw is None:
