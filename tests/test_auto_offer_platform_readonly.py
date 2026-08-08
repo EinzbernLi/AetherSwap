@@ -497,6 +497,47 @@ def test_steam_trade_offer_request_gate_does_not_call_reader():
     assert reader.calls == []
 
 
+def test_steam_trade_offer_adapter_revalidates_forged_requests_before_reader():
+    reader = TradeOfferReaderStub(steam_trade_offer_payload())
+    adapter = steam_trade_offer_adapter(reader)
+    source = steam_trade_offer_request()
+
+    def forged(**changes):
+        value = object.__new__(PlatformRequest)
+        for name in (
+            "purchase_id",
+            "buff_order_id",
+            "account_id",
+            "recipient_steam_id",
+            "revision",
+            "capability",
+            "timeout_seconds",
+            "steam_tradeoffer_id",
+        ):
+            object.__setattr__(value, name, getattr(source, name))
+        for name, changed in changes.items():
+            if changed is None:
+                object.__delattr__(value, name)
+            else:
+                object.__setattr__(value, name, changed)
+        return value
+
+    invalid_requests = (
+        forged(revision=0),
+        forged(timeout_seconds=math.nan),
+        forged(capability="read_steam_trade_offer"),
+        forged(steam_tradeoffer_id=None),
+        forged(
+            capability=PlatformCapability.READ_OFFER_STATE,
+        ),
+    )
+    for invalid in invalid_requests:
+        with pytest.raises(PlatformAdapterProtocolError):
+            adapter.execute(invalid)
+
+    assert reader.calls == []
+
+
 def test_steam_trade_offer_adapter_uses_one_exact_reader_call_and_typed_evidence():
     reader = TradeOfferReaderStub(steam_trade_offer_payload())
     result = steam_trade_offer_adapter(reader).execute(

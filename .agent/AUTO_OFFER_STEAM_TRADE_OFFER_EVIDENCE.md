@@ -41,7 +41,12 @@ called. Reader output is a normalized mapping, never a trusted
 `PlatformResult.__post_init__` defensively revalidates the nested
 `PlatformRequest`. This blocks forged requests created with object allocation
 or attribute mutation from bypassing identity, revision, timeout, capability,
-or Steam Trade Offer ID rules. `FakePlatformAdapter` applies the same boundary.
+or Steam Trade Offer ID rules. For a successful
+`READ_STEAM_TRADE_OFFER`, the result contract also cross-binds the evidence's
+exact `steam_tradeoffer_id` to the request ID and the evidence's
+`account_steam_id` to the request recipient. A mismatched offer or account is
+therefore rejected even when produced by a buggy or forged adapter.
+`FakePlatformAdapter` applies the same boundary.
 
 ## Typed evidence
 

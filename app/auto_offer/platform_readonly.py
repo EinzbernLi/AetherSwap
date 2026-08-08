@@ -118,6 +118,7 @@ def _result(
 def _request_or_raise(request: object) -> PlatformRequest:
     if type(request) is not PlatformRequest:
         raise PlatformAdapterProtocolError("request must be a PlatformRequest")
+    PlatformRequest.__post_init__(request)
     return request
 
 

@@ -330,6 +330,15 @@ class PlatformResult:
             raise PlatformAdapterProtocolError(
                 "success evidence failed defensive validation"
             ) from error
+        if self.request.capability is PlatformCapability.READ_STEAM_TRADE_OFFER:
+            if (
+                self.evidence.steam_tradeoffer_id != self.request.steam_tradeoffer_id
+                or self.evidence.account_steam_id
+                != self.request.recipient_steam_id
+            ):
+                raise PlatformAdapterProtocolError(
+                    "success evidence identity does not match request"
+                )
 
     @property
     def is_success(self) -> bool:

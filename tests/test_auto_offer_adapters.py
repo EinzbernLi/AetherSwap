@@ -419,6 +419,22 @@ def test_platform_result_revalidates_forged_nested_request(field, value):
         PlatformResult(forged, PlatformResultStatus.RESULT_UNKNOWN)
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"steam_tradeoffer_id": "offer-2"},
+        {"account_steam_id": "steam-3"},
+    ],
+)
+def test_platform_result_rejects_cross_bound_trade_offer_evidence(changes):
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            steam_request(),
+            PlatformResultStatus.SUCCESS,
+            evidence=trade_evidence(**changes),
+        )
+
+
 def test_platform_result_rejects_forged_missing_or_legacy_trade_offer_id():
     missing = object.__new__(PlatformRequest)
     source = steam_request()
@@ -535,4 +551,29 @@ def test_fake_adapter_rejects_forged_nested_platform_result():
     ).execute(item)
 
     assert result.status is PlatformResultStatus.MALFORMED
+    assert result.evidence is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"steam_tradeoffer_id": "offer-2"},
+        {"account_steam_id": "steam-3"},
+    ],
+)
+def test_fake_adapter_rejects_cross_bound_forged_evidence(changes):
+    item = steam_request()
+    forged_result = object.__new__(PlatformResult)
+    object.__setattr__(forged_result, "request", item)
+    object.__setattr__(forged_result, "status", PlatformResultStatus.SUCCESS)
+    object.__setattr__(forged_result, "detail", "trade_offer_active")
+    object.__setattr__(forged_result, "evidence", trade_evidence(**changes))
+
+    result = FakePlatformAdapter(
+        capabilities={PlatformCapability.READ_STEAM_TRADE_OFFER},
+        outcomes={item: forged_result},
+    ).execute(item)
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "evidence_type_mismatch"
     assert result.evidence is None
