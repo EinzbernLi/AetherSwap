@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, Protocol, TypeAlias, runtime_checkable
 
 
 class PlatformAdapterError(RuntimeError):
@@ -49,6 +49,60 @@ class PlatformResultStatus(str, Enum):
     TIMEOUT = "timeout"
     FAILURE = "failure"
     MALFORMED = "malformed"
+
+
+@dataclass(frozen=True)
+class DeliveryDirectionEvidence:
+    """Proof of the one delivery direction this boundary currently verifies."""
+
+    direction: str = "seller_sends_offer"
+
+    def __post_init__(self) -> None:
+        if self.direction != "seller_sends_offer":
+            raise PlatformAdapterProtocolError(
+                "direction evidence must be seller_sends_offer"
+            )
+
+
+@dataclass(frozen=True)
+class OfferStateEvidence:
+    """The exact Steam offer ID proven for one canonical BUFF order."""
+
+    steam_tradeoffer_id: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+
+
+@dataclass(frozen=True)
+class InventoryStateEvidence:
+    """Canonical asset IDs from one readable recipient inventory snapshot."""
+
+    assetids: tuple[str, ...]
+    total_inventory_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.assetids) is not tuple:
+            raise PlatformAdapterProtocolError("assetids must be a tuple")
+        for assetid in self.assetids:
+            _require_id(assetid, "assetid")
+        if len(set(self.assetids)) != len(self.assetids):
+            raise PlatformAdapterProtocolError("assetids must not contain duplicates")
+        if self.total_inventory_count is not None:
+            if type(self.total_inventory_count) is not int or self.total_inventory_count < 0:
+                raise PlatformAdapterProtocolError(
+                    "total_inventory_count must be a non-negative integer or None"
+                )
+            if self.total_inventory_count < len(self.assetids):
+                raise PlatformAdapterProtocolError(
+                    "total_inventory_count cannot be smaller than assetids"
+                )
+        object.__setattr__(self, "assetids", tuple(sorted(self.assetids)))
+
+
+PlatformEvidence: TypeAlias = (
+    DeliveryDirectionEvidence | OfferStateEvidence | InventoryStateEvidence
+)
 
 
 def _require_id(value: object, field: str) -> None:
@@ -95,6 +149,7 @@ class PlatformResult:
     request: PlatformRequest
     status: PlatformResultStatus
     detail: str | None = None
+    evidence: PlatformEvidence | None = None
 
     def __post_init__(self) -> None:
         if type(self.request) is not PlatformRequest:
@@ -105,6 +160,21 @@ class PlatformResult:
             type(self.detail) is not str or not self.detail or self.detail.strip() != self.detail
         ):
             raise PlatformAdapterProtocolError("result detail must be a non-whitespace string")
+        if self.status is not PlatformResultStatus.SUCCESS:
+            if self.evidence is not None:
+                raise PlatformAdapterProtocolError("non-success results cannot contain evidence")
+            return
+        expected_evidence = {
+            PlatformCapability.READ_DELIVERY_DIRECTION: DeliveryDirectionEvidence,
+            PlatformCapability.READ_OFFER_STATE: OfferStateEvidence,
+            PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,
+        }.get(self.request.capability)
+        if expected_evidence is None:
+            raise PlatformAdapterProtocolError("success is not allowed for this capability")
+        if type(self.evidence) is not expected_evidence:
+            raise PlatformAdapterProtocolError(
+                "success results require matching capability evidence"
+            )
 
     @property
     def is_success(self) -> bool:
@@ -182,8 +252,33 @@ class FakePlatformAdapter:
                     status=PlatformResultStatus.MALFORMED,
                     detail="result_identity_mismatch",
                 )
-            return configured
+            try:
+                return PlatformResult(
+                    request=configured.request,
+                    status=configured.status,
+                    detail=configured.detail,
+                    evidence=configured.evidence,
+                )
+            except PlatformAdapterProtocolError:
+                detail = (
+                    "success_evidence_required"
+                    if getattr(configured, "status", None)
+                    is PlatformResultStatus.SUCCESS
+                    and getattr(configured, "evidence", None) is None
+                    else "evidence_type_mismatch"
+                )
+                return PlatformResult(
+                    request=request,
+                    status=PlatformResultStatus.MALFORMED,
+                    detail=detail,
+                )
         if type(configured) is PlatformResultStatus:
+            if configured is PlatformResultStatus.SUCCESS:
+                return PlatformResult(
+                    request=request,
+                    status=PlatformResultStatus.MALFORMED,
+                    detail="success_evidence_required",
+                )
             return PlatformResult(request=request, status=configured)
         if isinstance(configured, PlatformAdapterTimeoutError):
             return PlatformResult(
@@ -218,13 +313,17 @@ class FakePlatformAdapter:
 
 __all__ = [
     "DEFAULT_PLATFORM_CAPABILITIES",
+    "DeliveryDirectionEvidence",
     "FakePlatformAdapter",
+    "InventoryStateEvidence",
+    "OfferStateEvidence",
     "PlatformAdapter",
     "PlatformAdapterError",
     "PlatformAdapterProtocolError",
     "PlatformAdapterTimeoutError",
     "PlatformAdapterUnsupportedError",
     "PlatformCapability",
+    "PlatformEvidence",
     "PlatformRequest",
     "PlatformResult",
     "PlatformResultStatus",

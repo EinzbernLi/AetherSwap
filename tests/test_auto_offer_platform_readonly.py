@@ -6,6 +6,9 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 from app.auto_offer.adapters import (
+    DeliveryDirectionEvidence,
+    InventoryStateEvidence,
+    OfferStateEvidence,
     PlatformAdapter,
     PlatformAdapterProtocolError,
     PlatformCapability,
@@ -161,6 +164,7 @@ def test_buff_unique_direction_requires_recipient_and_proves_seller_send():
     ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "seller_sends_offer"
+    assert result.evidence == DeliveryDirectionEvidence()
 
     mismatch = buff_adapter(
         BuffStub([buff_record(buyer_steam_id="other-steam")])
@@ -174,6 +178,7 @@ def test_buff_offer_state_requires_exact_order_trade_offer_and_known_pending_sta
     result = buff_adapter(BuffStub([buff_record()])).execute(request())
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "offer_pending"
+    assert result.evidence == OfferStateEvidence("offer-1")
 
     for record in (
         buff_record(tradeofferid=None),
@@ -257,13 +262,28 @@ def test_buff_offer_state_requires_exact_recipient_identity():
 def test_injected_platform_result_is_untrusted_raw_payload():
     item = request()
     buff = buff_adapter(
-        BuffStub(PlatformResult(item, PlatformResultStatus.SUCCESS, "forged"))
+        BuffStub(
+            PlatformResult(
+                item,
+                PlatformResultStatus.SUCCESS,
+                "forged",
+                OfferStateEvidence("offer-1"),
+            )
+        )
     ).execute(item)
+    inventory_request = request(capability=PlatformCapability.READ_INVENTORY_STATE)
     steam = SteamInventoryReadOnlyAdapter(
-        InventoryStub(PlatformResult(item, PlatformResultStatus.SUCCESS, "forged")),
+        InventoryStub(
+            PlatformResult(
+                inventory_request,
+                PlatformResultStatus.SUCCESS,
+                "forged",
+                InventoryStateEvidence(("asset-1",)),
+            )
+        ),
         account_id="account-1",
         recipient_steam_id="steam-1",
-    ).execute(request(capability=PlatformCapability.READ_INVENTORY_STATE))
+    ).execute(inventory_request)
     assert buff.status is PlatformResultStatus.MALFORMED
     assert buff.detail == "malformed_payload"
     assert steam.status is PlatformResultStatus.MALFORMED
@@ -291,6 +311,7 @@ def test_steam_none_malformed_auth_and_valid_snapshot_mapping():
     assert auth.detail == "auth_failed"
     assert valid.status is PlatformResultStatus.SUCCESS
     assert valid.detail == "inventory_snapshot_readable"
+    assert valid.evidence == InventoryStateEvidence((), 0)
     assert "received" not in (valid.detail or "")
 
 
@@ -332,6 +353,46 @@ def test_request_result_remain_immutable_and_adapter_does_not_mutate_request():
         item.revision = 4
     assert result.request is item
     assert item.revision == 3
+
+
+def test_steam_inventory_evidence_uses_only_canonical_asset_ids():
+    item = request(capability=PlatformCapability.READ_INVENTORY_STATE)
+    payload = {
+        "success": 1,
+        "assets": [
+            {"assetid": "asset-2", "name": "must-not-escape"},
+            {"assetid": "asset-1", "descriptions": ["must-not-escape"]},
+        ],
+        "total_inventory_count": 2,
+    }
+    result = SteamInventoryReadOnlyAdapter(
+        InventoryStub(payload), account_id="account-1", recipient_steam_id="steam-1"
+    ).execute(item)
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == InventoryStateEvidence(("asset-1", "asset-2"), 2)
+    assert not hasattr(result.evidence, "name")
+    assert not hasattr(result.evidence, "descriptions")
+    assert "received" not in (result.detail or "")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": 1, "assets": [{}]},
+        {"success": 1, "assets": [{"assetid": " asset-1"}]},
+        {"success": 1, "assets": [{"assetid": "asset-1"}, {"assetid": "asset-1"}]},
+        {"success": 1, "assets": [{"assetid": "asset-1"}], "total_inventory_count": 0},
+        {"success": 1, "total_inventory_count": 1},
+    ],
+)
+def test_malformed_or_ambiguous_steam_assets_fail_closed(payload):
+    result = SteamInventoryReadOnlyAdapter(
+        InventoryStub(payload), account_id="account-1", recipient_steam_id="steam-1"
+    ).execute(request(capability=PlatformCapability.READ_INVENTORY_STATE))
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
 
 
 def test_no_platform_write_or_runtime_side_effect_imports():
