@@ -580,8 +580,38 @@ def test_trade_offer_requires_exact_snapshot_request_and_evidence_binding():
     )
     assert mismatched.result is AutoOfferResult.BLOCKED
     assert mismatched.target is None
+    assert mismatched.retryable is False
+    assert mismatched.detail == "identity_mismatch"
     assert wrong_capability.result is AutoOfferResult.BLOCKED
     assert wrong_capability.target is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [PlatformResultStatus.RESULT_UNKNOWN, PlatformResultStatus.TIMEOUT],
+)
+def test_trade_offer_request_id_mismatch_blocks_before_non_success_mapping(status):
+    item = delivery(
+        snapshot(
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    result = PlatformResult(
+        request_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_tradeoffer_id="offer-2",
+        ),
+        status,
+        "read_not_current",
+    )
+    decision = plan_read_evidence_transition(item, result)
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.retryable is False
+    assert decision.detail == "identity_mismatch"
 
 
 @pytest.mark.parametrize(

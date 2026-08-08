@@ -506,6 +506,24 @@ def test_non_read_ready_states_never_call_adapter_or_advance(status, mode, kwarg
         ),
         (
             DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            {},
+            False,
+            SteamTradeOfferLifecycle.ACCEPTED,
+            DeliveryStatus.AWAITING_INVENTORY,
+            1,
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+            True,
+            SteamTradeOfferLifecycle.ACTIVE,
+            None,
+            0,
+        ),
+        (
+            DeliveryStatus.OFFER_CONFIRMED,
             DeliveryMode.BUYER_SENDS_OFFER,
             {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
             True,
@@ -540,6 +558,7 @@ def test_trade_offer_routes_copy_exact_id_and_advance_once(
     if expected_status is None:
         assert result.after == item
         assert result.decision.target is None
+        assert result.decision.detail == "trade_offer_not_accepted"
     else:
         assert result.after.snapshot.delivery_status is expected_status
         assert result.after.snapshot.assetid is None

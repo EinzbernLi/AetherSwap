@@ -65,9 +65,17 @@ def _validate_platform_result(platform_result: object) -> None:
 def _identity_matches(delivery: StoredDelivery, platform_result: PlatformResult) -> bool:
     request = platform_result.request
     snapshot = delivery.snapshot
-    return all(getattr(request, field) == getattr(snapshot, field) for field in _IDENTITY_FIELDS) and (
+    identity_matches = all(
+        getattr(request, field) == getattr(snapshot, field)
+        for field in _IDENTITY_FIELDS
+    ) and (
         request.revision == delivery.revision
     )
+    if request.capability is PlatformCapability.READ_STEAM_TRADE_OFFER:
+        return identity_matches and (
+            request.steam_tradeoffer_id == snapshot.steam_tradeoffer_id
+        )
+    return identity_matches
 
 
 def _decision(
