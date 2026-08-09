@@ -1089,6 +1089,39 @@ def test_trade_offer_reader_validates_exact_id_before_network(tradeoffer_id):
     assert session.calls == []
 
 
+@pytest.mark.parametrize(
+    "url,community",
+    [
+        (
+            f"https://steamcommunity.com/trade/{TRADE_ID}/receipt",
+            True,
+        ),
+        (
+            f"https://steamcommunity.com/inventory/{STEAM_ID}/{APP_ID}/{NEW_CONTEXT}",
+            True,
+        ),
+        (
+            GET_TRADE_OFFER_URL,
+            True,
+        ),
+    ],
+)
+def test_trade_offer_reader_rejects_non_offer_routes_before_session_io(
+    url,
+    community,
+):
+    session = FakeSession()
+    reader = trade_offer_reader_for(session)
+
+    with pytest.raises(
+        PlatformAdapterProtocolError,
+        match="not allowlisted",
+    ):
+        reader._get(url, community=community)
+
+    assert session.calls == []
+
+
 def test_trade_offer_reader_active_uses_one_exact_bounded_get_only_request():
     session = FakeSession([json_response(offer_payload(trade_offer_state=2))])
     result = trade_offer_reader_for(session)(OFFER_ID)
