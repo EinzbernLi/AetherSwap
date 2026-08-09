@@ -644,6 +644,19 @@ class SteamTradeOfferHttpReader(SteamCompletedTradeHttpReader):
             max_json_bytes=max_json_bytes,
         )
 
+    def _get(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, object] | None = None,
+        community: bool,
+    ) -> object:
+        if community or url != _GET_TRADE_OFFER_URL:
+            raise PlatformAdapterProtocolError(
+                "Steam Trade Offer read URL is not allowlisted"
+            )
+        return super()._get(url, params=params, community=False)
+
     def __call__(self, steam_tradeoffer_id: str) -> object:
         steam_tradeoffer_id = _canonical_positive_decimal(
             steam_tradeoffer_id, "steam_tradeoffer_id"
