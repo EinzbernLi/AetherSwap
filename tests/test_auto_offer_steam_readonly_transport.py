@@ -998,3 +998,338 @@ def test_task017_outgoing_item_remains_blocked():
     assert decision.result is AutoOfferResult.BLOCKED
     assert decision.target is None
     assert decision.detail == "completed_trade_outgoing_items_present"
+
+
+# TASK-019 exact Steam Trade Offer lifecycle transport coverage.
+def trade_offer_reader_for(session, **kwargs):
+    from app.auto_offer.steam_readonly_transport import SteamTradeOfferHttpReader
+
+    return SteamTradeOfferHttpReader(COOKIE, session=session, **kwargs)
+
+
+def trade_offer_request(delivery):
+    return PlatformRequest(
+        purchase_id=delivery.snapshot.purchase_id,
+        buff_order_id=delivery.snapshot.buff_order_id,
+        account_id=delivery.snapshot.account_id,
+        recipient_steam_id=delivery.snapshot.recipient_steam_id,
+        revision=delivery.revision,
+        capability=PlatformCapability.READ_STEAM_TRADE_OFFER,
+        timeout_seconds=5.0,
+        steam_tradeoffer_id=delivery.snapshot.steam_tradeoffer_id,
+    )
+
+
+def trade_offer_delivery(status, *, mode=DeliveryMode.SELLER_SENDS_OFFER):
+    buyer = mode is DeliveryMode.BUYER_SENDS_OFFER
+    return StoredDelivery(
+        snapshot=DeliverySnapshot(
+            purchase_id="purchase-1",
+            buff_order_id="buff-order-1",
+            account_id="account-1",
+            recipient_steam_id=STEAM_ID,
+            delivery_mode=mode,
+            delivery_status=status,
+            steam_tradeoffer_id=OFFER_ID,
+            offer_attempted_at=10.0 if buyer else None,
+            offer_sent_at=11.0 if buyer else None,
+            received_at=None,
+            delivery_error=None,
+            pending_receipt=True,
+            assetid=None,
+        ),
+        revision=1,
+    )
+
+
+def trade_offer_plan(session, delivery):
+    from app.auto_offer.platform_readonly import SteamTradeOfferReadOnlyAdapter
+
+    adapter = SteamTradeOfferReadOnlyAdapter(
+        trade_offer_reader_for(session),
+        account_id=delivery.snapshot.account_id,
+        recipient_steam_id=delivery.snapshot.recipient_steam_id,
+    )
+    result = adapter.execute(trade_offer_request(delivery))
+    return result, plan_read_evidence_transition(delivery, result)
+
+
+def test_trade_offer_reader_constructor_zero_io_and_reuses_strict_cookie_boundary(monkeypatch):
+    from app.auto_offer.steam_readonly_transport import SteamTradeOfferHttpReader
+
+    session = FakeSession()
+    created = []
+
+    def session_factory():
+        created.append(session)
+        return session
+
+    monkeypatch.setattr(transport.requests, "Session", session_factory)
+    reader = SteamTradeOfferHttpReader(COOKIE)
+    assert created == [session]
+    assert session.calls == []
+    assert reader.bound_account_steam_id == STEAM_ID
+    assert TOKEN not in repr(reader)
+
+    bad = FakeSession()
+    bad.verify = False
+    with pytest.raises(PlatformAdapterProtocolError, match="TLS verification"):
+        SteamTradeOfferHttpReader(COOKIE, session=bad)
+    assert bad.calls == []
+
+
+@pytest.mark.parametrize(
+    "tradeoffer_id",
+    ["0", "01", "-1", "+1", "1.0", " 1", "1 ", "abc", 1, True],
+)
+def test_trade_offer_reader_validates_exact_id_before_network(tradeoffer_id):
+    session = FakeSession()
+    with pytest.raises(PlatformAdapterProtocolError):
+        trade_offer_reader_for(session)(tradeoffer_id)
+    assert session.calls == []
+
+
+def test_trade_offer_reader_active_uses_one_exact_bounded_get_only_request():
+    session = FakeSession([json_response(offer_payload(trade_offer_state=2))])
+    result = trade_offer_reader_for(session)(OFFER_ID)
+    assert result["steam_tradeoffer_id"] == OFFER_ID
+    assert result["account_steam_id"] == STEAM_ID
+    assert result["counterparty_steam_id"] == COUNTERPARTY_ID
+    assert result["is_our_offer"] is False
+    assert result["lifecycle"] == "active"
+    assert result["items_to_give"] == []
+    assert result["items_to_receive"] == [source_item()]
+    assert len(session.calls) == 1
+    url, kwargs = session.calls[0]
+    assert url == GET_TRADE_OFFER_URL
+    assert kwargs == {
+        "params": {
+            "access_token": TOKEN,
+            "tradeofferid": OFFER_ID,
+            "language": "english",
+        },
+        "timeout": (5.0, 15.0),
+        "allow_redirects": False,
+    }
+
+
+def test_trade_offer_reader_accepted_does_not_require_trade_id_or_receipt():
+    payload = offer_payload(trade_offer_state=3, tradeid=None, time_updated=None)
+    session = FakeSession([json_response(payload)])
+    result = trade_offer_reader_for(session)(OFFER_ID)
+    assert result["lifecycle"] == "accepted"
+    assert "steam_trade_id" not in result
+    assert "completed_at" not in result
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("state", [1, 4, 5, 6, 7, 8, 9, 10, 11, 99])
+def test_trade_offer_reader_non_positive_lifecycle_returns_no_evidence(state):
+    session = FakeSession([json_response(offer_payload(trade_offer_state=state))])
+    assert trade_offer_reader_for(session)(OFFER_ID) is None
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("state", [None, "2", True, 2.0])
+def test_trade_offer_reader_malformed_lifecycle_type_fails_closed(state):
+    session = FakeSession([json_response(offer_payload(trade_offer_state=state))])
+    with pytest.raises(PlatformAdapterProtocolError, match="trade_offer_state"):
+        trade_offer_reader_for(session)(OFFER_ID)
+
+
+def test_trade_offer_reader_exact_returned_identity_is_required():
+    session = FakeSession([json_response(offer_payload(tradeofferid="1002", trade_offer_state=2))])
+    with pytest.raises(PlatformAdapterProtocolError, match="tradeofferid"):
+        trade_offer_reader_for(session)(OFFER_ID)
+    assert len(session.calls) == 1
+
+
+def test_trade_offer_reader_strict_direction_and_counterparty_identity():
+    session = FakeSession([json_response(offer_payload(trade_offer_state=2, is_our_offer=1))])
+    with pytest.raises(PlatformAdapterProtocolError, match="is_our_offer"):
+        trade_offer_reader_for(session)(OFFER_ID)
+
+    same_account = int(STEAM_ID) - STEAM_ID64_BASE
+    session = FakeSession(
+        [json_response(offer_payload(trade_offer_state=2, accountid_other=same_account))]
+    )
+    with pytest.raises(PlatformAdapterProtocolError, match="counterparty"):
+        trade_offer_reader_for(session)(OFFER_ID)
+
+
+def test_trade_offer_reader_canonicalizes_exact_items_and_drops_metadata():
+    later = source_item(assetid="3002", market_hash_name="ignored", price="99")
+    earlier = source_item(assetid="3001", name="ignored", classid="ignored")
+    session = FakeSession(
+        [
+            json_response(
+                offer_payload(
+                    trade_offer_state=2,
+                    items_received=[later, earlier],
+                )
+            )
+        ]
+    )
+    result = trade_offer_reader_for(session)(OFFER_ID)
+    assert result["items_to_receive"] == [source_item(assetid="3001"), source_item(assetid="3002")]
+    assert all(set(item) == {"appid", "contextid", "assetid", "amount"} for item in result["items_to_receive"])
+
+
+def test_trade_offer_reader_duplicate_or_empty_item_shape_fails_closed():
+    duplicate = FakeSession(
+        [
+            json_response(
+                offer_payload(
+                    trade_offer_state=2,
+                    items_received=[source_item(), source_item()],
+                )
+            )
+        ]
+    )
+    with pytest.raises(PlatformAdapterProtocolError, match="duplicate source"):
+        trade_offer_reader_for(duplicate)(OFFER_ID)
+
+    empty = FakeSession(
+        [
+            json_response(
+                offer_payload(
+                    trade_offer_state=2,
+                    items_given=[],
+                    items_received=[],
+                )
+            )
+        ]
+    )
+    with pytest.raises(PlatformAdapterProtocolError, match="at least one item"):
+        trade_offer_reader_for(empty)(OFFER_ID)
+
+
+def test_trade_offer_reader_maps_through_existing_adapter_to_typed_active_evidence():
+    from app.auto_offer.adapters import SteamTradeOfferEvidence, SteamTradeOfferLifecycle
+    from app.auto_offer.platform_readonly import SteamTradeOfferReadOnlyAdapter
+
+    delivery = trade_offer_delivery(DeliveryStatus.OFFER_RECEIVED)
+    session = FakeSession([json_response(offer_payload(trade_offer_state=2))])
+    adapter = SteamTradeOfferReadOnlyAdapter(
+        trade_offer_reader_for(session),
+        account_id=delivery.snapshot.account_id,
+        recipient_steam_id=delivery.snapshot.recipient_steam_id,
+    )
+    result = adapter.execute(trade_offer_request(delivery))
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert type(result.evidence) is SteamTradeOfferEvidence
+    assert result.evidence.lifecycle is SteamTradeOfferLifecycle.ACTIVE
+    assert result.evidence.steam_tradeoffer_id == OFFER_ID
+    assert result.evidence.account_steam_id == STEAM_ID
+    assert result.evidence.counterparty_steam_id == COUNTERPARTY_ID
+    assert result.evidence.items_to_receive[0].assetid == SOURCE_ASSET
+
+
+def test_trade_offer_reader_non_positive_state_remains_result_unknown_via_adapter():
+    from app.auto_offer.platform_readonly import SteamTradeOfferReadOnlyAdapter
+
+    delivery = trade_offer_delivery(DeliveryStatus.OFFER_RECEIVED)
+    session = FakeSession([json_response(offer_payload(trade_offer_state=6))])
+    adapter = SteamTradeOfferReadOnlyAdapter(
+        trade_offer_reader_for(session),
+        account_id=delivery.snapshot.account_id,
+        recipient_steam_id=delivery.snapshot.recipient_steam_id,
+    )
+    result = adapter.execute(trade_offer_request(delivery))
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.evidence is None
+    assert result.detail == "trade_offer_not_proven"
+
+
+def test_task014_seller_offer_received_active_proposes_offer_confirmed():
+    delivery = trade_offer_delivery(DeliveryStatus.OFFER_RECEIVED)
+    session = FakeSession([json_response(offer_payload(trade_offer_state=2, is_our_offer=False))])
+    result, decision = trade_offer_plan(session, delivery)
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.target is not None
+    assert decision.target.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+    assert decision.detail == "trade_offer_confirmed_active"
+
+
+def test_task014_buyer_offer_sent_exact_direction_active_preserves_existing_gate():
+    delivery = trade_offer_delivery(
+        DeliveryStatus.OFFER_SENT,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+    )
+    session = FakeSession([json_response(offer_payload(trade_offer_state=2, is_our_offer=True))])
+    result, decision = trade_offer_plan(session, delivery)
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.target is not None
+    assert decision.target.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+
+
+def test_task014_offer_confirmed_accepted_proposes_awaiting_inventory():
+    delivery = trade_offer_delivery(DeliveryStatus.OFFER_CONFIRMED)
+    session = FakeSession([json_response(offer_payload(trade_offer_state=3, is_our_offer=False))])
+    result, decision = trade_offer_plan(session, delivery)
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.target is not None
+    assert decision.target.delivery_status is DeliveryStatus.AWAITING_INVENTORY
+    assert decision.detail == "trade_offer_accepted"
+
+
+def test_task014_wrong_direction_remains_blocked():
+    delivery = trade_offer_delivery(DeliveryStatus.OFFER_RECEIVED)
+    session = FakeSession([json_response(offer_payload(trade_offer_state=2, is_our_offer=True))])
+    result, decision = trade_offer_plan(session, delivery)
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.detail == "trade_offer_direction_mismatch"
+
+
+def test_task014_outgoing_item_safety_gate_remains_blocked():
+    delivery = trade_offer_delivery(DeliveryStatus.OFFER_RECEIVED)
+    given = source_item(assetid="3101")
+    session = FakeSession(
+        [
+            json_response(
+                offer_payload(
+                    trade_offer_state=2,
+                    is_our_offer=False,
+                    items_given=[given],
+                    items_received=[source_item()],
+                )
+            )
+        ]
+    )
+    result, decision = trade_offer_plan(session, delivery)
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.detail == "trade_offer_outgoing_items_present"
+
+
+def test_trade_offer_reader_auth_timeout_and_network_errors_are_sanitized():
+    for response in (
+        FakeResponse(status_code=401, content=f"secret {TOKEN}".encode()),
+        FakeResponse(status_code=302, content=f"secret {TOKEN}".encode()),
+    ):
+        with pytest.raises(SteamReadOnlyTransportAuthError) as caught:
+            trade_offer_reader_for(FakeSession([response]))(OFFER_ID)
+        assert TOKEN not in str(caught.value)
+
+    with pytest.raises(PlatformAdapterTimeoutError) as caught:
+        trade_offer_reader_for(FakeSession([requests.Timeout(TOKEN)]))(OFFER_ID)
+    assert str(caught.value) == "steam_read_timeout"
+    assert TOKEN not in str(caught.value)
+
+    with pytest.raises(SteamReadOnlyTransportError) as caught:
+        trade_offer_reader_for(FakeSession([RuntimeError(COOKIE)]))(OFFER_ID)
+    assert str(caught.value) == "steam_read_failure"
+    assert TOKEN not in str(caught.value)
+
+
+def test_trade_offer_reader_json_bound_is_enforced_without_retry():
+    session = FakeSession([json_response(offer_payload(trade_offer_state=2))])
+    with pytest.raises(SteamReadOnlyTransportError, match="too_large"):
+        trade_offer_reader_for(session, max_json_bytes=10)(OFFER_ID)
+    assert len(session.calls) == 1
