@@ -72,17 +72,98 @@ E:\python\python.exe -m pip freeze > <external-backup-path>\pip-freeze-before.tx
 E:\python\python.exe --version
 ```
 
-The interpreter itself must be CPython 3.12.13. If it is a different Python
-patch, replace/reinstall that interpreter deliberately rather than pretending a
-package-only change makes the environment identical.
+### CPython 3.12.13 provisioning source
 
-Once the interpreter is 3.12.13, synchronize packages from a clean checkout:
+Python 3.12.13 is a security-only/source-only CPython release: python.org no
+longer publishes Windows binary installers for the 3.12 security-only line.
+Therefore Windows verification must not wait for or invent an official 3.12.13
+`.exe` installer, and it must not silently substitute 3.12.10 or another patch.
+
+For the Windows verifier only, use this pinned redistributable CPython build:
+
+- upstream: `astral-sh/python-build-standalone`
+- immutable release tag: `20260718`
+- artifact: `cpython-3.12.13+20260718-x86_64-pc-windows-msvc-install_only.tar.gz`
+- SHA-256: `56c9dd9681c4810cb8bfdec277ee2606d8ab17e678e5bc2bd138eb8098e330b6`
+- download URL: `https://github.com/astral-sh/python-build-standalone/releases/download/20260718/cpython-3.12.13%2B20260718-x86_64-pc-windows-msvc-install_only.tar.gz`
+
+The selected `x86_64-pc-windows-msvc` distribution is the project's baseline
+64-bit Windows verifier runtime. The `install_only` archive is used instead of a
+full build-artifact archive. This is an environment-provisioning input only; it
+is not an application dependency and must not be vendored into the repository.
+
+Fail closed before replacement if any of these checks fail:
+
+1. the host is not 64-bit Windows;
+2. the downloaded artifact hash differs from the pinned SHA-256;
+3. extraction does not produce exactly the expected staged `python\python.exe`;
+4. the staged interpreter does not report exactly `Python 3.12.13`;
+5. the current `E:\python` runtime cannot be backed up/moved safely.
+
+Never disable TLS/certificate verification to obtain the archive. Do not delete
+the previous `E:\python` runtime during hardening; keep it as a rollback backup
+until HARDENING-001 and TASK-021 verification both pass.
+
+### Replacement and package synchronization
+
+Perform replacement from an external verification/staging directory, not from
+`F:\AetherSwap` and not by writing generated files into the repository.
+A verifier may use a timestamped staging directory on `E:` so the final runtime
+move stays on the same volume.
+
+Reference procedure:
+
+```powershell
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$verificationRoot = 'D:\文档\ChatGPT\AetherSwap改造计划.verification'
+$downloadRoot = Join-Path $verificationRoot 'environment-downloads'
+$artifactName = 'cpython-3.12.13+20260718-x86_64-pc-windows-msvc-install_only.tar.gz'
+$artifactPath = Join-Path $downloadRoot $artifactName
+$artifactUrl = 'https://github.com/astral-sh/python-build-standalone/releases/download/20260718/cpython-3.12.13%2B20260718-x86_64-pc-windows-msvc-install_only.tar.gz'
+$expectedSha256 = '56c9dd9681c4810cb8bfdec277ee2606d8ab17e678e5bc2bd138eb8098e330b6'
+$stageRoot = "E:\python-hardening-stage-$stamp"
+$backupRuntime = "E:\python-backup-before-hardening-$stamp"
+
+if (-not [Environment]::Is64BitOperatingSystem) { throw 'WINDOWS_ARCH_MISMATCH' }
+New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+Invoke-WebRequest -Uri $artifactUrl -OutFile $artifactPath
+$actualSha256 = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualSha256 -ne $expectedSha256) { throw 'PYTHON_ARTIFACT_HASH_MISMATCH' }
+
+tar.exe -xzf $artifactPath -C $stageRoot
+$stagedPython = Join-Path $stageRoot 'python\python.exe'
+if (-not (Test-Path -LiteralPath $stagedPython -PathType Leaf)) { throw 'PYTHON_ARCHIVE_LAYOUT_MISMATCH' }
+$stagedVersion = (& $stagedPython --version 2>&1).ToString().Trim()
+if ($stagedVersion -ne 'Python 3.12.13') { throw 'PYTHON_PATCH_MISMATCH' }
+
+if (-not (Test-Path -LiteralPath 'E:\python' -PathType Container)) { throw 'PYTHON_RUNTIME_PATH_MISSING' }
+Move-Item -LiteralPath 'E:\python' -Destination $backupRuntime
+try {
+    Move-Item -LiteralPath (Join-Path $stageRoot 'python') -Destination 'E:\python'
+    $installedVersion = (& 'E:\python\python.exe' --version 2>&1).ToString().Trim()
+    if ($installedVersion -ne 'Python 3.12.13') { throw 'PYTHON_PATCH_MISMATCH' }
+} catch {
+    if ((Test-Path -LiteralPath $backupRuntime) -and -not (Test-Path -LiteralPath 'E:\python')) {
+        Move-Item -LiteralPath $backupRuntime -Destination 'E:\python'
+    }
+    throw
+}
+```
+
+After the exact interpreter is in place, synchronize packages from a fresh
+HARDENING-001 checkout:
 
 ```powershell
 E:\python\python.exe -m pip install --upgrade -r requirements.txt -r requirements-ci.txt -c constraints.txt
 E:\python\python.exe -m pip check
 E:\python\python.exe .github\scripts\check_environment_baseline.py
 ```
+
+If package synchronization, `pip check`, the fingerprint gate, or the required
+verification suite fails, stop before TASK-021 and report the exact failure. Do
+not hide the failure by installing an ad-hoc overlay. Keep the old runtime
+backup available for explicit rollback/recovery.
 
 Do not use a temporary Starlette overlay after this baseline is merged. In
 particular, the unsupported local combination observed during TASK-021,
