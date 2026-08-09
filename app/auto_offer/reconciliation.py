@@ -15,6 +15,7 @@ from .adapters import (
     PlatformCapability,
     PlatformResult,
     PlatformResultStatus,
+    SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
 )
@@ -35,6 +36,12 @@ _IDENTITY_FIELDS = (
     "buff_order_id",
     "account_id",
     "recipient_steam_id",
+)
+_TRADEOFFER_BOUND_CAPABILITIES = frozenset(
+    {
+        PlatformCapability.READ_STEAM_TRADE_OFFER,
+        PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+    }
 )
 
 
@@ -71,7 +78,7 @@ def _identity_matches(delivery: StoredDelivery, platform_result: PlatformResult)
     ) and (
         request.revision == delivery.revision
     )
-    if request.capability is PlatformCapability.READ_STEAM_TRADE_OFFER:
+    if request.capability in _TRADEOFFER_BOUND_CAPABILITIES:
         return identity_matches and (
             request.steam_tradeoffer_id == snapshot.steam_tradeoffer_id
         )
@@ -172,6 +179,63 @@ def _plan_steam_trade_offer_lifecycle(
                 "trade_offer_accepted",
             )
     return _blocked(delivery, "evidence_not_allowed")
+
+
+def _plan_completed_trade_receipt(
+    delivery: StoredDelivery,
+    evidence: SteamCompletedTradeEvidence,
+) -> ReconciliationDecision:
+    """Plan the only receipt transition that can be attributed without guessing."""
+
+    if evidence.items_given != ():
+        return _blocked(delivery, "completed_trade_outgoing_items_present")
+    if len(evidence.items_received) != 1:
+        return _blocked(delivery, "purchase_asset_attribution_ambiguous")
+
+    item = evidence.items_received[0]
+    expected_inventory_identity = (
+        item.appid,
+        item.new_contextid,
+        item.new_assetid,
+        item.amount,
+    )
+    inventory_identities = {
+        (
+            confirmed.appid,
+            confirmed.contextid,
+            confirmed.assetid,
+            confirmed.amount,
+        )
+        for confirmed in evidence.inventory_confirmed_items
+    }
+    if expected_inventory_identity not in inventory_identities:
+        return _decision(
+            delivery,
+            None,
+            AutoOfferResult.WAITING,
+            True,
+            "recipient_inventory_not_confirmed",
+        )
+
+    target = replace(
+        delivery.snapshot,
+        delivery_status=DeliveryStatus.RECEIVED,
+        assetid=item.new_assetid,
+        received_at=evidence.completed_at,
+        pending_receipt=False,
+    )
+    try:
+        validate_delivery_snapshot(target)
+        validate_delivery_transition(delivery.snapshot, target)
+    except DeliveryContractError:
+        return _blocked(delivery, "completed_trade_receipt_contract_mismatch")
+    return _decision(
+        delivery,
+        target,
+        AutoOfferResult.COMPLETE,
+        False,
+        "purchase_asset_received",
+    )
 
 
 def _map_non_success(
@@ -290,6 +354,11 @@ def plan_read_evidence_transition(
                 True,
                 "purchase_asset_not_proven",
             )
+        if (
+            request.capability is PlatformCapability.READ_STEAM_COMPLETED_TRADE
+            and type(evidence) is SteamCompletedTradeEvidence
+        ):
+            return _plan_completed_trade_receipt(delivery, evidence)
         return _blocked(delivery, "evidence_not_allowed")
 
     if snapshot.delivery_status in {
