@@ -47,6 +47,13 @@ _READ_CAPABILITIES = frozenset(
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_INVENTORY_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
+        PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+    }
+)
+_TRADEOFFER_BOUND_CAPABILITIES = frozenset(
+    {
+        PlatformCapability.READ_STEAM_TRADE_OFFER,
+        PlatformCapability.READ_STEAM_COMPLETED_TRADE,
     }
 )
 _IDENTITY_FIELDS = (
@@ -96,7 +103,7 @@ def _request_matches_delivery(
     ) and request.revision == delivery.revision
     expected_tradeoffer_id = (
         snapshot.steam_tradeoffer_id
-        if request.capability is PlatformCapability.READ_STEAM_TRADE_OFFER
+        if request.capability in _TRADEOFFER_BOUND_CAPABILITIES
         else None
     )
     return identity_matches and request.steam_tradeoffer_id == expected_tradeoffer_id
@@ -171,7 +178,7 @@ def _required_capability(delivery: StoredDelivery) -> PlatformCapability:
         if mode is DeliveryMode.SELLER_SENDS_OFFER:
             return PlatformCapability.READ_OFFER_STATE
     if status is DeliveryStatus.AWAITING_INVENTORY:
-        return PlatformCapability.READ_INVENTORY_STATE
+        return PlatformCapability.READ_STEAM_COMPLETED_TRADE
     if status is DeliveryStatus.OFFER_RECEIVED:
         if mode is DeliveryMode.SELLER_SENDS_OFFER:
             return PlatformCapability.READ_STEAM_TRADE_OFFER
@@ -322,7 +329,7 @@ class ReadOnlyDeliveryCoordinator:
             timeout_seconds=self._timeout_seconds,
             steam_tradeoffer_id=(
                 snapshot.steam_tradeoffer_id
-                if capability is PlatformCapability.READ_STEAM_TRADE_OFFER
+                if capability in _TRADEOFFER_BOUND_CAPABILITIES
                 else None
             ),
         )
