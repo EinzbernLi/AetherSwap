@@ -4,6 +4,7 @@ from math import inf, nan
 import pytest
 
 from app.auto_offer.adapters import (
+    CompletedTradeItemEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
     OfferStateEvidence,
@@ -15,11 +16,14 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    RecipientInventoryItemEvidence,
+    SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
 )
 from app.auto_offer.contracts import (
+    AutoOfferResult,
     DeliveryMode,
     DeliverySnapshot,
     DeliveryStatus,
@@ -138,6 +142,50 @@ def steam_offer_evidence(*, is_our_offer, lifecycle):
     )
 
 
+def completed_trade_evidence(
+    *,
+    steam_tradeoffer_id="offer-1",
+    steam_trade_id="trade-1",
+    completed_at=3.0,
+    items_given=(),
+    items_received=None,
+    inventory_confirmed_items=None,
+):
+    received = items_received
+    if received is None:
+        received = (
+            CompletedTradeItemEvidence(
+                730,
+                "2",
+                "source-asset-1",
+                1,
+                "3",
+                "new-asset-1",
+            ),
+        )
+    confirmed = inventory_confirmed_items
+    if confirmed is None:
+        item = received[0]
+        confirmed = (
+            RecipientInventoryItemEvidence(
+                item.appid,
+                item.new_contextid,
+                item.new_assetid,
+                item.amount,
+            ),
+        )
+    return SteamCompletedTradeEvidence(
+        steam_tradeoffer_id=steam_tradeoffer_id,
+        steam_trade_id=steam_trade_id,
+        account_steam_id="steam-1",
+        counterparty_steam_id="counterparty-1",
+        completed_at=completed_at,
+        items_given=items_given,
+        items_received=received,
+        inventory_confirmed_items=confirmed,
+    )
+
+
 def coordinator_for(item, adapter=None, *, store=None, timeout=7.5, capability=None):
     store = store or SpyStore(item)
     if adapter is None:
@@ -230,6 +278,26 @@ def test_constructor_accepts_read_steam_trade_offer_adapter():
             },
             timeout_seconds=1.0,
         )
+
+
+def test_constructor_accepts_completed_trade_adapter():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        success_factory(completed_trade_evidence()),
+    )
+    coordinator = ReadOnlyDeliveryCoordinator(
+        SpyStore(item),
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE: adapter},
+        timeout_seconds=1.0,
+    )
+    assert isinstance(coordinator, ReadOnlyDeliveryCoordinator)
 
 
 @pytest.mark.parametrize("timeout", [True, 0, -1, inf, nan])
@@ -385,7 +453,46 @@ def test_seller_offer_routes_and_persists_exact_tradeoffer_id_once():
     assert result.after.revision == 2
 
 
-def test_inventory_read_waits_without_persistence():
+def test_awaiting_inventory_routes_completed_trade_without_inventory_fallback():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    store = SpyStore(item)
+    inventory_adapter = SpyAdapter(
+        {PlatformCapability.READ_INVENTORY_STATE},
+        success_factory(InventoryStateEvidence(("asset-1",), 1)),
+    )
+    result = ReadOnlyDeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_INVENTORY_STATE: inventory_adapter},
+        timeout_seconds=2.0,
+    ).step(item)
+    assert inventory_adapter.calls == []
+    assert result.platform_result.request.capability is (
+        PlatformCapability.READ_STEAM_COMPLETED_TRADE
+    )
+    assert result.platform_result.request.steam_tradeoffer_id == "offer-1"
+    assert result.platform_result.status is PlatformResultStatus.UNSUPPORTED
+    assert result.platform_result.detail == "adapter_not_available"
+    assert result.persisted is False
+    assert result.after == item
+    assert result.decision.target is None
+    assert result.decision.detail == "unsupported_capability"
+    assert store.advance_calls == []
+    assert item.snapshot.assetid is None
+    assert item.snapshot.received_at is None
+    assert item.snapshot.pending_receipt is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    [PlatformResultStatus.RESULT_UNKNOWN, PlatformResultStatus.TIMEOUT],
+)
+def test_completed_trade_non_success_never_persists(status):
     item = make_delivery(
         make_snapshot(
             DeliveryStatus.AWAITING_INVENTORY,
@@ -395,24 +502,188 @@ def test_inventory_read_waits_without_persistence():
     )
     store = SpyStore(item)
     adapter = SpyAdapter(
-        {PlatformCapability.READ_INVENTORY_STATE},
-        success_factory(InventoryStateEvidence(("asset-1",), 1)),
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        lambda request: PlatformResult(request, status, "read_pending"),
     )
     result = ReadOnlyDeliveryCoordinator(
         store,
-        {PlatformCapability.READ_INVENTORY_STATE: adapter},
-        timeout_seconds=2.0,
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE: adapter},
+        timeout_seconds=1.0,
     ).step(item)
-    assert adapter.calls[0].capability is PlatformCapability.READ_INVENTORY_STATE
-    assert adapter.calls[0].steam_tradeoffer_id is None
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0].steam_tradeoffer_id == "offer-1"
     assert result.persisted is False
     assert result.after == item
     assert result.decision.target is None
-    assert result.decision.detail == "purchase_asset_not_proven"
     assert store.advance_calls == []
-    assert item.snapshot.assetid is None
-    assert item.snapshot.received_at is None
-    assert item.snapshot.pending_receipt is True
+
+
+@pytest.mark.parametrize(
+    "evidence,expected_result,expected_detail",
+    [
+        (
+            completed_trade_evidence(
+                items_given=(
+                    CompletedTradeItemEvidence(
+                        730, "2", "given-source", 1, "3", "given-new"
+                    ),
+                )
+            ),
+            AutoOfferResult.BLOCKED,
+            "completed_trade_outgoing_items_present",
+        ),
+        (
+            completed_trade_evidence(
+                items_received=(
+                    CompletedTradeItemEvidence(
+                        730, "2", "source-1", 1, "3", "new-1"
+                    ),
+                    CompletedTradeItemEvidence(
+                        730, "2", "source-2", 1, "3", "new-2"
+                    ),
+                ),
+                inventory_confirmed_items=(),
+            ),
+            AutoOfferResult.BLOCKED,
+            "purchase_asset_attribution_ambiguous",
+        ),
+        (
+            completed_trade_evidence(inventory_confirmed_items=()),
+            AutoOfferResult.WAITING,
+            "recipient_inventory_not_confirmed",
+        ),
+    ],
+)
+def test_completed_trade_unsafe_or_unconfirmed_evidence_never_advances(
+    evidence, expected_result, expected_detail
+):
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    store = SpyStore(item)
+    adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        success_factory(evidence),
+    )
+    result = ReadOnlyDeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE: adapter},
+        timeout_seconds=1.0,
+    ).step(item)
+    assert len(adapter.calls) == 1
+    assert result.decision.result is expected_result
+    assert result.decision.detail == expected_detail
+    assert result.decision.target is None
+    assert result.persisted is False
+    assert store.advance_calls == []
+
+
+def test_completed_trade_confirmed_single_item_persists_received_once():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        ),
+        revision=4,
+    )
+    store = SpyStore(item)
+    evidence = completed_trade_evidence(completed_at=3.0)
+    adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        success_factory(evidence),
+    )
+    result = ReadOnlyDeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE: adapter},
+        timeout_seconds=6.0,
+    ).step(item)
+    request = adapter.calls[0]
+    assert request.capability is PlatformCapability.READ_STEAM_COMPLETED_TRADE
+    assert request.steam_tradeoffer_id == "offer-1"
+    assert request.revision == 4
+    assert len(adapter.calls) == 1
+    assert len(store.advance_calls) == 1
+    assert result.persisted is True
+    assert result.decision.result is AutoOfferResult.COMPLETE
+    assert result.after.snapshot.delivery_status is DeliveryStatus.RECEIVED
+    assert result.after.snapshot.assetid == "new-asset-1"
+    assert result.after.snapshot.received_at == 3.0
+    assert result.after.snapshot.pending_receipt is False
+    assert result.after.snapshot.steam_tradeoffer_id == "offer-1"
+    assert result.after.revision == item.revision + 1
+
+
+def test_completed_trade_forged_returned_offer_id_is_malformed_without_advance():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+
+    def forged_result(request):
+        forged_request = PlatformRequest(
+            purchase_id=request.purchase_id,
+            buff_order_id=request.buff_order_id,
+            account_id=request.account_id,
+            recipient_steam_id=request.recipient_steam_id,
+            revision=request.revision,
+            capability=request.capability,
+            timeout_seconds=request.timeout_seconds,
+            steam_tradeoffer_id="offer-2",
+        )
+        return PlatformResult(
+            forged_request,
+            PlatformResultStatus.SUCCESS,
+            evidence=completed_trade_evidence(steam_tradeoffer_id="offer-2"),
+        )
+
+    store = SpyStore(item)
+    adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE}, forged_result
+    )
+    result = ReadOnlyDeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE: adapter},
+        timeout_seconds=1.0,
+    ).step(item)
+    assert result.platform_result.status is PlatformResultStatus.MALFORMED
+    assert result.platform_result.detail == "adapter_result_invalid"
+    assert result.platform_result.evidence is None
+    assert result.persisted is False
+    assert store.advance_calls == []
+
+
+def test_completed_trade_receipt_stale_write_has_no_retry():
+    item = make_delivery(
+        make_snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    store = SpyStore(
+        item, advance_error=AutoOfferStoreStaleWriteError("secret")
+    )
+    adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        success_factory(completed_trade_evidence()),
+    )
+    coordinator = ReadOnlyDeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE: adapter},
+        timeout_seconds=1.0,
+    )
+    with pytest.raises(ReadOnlyCoordinatorConflictError, match="stale_write"):
+        coordinator.step(item)
+    assert len(adapter.calls) == 1
+    assert len(store.advance_calls) == 1
 
 
 def test_buyer_path_blocks_before_adapter_and_advance():

@@ -3,6 +3,7 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 from app.auto_offer.adapters import (
+    CompletedTradeItemEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
     OfferStateEvidence,
@@ -10,6 +11,8 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    RecipientInventoryItemEvidence,
+    SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
@@ -114,6 +117,52 @@ def steam_offer_evidence(
         items_to_give=items_to_give,
         items_to_receive=items_to_receive
         or (TradeOfferItemEvidence(730, "2", "offer-asset-1", 1),),
+    )
+
+
+def completed_trade_evidence(
+    *,
+    steam_tradeoffer_id="offer-1",
+    steam_trade_id="trade-1",
+    account_steam_id="steam-1",
+    counterparty_steam_id="counterparty-1",
+    completed_at=3.0,
+    items_given=(),
+    items_received=None,
+    inventory_confirmed_items=None,
+):
+    received = items_received
+    if received is None:
+        received = (
+            CompletedTradeItemEvidence(
+                appid=730,
+                contextid="2",
+                assetid="source-asset-1",
+                amount=1,
+                new_contextid="3",
+                new_assetid="new-asset-1",
+            ),
+        )
+    confirmed = inventory_confirmed_items
+    if confirmed is None:
+        item = received[0]
+        confirmed = (
+            RecipientInventoryItemEvidence(
+                appid=item.appid,
+                contextid=item.new_contextid,
+                assetid=item.new_assetid,
+                amount=item.amount,
+            ),
+        )
+    return SteamCompletedTradeEvidence(
+        steam_tradeoffer_id=steam_tradeoffer_id,
+        steam_trade_id=steam_trade_id,
+        account_steam_id=account_steam_id,
+        counterparty_steam_id=counterparty_steam_id,
+        completed_at=completed_at,
+        items_given=items_given,
+        items_received=received,
+        inventory_confirmed_items=confirmed,
     )
 
 
@@ -374,6 +423,204 @@ def test_awaiting_inventory_wrong_success_cannot_advance():
     )
     assert decision.result is AutoOfferResult.BLOCKED
     assert decision.target is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [PlatformResultStatus.RESULT_UNKNOWN, PlatformResultStatus.TIMEOUT],
+)
+def test_completed_trade_request_id_mismatch_blocks_before_non_success_mapping(status):
+    item = delivery(
+        snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    result = PlatformResult(
+        request_for(
+            item,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            steam_tradeoffer_id="offer-2",
+        ),
+        status,
+        "read_not_current",
+    )
+    decision = plan_read_evidence_transition(item, result)
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.retryable is False
+    assert decision.detail == "identity_mismatch"
+
+
+def test_completed_trade_outgoing_items_block_receipt():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    evidence = completed_trade_evidence(
+        items_given=(
+            CompletedTradeItemEvidence(
+                730, "2", "given-source", 1, "3", "given-new"
+            ),
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            evidence,
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.retryable is False
+    assert decision.detail == "completed_trade_outgoing_items_present"
+
+
+def test_completed_trade_multi_item_attribution_is_blocked_without_selection():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    received = (
+        CompletedTradeItemEvidence(730, "2", "source-1", 1, "3", "new-1"),
+        CompletedTradeItemEvidence(730, "2", "source-2", 1, "3", "new-2"),
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            completed_trade_evidence(
+                items_received=received,
+                inventory_confirmed_items=(),
+            ),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.retryable is False
+    assert decision.detail == "purchase_asset_attribution_ambiguous"
+    assert item.snapshot.assetid is None
+
+
+def test_completed_trade_single_item_waits_for_exact_inventory_confirmation():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            completed_trade_evidence(inventory_confirmed_items=()),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.target is None
+    assert decision.retryable is True
+    assert decision.detail == "recipient_inventory_not_confirmed"
+
+
+def test_completed_trade_seller_receipt_uses_exact_new_identity_and_timestamp():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    evidence = completed_trade_evidence(completed_at=3.0)
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            evidence,
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    target = decision.target
+    assert target is not None
+    assert target.delivery_status is DeliveryStatus.RECEIVED
+    assert target.assetid == evidence.items_received[0].new_assetid
+    assert target.assetid != evidence.items_received[0].assetid
+    assert target.received_at == evidence.completed_at
+    assert target.pending_receipt is False
+    assert target.steam_tradeoffer_id == "offer-1"
+    assert not hasattr(target, "steam_trade_id")
+    assert decision.result is AutoOfferResult.COMPLETE
+    assert decision.retryable is False
+    assert decision.detail == "purchase_asset_received"
+
+
+def test_completed_trade_buyer_receipt_preserves_send_timestamps():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+            offer_attempted_at=1.0,
+            offer_sent_at=2.0,
+        )
+    )
+    evidence = completed_trade_evidence(completed_at=3.0)
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            evidence,
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.COMPLETE
+    assert decision.target is not None
+    assert decision.target.offer_attempted_at == 1.0
+    assert decision.target.offer_sent_at == 2.0
+    assert decision.target.assetid == "new-asset-1"
+    assert decision.target.received_at == 3.0
+    assert decision.target.pending_receipt is False
+
+
+def test_completed_trade_before_buyer_offer_sent_is_contract_mismatch():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+            offer_attempted_at=1.0,
+            offer_sent_at=2.0,
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            completed_trade_evidence(completed_at=1.5),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.retryable is False
+    assert decision.detail == "completed_trade_receipt_contract_mismatch"
 
 
 @pytest.mark.parametrize(
