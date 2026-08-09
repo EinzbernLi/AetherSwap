@@ -626,8 +626,94 @@ class SteamCompletedTradeHttpReader:
         }
 
 
+class SteamTradeOfferHttpReader(SteamCompletedTradeHttpReader):
+    """One exact, bounded, authenticated Steam Trade Offer lifecycle reader."""
+
+    def __init__(
+        self,
+        cookie_string: str,
+        *,
+        session: object | None = None,
+        timeout: tuple[float, float] = _DEFAULT_TIMEOUT,
+        max_json_bytes: int = _DEFAULT_MAX_JSON_BYTES,
+    ) -> None:
+        super().__init__(
+            cookie_string,
+            session=session,
+            timeout=timeout,
+            max_json_bytes=max_json_bytes,
+        )
+
+    def _get(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, object] | None = None,
+        community: bool,
+    ) -> object:
+        if community or url != _GET_TRADE_OFFER_URL:
+            raise PlatformAdapterProtocolError(
+                "Steam Trade Offer read URL is not allowlisted"
+            )
+        return super()._get(url, params=params, community=False)
+
+    def __call__(self, steam_tradeoffer_id: str) -> object:
+        steam_tradeoffer_id = _canonical_positive_decimal(
+            steam_tradeoffer_id, "steam_tradeoffer_id"
+        )
+        response = self._get(
+            _GET_TRADE_OFFER_URL,
+            params={
+                "access_token": self._access_token,
+                "tradeofferid": steam_tradeoffer_id,
+                "language": "english",
+            },
+            community=False,
+        )
+        payload = _json_mapping(response, limit=self._max_json_bytes)
+        response_payload = payload.get("response")
+        if not isinstance(response_payload, Mapping):
+            raise SteamReadOnlyTransportError("steam_malformed_response")
+        offer = response_payload.get("offer")
+        if not isinstance(offer, Mapping):
+            raise SteamReadOnlyTransportError("steam_malformed_response")
+        if offer.get("tradeofferid") != steam_tradeoffer_id:
+            raise PlatformAdapterProtocolError("returned tradeofferid does not match request")
+
+        state = offer.get("trade_offer_state")
+        if type(state) is not int:
+            raise PlatformAdapterProtocolError("trade_offer_state is malformed")
+        if type(offer.get("is_our_offer")) is not bool:
+            raise PlatformAdapterProtocolError("is_our_offer is malformed")
+        counterparty = _account_id_to_steam_id64(offer.get("accountid_other"))
+        if counterparty == self._bound_account:
+            raise PlatformAdapterProtocolError(
+                "counterparty Steam ID cannot equal authenticated Steam account"
+            )
+        items_given = _normalize_source_items(offer.get("items_to_give"), "items_to_give")
+        items_received = _normalize_source_items(
+            offer.get("items_to_receive"), "items_to_receive"
+        )
+        if not items_given and not items_received:
+            raise PlatformAdapterProtocolError("trade offer must contain at least one item")
+
+        lifecycle = {2: "active", 3: "accepted"}.get(state)
+        if lifecycle is None:
+            return None
+        return {
+            "steam_tradeoffer_id": steam_tradeoffer_id,
+            "account_steam_id": self._bound_account,
+            "counterparty_steam_id": counterparty,
+            "is_our_offer": offer["is_our_offer"],
+            "lifecycle": lifecycle,
+            "items_to_give": list(items_given),
+            "items_to_receive": list(items_received),
+        }
+
+
 __all__ = [
     "SteamCompletedTradeHttpReader",
+    "SteamTradeOfferHttpReader",
     "SteamReadOnlyTransportAuthError",
     "SteamReadOnlyTransportError",
 ]
