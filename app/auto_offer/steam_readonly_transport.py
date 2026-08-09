@@ -110,18 +110,23 @@ def _parse_cookie_string(cookie_string: object) -> dict[str, str]:
         raise PlatformAdapterProtocolError("cookie_string must be a non-empty string")
     cookies: dict[str, str] = {}
     for raw_part in cookie_string.split(";"):
-        part = raw_part.strip()
+        # Leading whitespace immediately after ';' is ordinary cookie-header
+        # formatting.  Do not normalize any whitespace belonging to the
+        # cookie name or value itself.
+        part = raw_part.lstrip()
         if not part:
             continue
+        if part != part.rstrip():
+            raise PlatformAdapterProtocolError("cookie_string is malformed")
         if "=" not in part:
             raise PlatformAdapterProtocolError("cookie_string is malformed")
         name, _, value = part.partition("=")
-        name = name.strip()
-        value = value.strip()
         if (
             not name
+            or name != name.strip()
             or not _COOKIE_NAME_RE.fullmatch(name)
             or not value
+            or value != value.strip()
             or name in cookies
         ):
             raise PlatformAdapterProtocolError("cookie_string is malformed")
