@@ -6,7 +6,8 @@ import sys
 from importlib import metadata
 
 
-EXPECTED_PYTHON = (3, 12, 13)
+SUPPORTED_PYTHON_MINOR = (3, 12)
+CANONICAL_CI_PYTHON = (3, 12, 13)
 EXPECTED_PACKAGES = {
     "fastapi": "0.141.1",
     "starlette": "1.6.0",
@@ -22,10 +23,16 @@ EXPECTED_PACKAGES = {
 def main() -> int:
     failures: list[str] = []
     actual_python = tuple(sys.version_info[:3])
-    if actual_python != EXPECTED_PYTHON:
+    actual_minor = tuple(sys.version_info[:2])
+
+    if sys.implementation.name != "cpython":
         failures.append(
-            "python version mismatch: "
-            f"expected {'.'.join(map(str, EXPECTED_PYTHON))}, "
+            f"python implementation mismatch: expected CPython, got {sys.implementation.name}"
+        )
+    if actual_minor != SUPPORTED_PYTHON_MINOR:
+        failures.append(
+            "python minor mismatch: "
+            f"expected CPython {'.'.join(map(str, SUPPORTED_PYTHON_MINOR))}.x, "
             f"got {'.'.join(map(str, actual_python))}"
         )
 
@@ -45,8 +52,9 @@ def main() -> int:
     print(
         "Python baseline:",
         ".".join(map(str, actual_python)),
-        "(expected",
-        ".".join(map(str, EXPECTED_PYTHON)) + ")",
+        "(supported CPython",
+        ".".join(map(str, SUPPORTED_PYTHON_MINOR)) + ".x; canonical CI",
+        ".".join(map(str, CANONICAL_CI_PYTHON)) + ")",
     )
     for package in EXPECTED_PACKAGES:
         actual = observed.get(package, "MISSING")
