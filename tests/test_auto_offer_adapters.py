@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.auto_offer.adapters import (
+    CompletedTradeItemEvidence,
     DEFAULT_PLATFORM_CAPABILITIES,
     DeliveryDirectionEvidence,
     FakePlatformAdapter,
@@ -22,6 +23,8 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    RecipientInventoryItemEvidence,
+    SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
@@ -377,6 +380,50 @@ def trade_evidence(**changes):
     return replace(value, **changes)
 
 
+def completed_trade_request(**changes):
+    return request(
+        capability=PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        steam_tradeoffer_id="offer-1",
+        **changes,
+    )
+
+
+def completed_trade_item(**changes):
+    value = CompletedTradeItemEvidence(
+        appid=730,
+        contextid="2",
+        assetid="source-1",
+        amount=1,
+        new_contextid="3",
+        new_assetid="new-1",
+    )
+    return replace(value, **changes)
+
+
+def recipient_inventory_item(**changes):
+    value = RecipientInventoryItemEvidence(
+        appid=730,
+        contextid="3",
+        assetid="new-1",
+        amount=1,
+    )
+    return replace(value, **changes)
+
+
+def completed_trade_evidence(**changes):
+    value = SteamCompletedTradeEvidence(
+        steam_tradeoffer_id="offer-1",
+        steam_trade_id="trade-1",
+        account_steam_id="steam-1",
+        counterparty_steam_id="steam-2",
+        completed_at=100.0,
+        items_given=(),
+        items_received=(completed_trade_item(),),
+        inventory_confirmed_items=(recipient_inventory_item(),),
+    )
+    return replace(value, **changes)
+
+
 def test_steam_trade_offer_request_binding_is_exact_and_legacy_safe():
     item = steam_request()
     assert item.steam_tradeoffer_id == "offer-1"
@@ -576,4 +623,250 @@ def test_fake_adapter_rejects_cross_bound_forged_evidence(changes):
 
     assert result.status is PlatformResultStatus.MALFORMED
     assert result.detail == "evidence_type_mismatch"
+    assert result.evidence is None
+
+
+def test_completed_trade_capability_is_additive_and_requires_exact_offer_id():
+    assert PlatformCapability.READ_STEAM_COMPLETED_TRADE.value == (
+        "read_steam_completed_trade"
+    )
+    assert PlatformCapability.READ_STEAM_TRADE_OFFER.value == "read_steam_trade_offer"
+    assert request().steam_tradeoffer_id is None
+    assert completed_trade_request().steam_tradeoffer_id == "offer-1"
+    with pytest.raises(PlatformAdapterProtocolError):
+        request(
+            capability=PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        )
+    with pytest.raises(PlatformAdapterProtocolError):
+        request(
+            capability=PlatformCapability.READ_OFFER_STATE,
+            steam_tradeoffer_id="offer-1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("appid", True),
+        ("appid", 0),
+        ("contextid", " context"),
+        ("assetid", ""),
+        ("amount", False),
+        ("amount", 0),
+        ("new_contextid", "context "),
+        ("new_assetid", 1),
+    ],
+)
+def test_completed_trade_item_evidence_is_frozen_and_strict(field, value):
+    with pytest.raises(PlatformAdapterProtocolError):
+        completed_trade_item(**{field: value})
+    item = completed_trade_item()
+    with pytest.raises(FrozenInstanceError):
+        item.assetid = "other"
+
+
+def test_recipient_inventory_item_evidence_is_frozen_and_strict():
+    item = recipient_inventory_item()
+    with pytest.raises(FrozenInstanceError):
+        item.assetid = "other"
+    for field, value in (
+        ("appid", True),
+        ("contextid", " context"),
+        ("assetid", ""),
+        ("amount", False),
+    ):
+        with pytest.raises(PlatformAdapterProtocolError):
+            recipient_inventory_item(**{field: value})
+
+
+def test_completed_trade_evidence_is_immutable_canonical_and_multi_item_safe():
+    first = completed_trade_item(assetid="source-1", new_assetid="new-1")
+    second = completed_trade_item(
+        appid=440,
+        assetid="source-2",
+        new_assetid="new-2",
+    )
+    evidence = completed_trade_evidence(
+        items_received=(second, first),
+        inventory_confirmed_items=(
+            recipient_inventory_item(appid=440, assetid="new-2"),
+            recipient_inventory_item(),
+        ),
+    )
+    assert [item.appid for item in evidence.items_received] == [440, 730]
+    assert evidence.items_received == (second, first)
+    assert evidence.items_given == ()
+    assert not hasattr(evidence, "purchase_assetid")
+    assert not hasattr(evidence, "selected_assetid")
+    with pytest.raises(FrozenInstanceError):
+        evidence.completed_at = 101.0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"items_received": ()},
+        {
+            "items_received": (
+                completed_trade_item(),
+                completed_trade_item(),
+            )
+        },
+        {
+            "items_received": (
+                completed_trade_item(),
+            ),
+            "inventory_confirmed_items": (
+                recipient_inventory_item(assetid="not-received"),
+            ),
+        },
+    ],
+)
+def test_completed_trade_evidence_rejects_empty_duplicates_and_invalid_subset(changes):
+    with pytest.raises(PlatformAdapterProtocolError):
+        completed_trade_evidence(**changes)
+
+
+def test_completed_trade_evidence_rejects_duplicate_post_trade_and_inventory_identity():
+    with pytest.raises(PlatformAdapterProtocolError):
+        completed_trade_evidence(
+            items_received=(
+                completed_trade_item(assetid="source-1", new_assetid="new-1"),
+                completed_trade_item(assetid="source-2", new_assetid="new-1"),
+            ),
+            inventory_confirmed_items=(),
+        )
+    with pytest.raises(PlatformAdapterProtocolError):
+        completed_trade_evidence(
+            inventory_confirmed_items=(
+                recipient_inventory_item(),
+                recipient_inventory_item(),
+            )
+        )
+
+
+def test_platform_result_maps_completed_trade_and_cross_binds_both_identities():
+    result = PlatformResult(
+        completed_trade_request(),
+        PlatformResultStatus.SUCCESS,
+        detail="completed_trade_proven",
+        evidence=completed_trade_evidence(),
+    )
+    assert result.is_success is True
+    assert type(result.evidence) is SteamCompletedTradeEvidence
+    for changes in (
+        {"steam_tradeoffer_id": "other-offer"},
+        {"account_steam_id": "other-steam"},
+    ):
+        with pytest.raises(PlatformAdapterProtocolError):
+            PlatformResult(
+                completed_trade_request(),
+                PlatformResultStatus.SUCCESS,
+                evidence=completed_trade_evidence(**changes),
+            )
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            completed_trade_request(),
+            PlatformResultStatus.RESULT_UNKNOWN,
+            evidence=completed_trade_evidence(),
+        )
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            request(capability=PlatformCapability.SEND_OFFER),
+            PlatformResultStatus.SUCCESS,
+            evidence=completed_trade_evidence(),
+        )
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            request(),
+            PlatformResultStatus.SUCCESS,
+            evidence=completed_trade_evidence(),
+        )
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            completed_trade_request(),
+            PlatformResultStatus.SUCCESS,
+            evidence=trade_evidence(),
+        )
+
+
+@pytest.mark.parametrize("completed_at", [True, -1, math.nan, math.inf, "100"])
+def test_completed_trade_evidence_rejects_invalid_completed_at(completed_at):
+    with pytest.raises(PlatformAdapterProtocolError):
+        completed_trade_evidence(completed_at=completed_at)
+
+
+def test_platform_result_defensively_revalidates_forged_completed_trade_evidence():
+    forged_item = object.__new__(CompletedTradeItemEvidence)
+    for name, value in (
+        ("appid", 730),
+        ("contextid", "2"),
+        ("assetid", "source-1"),
+        ("amount", 1),
+        ("new_contextid", "3"),
+        ("new_assetid", None),
+    ):
+        object.__setattr__(forged_item, name, value)
+    forged = object.__new__(SteamCompletedTradeEvidence)
+    for name, value in (
+        ("steam_tradeoffer_id", "offer-1"),
+        ("steam_trade_id", "trade-1"),
+        ("account_steam_id", "steam-1"),
+        ("counterparty_steam_id", "steam-2"),
+        ("completed_at", 100.0),
+        ("items_given", ()),
+        ("items_received", (forged_item,)),
+        ("inventory_confirmed_items", ()),
+    ):
+        object.__setattr__(forged, name, value)
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            completed_trade_request(),
+            PlatformResultStatus.SUCCESS,
+            evidence=forged,
+        )
+
+
+def test_fake_adapter_supports_explicit_completed_trade_and_rejects_bare_success():
+    item = completed_trade_request()
+    typed = FakePlatformAdapter(
+        capabilities={PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        outcomes={
+            item: PlatformResult(
+                item,
+                PlatformResultStatus.SUCCESS,
+                evidence=completed_trade_evidence(),
+            )
+        },
+    ).execute(item)
+    assert typed.status is PlatformResultStatus.SUCCESS
+    assert type(typed.evidence) is SteamCompletedTradeEvidence
+
+    bare = FakePlatformAdapter(
+        capabilities={PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        outcomes={item: PlatformResultStatus.SUCCESS},
+    ).execute(item)
+    assert bare.status is PlatformResultStatus.MALFORMED
+    assert bare.detail == "success_evidence_required"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"steam_tradeoffer_id": "other-offer"},
+        {"account_steam_id": "other-steam"},
+    ],
+)
+def test_fake_adapter_rejects_forged_cross_bound_completed_trade_evidence(changes):
+    item = completed_trade_request()
+    forged = object.__new__(PlatformResult)
+    object.__setattr__(forged, "request", item)
+    object.__setattr__(forged, "status", PlatformResultStatus.SUCCESS)
+    object.__setattr__(forged, "detail", "completed_trade_proven")
+    object.__setattr__(forged, "evidence", completed_trade_evidence(**changes))
+    result = FakePlatformAdapter(
+        capabilities={PlatformCapability.READ_STEAM_COMPLETED_TRADE},
+        outcomes={item: forged},
+    ).execute(item)
+    assert result.status is PlatformResultStatus.MALFORMED
     assert result.evidence is None

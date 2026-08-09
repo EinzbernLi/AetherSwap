@@ -1,3 +1,4 @@
+import ast
 import importlib
 import math
 import threading
@@ -6,6 +7,7 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 from app.auto_offer.adapters import (
+    CompletedTradeItemEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
     OfferStateEvidence,
@@ -15,15 +17,19 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    RecipientInventoryItemEvidence,
+    SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
 )
 from app.auto_offer.platform_readonly import (
     BUFF_CAPABILITIES,
+    STEAM_COMPLETED_TRADE_CAPABILITIES,
     STEAM_INVENTORY_CAPABILITIES,
     STEAM_TRADE_OFFER_CAPABILITIES,
     BuffReadOnlyAdapter,
     SteamInventoryReadOnlyAdapter,
+    SteamCompletedTradeReadOnlyAdapter,
     SteamTradeOfferReadOnlyAdapter,
 )
 
@@ -75,6 +81,19 @@ class TradeOfferReaderStub:
 
     def __call__(self, steam_tradeoffer_id):
         self.calls.append(steam_tradeoffer_id)
+        if self.error:
+            raise self.error
+        return self.payload
+
+
+class CompletedTradeReaderStub:
+    def __init__(self, payload=None, error=None):
+        self.payload = payload
+        self.error = error
+        self.calls = []
+
+    def __call__(self, steam_tradeoffer_id, recipient_steam_id):
+        self.calls.append((steam_tradeoffer_id, recipient_steam_id))
         if self.error:
             raise self.error
         return self.payload
@@ -133,6 +152,53 @@ def steam_trade_offer_payload(**changes):
     return value
 
 
+def steam_completed_trade_adapter(reader):
+    return SteamCompletedTradeReadOnlyAdapter(
+        reader,
+        account_id="account-1",
+        recipient_steam_id="steam-1",
+    )
+
+
+def steam_completed_trade_request(**changes):
+    value = request(
+        capability=PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        steam_tradeoffer_id="offer-1",
+    )
+    return replace(value, **changes)
+
+
+def steam_completed_trade_payload(**changes):
+    value = {
+        "steam_tradeoffer_id": "offer-1",
+        "steam_trade_id": "trade-1",
+        "account_steam_id": "steam-1",
+        "counterparty_steam_id": "steam-2",
+        "completed_at": 100.0,
+        "items_given": [],
+        "items_received": [
+            {
+                "appid": 730,
+                "contextid": "2",
+                "assetid": "source-1",
+                "amount": 1,
+                "new_contextid": "3",
+                "new_assetid": "new-1",
+            }
+        ],
+        "inventory_confirmed_items": [
+            {
+                "appid": 730,
+                "contextid": "3",
+                "assetid": "new-1",
+                "amount": 1,
+            }
+        ],
+    }
+    value.update(changes)
+    return value
+
+
 def test_import_and_constructors_have_no_io_or_thread_side_effects(monkeypatch, tmp_path):
     before = tuple(tmp_path.iterdir())
     active = threading.active_count()
@@ -142,6 +208,7 @@ def test_import_and_constructors_have_no_io_or_thread_side_effects(monkeypatch, 
     SteamInventoryReadOnlyAdapter(
         InventoryStub(), account_id="account-1", recipient_steam_id="steam-1"
     )
+    steam_completed_trade_adapter(CompletedTradeReaderStub())
     assert tuple(tmp_path.iterdir()) == before
     assert threading.active_count() == active
     assert module.BuffReadOnlyAdapter is BuffReadOnlyAdapter
@@ -158,6 +225,15 @@ def test_both_adapters_satisfy_platform_adapter_and_capabilities_are_immutable()
     assert steam.capabilities == STEAM_INVENTORY_CAPABILITIES
     with pytest.raises(AttributeError):
         buff.capabilities.add(PlatformCapability.SEND_OFFER)
+
+    completed = steam_completed_trade_adapter(CompletedTradeReaderStub())
+    assert isinstance(completed, PlatformAdapter)
+    assert completed.capabilities == STEAM_COMPLETED_TRADE_CAPABILITIES
+    assert completed.capabilities == frozenset(
+        {PlatformCapability.READ_STEAM_COMPLETED_TRADE}
+    )
+    with pytest.raises(AttributeError):
+        completed.capabilities.add(PlatformCapability.SEND_OFFER)
 
 
 def test_send_offer_and_unknown_capability_are_unsupported_without_buff_read():
@@ -695,3 +771,252 @@ def test_steam_trade_offer_reader_platform_result_is_untrusted_payload():
     assert result.status is PlatformResultStatus.MALFORMED
     assert result.detail == "malformed_payload"
     assert result.evidence is None
+
+
+def test_completed_trade_adapter_uses_exact_capability_and_reader_args_once():
+    reader = CompletedTradeReaderStub(steam_completed_trade_payload())
+    adapter = steam_completed_trade_adapter(reader)
+    result = adapter.execute(steam_completed_trade_request())
+
+    assert reader.calls == [("offer-1", "steam-1")]
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "completed_trade_proven"
+    assert type(result.evidence) is SteamCompletedTradeEvidence
+    assert result.evidence.steam_trade_id == "trade-1"
+    assert result.evidence.items_received[0].new_assetid == "new-1"
+    assert result.evidence.inventory_confirmed_items == (
+        RecipientInventoryItemEvidence(
+            appid=730,
+            contextid="3",
+            assetid="new-1",
+            amount=1,
+        ),
+    )
+
+
+def test_completed_trade_request_gate_rejects_unsupported_and_identity_mismatch_without_reader():
+    reader = CompletedTradeReaderStub(steam_completed_trade_payload())
+    adapter = steam_completed_trade_adapter(reader)
+    for item in (
+        request(capability=PlatformCapability.READ_OFFER_STATE),
+        steam_completed_trade_request(account_id="other-account"),
+        steam_completed_trade_request(recipient_steam_id="other-steam"),
+    ):
+        result = adapter.execute(item)
+        assert result.status in {
+            PlatformResultStatus.UNSUPPORTED,
+            PlatformResultStatus.FAILURE,
+        }
+        assert result.evidence is None
+    assert reader.calls == []
+
+
+def test_completed_trade_adapter_revalidates_forged_request_before_reader():
+    reader = CompletedTradeReaderStub(steam_completed_trade_payload())
+    adapter = steam_completed_trade_adapter(reader)
+    source = steam_completed_trade_request()
+
+    def forged(**changes):
+        value = object.__new__(PlatformRequest)
+        for name in (
+            "purchase_id",
+            "buff_order_id",
+            "account_id",
+            "recipient_steam_id",
+            "revision",
+            "capability",
+            "timeout_seconds",
+            "steam_tradeoffer_id",
+        ):
+            object.__setattr__(value, name, getattr(source, name))
+        for name, changed in changes.items():
+            if changed is None:
+                object.__delattr__(value, name)
+            else:
+                object.__setattr__(value, name, changed)
+        return value
+
+    for invalid in (
+        forged(revision=0),
+        forged(timeout_seconds=math.nan),
+        forged(capability="read_steam_completed_trade"),
+        forged(steam_tradeoffer_id=None),
+    ):
+        with pytest.raises(PlatformAdapterProtocolError):
+            adapter.execute(invalid)
+    assert reader.calls == []
+
+
+def test_completed_trade_adapter_normalizes_none_and_non_mapping():
+    unknown = steam_completed_trade_adapter(
+        CompletedTradeReaderStub(None)
+    ).execute(steam_completed_trade_request())
+    malformed = steam_completed_trade_adapter(
+        CompletedTradeReaderStub([])
+    ).execute(steam_completed_trade_request())
+    assert unknown.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert unknown.detail == "completed_trade_not_proven"
+    assert malformed.status is PlatformResultStatus.MALFORMED
+    assert malformed.detail == "malformed_payload"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"steam_tradeoffer_id": "offer-1"},
+        steam_completed_trade_payload(
+            items_received=[
+                {
+                    "appid": 730,
+                    "contextid": "2",
+                    "assetid": "source-1",
+                    "amount": 1,
+                }
+            ]
+        ),
+        steam_completed_trade_payload(
+            inventory_confirmed_items=[
+                {
+                    "appid": 730,
+                    "contextid": "9",
+                    "assetid": "not-received",
+                    "amount": 1,
+                }
+            ]
+        ),
+        steam_completed_trade_payload(items_received=[]),
+    ],
+)
+def test_completed_trade_adapter_malformed_nested_payload_fails_closed(payload):
+    result = steam_completed_trade_adapter(
+        CompletedTradeReaderStub(payload)
+    ).execute(steam_completed_trade_request())
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("steam_tradeoffer_id", "other-offer"),
+        ("account_steam_id", "other-steam"),
+    ],
+)
+def test_completed_trade_adapter_enforces_payload_identity(field, value):
+    reader = CompletedTradeReaderStub(
+        steam_completed_trade_payload(**{field: value})
+    )
+    result = steam_completed_trade_adapter(reader).execute(
+        steam_completed_trade_request()
+    )
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "identity_mismatch"
+    assert result.evidence is None
+    assert reader.calls == [("offer-1", "steam-1")]
+
+
+def test_completed_trade_adapter_accepts_multi_item_and_inventory_subset_without_selection():
+    payload = steam_completed_trade_payload(
+        items_received=[
+            {
+                "appid": 730,
+                "contextid": "2",
+                "assetid": "source-2",
+                "amount": 1,
+                "new_contextid": "3",
+                "new_assetid": "new-2",
+            },
+            {
+                "appid": 440,
+                "contextid": "2",
+                "assetid": "source-1",
+                "amount": 1,
+                "new_contextid": "3",
+                "new_assetid": "new-1",
+            },
+        ],
+        inventory_confirmed_items=[
+            {
+                "appid": 440,
+                "contextid": "3",
+                "assetid": "new-1",
+                "amount": 1,
+            }
+        ],
+    )
+    result = steam_completed_trade_adapter(
+        CompletedTradeReaderStub(payload)
+    ).execute(steam_completed_trade_request())
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert len(result.evidence.items_received) == 2
+    assert len(result.evidence.inventory_confirmed_items) == 1
+    assert not hasattr(result.evidence, "purchase_assetid")
+    assert not hasattr(result.evidence, "selected_assetid")
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (TimeoutError("secret timeout"), PlatformResultStatus.TIMEOUT, "timeout"),
+        (RuntimeError("auth expired token"), PlatformResultStatus.FAILURE, "network_failure"),
+        (RuntimeError("network secret"), PlatformResultStatus.FAILURE, "network_failure"),
+    ],
+)
+def test_completed_trade_reader_failures_are_normalized(error, status, detail):
+    result = steam_completed_trade_adapter(
+        CompletedTradeReaderStub(error=error)
+    ).execute(steam_completed_trade_request())
+    assert result.status is status
+    assert result.detail == detail
+    assert "secret" not in str(result.detail)
+    assert "token" not in str(result.detail)
+    assert result.evidence is None
+
+
+def test_completed_trade_auth_like_exception_is_normalized():
+    class AuthExpiredError(RuntimeError):
+        pass
+
+    result = steam_completed_trade_adapter(
+        CompletedTradeReaderStub(error=AuthExpiredError("token secret"))
+    ).execute(steam_completed_trade_request())
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "auth_failed"
+    assert "token" not in str(result.detail)
+
+
+def test_completed_trade_adapter_has_no_state_or_platform_write_dependencies():
+    module = importlib.import_module("app.auto_offer.platform_readonly")
+    source = module.__file__
+    with open(source, encoding="utf-8") as handle:
+        text = handle.read()
+    tree = ast.parse(text)
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported.update(
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    )
+    assert "AutoOfferStore" not in module.__dict__
+    assert "StoredDelivery" not in module.__dict__
+    assert "DeliverySnapshot" not in module.__dict__
+    assert imported.isdisjoint(
+        {"sqlite3", "requests", "httpx", "aiohttp", "steam", "buff", "threading", "time"}
+    )
+    for banned in (
+        "sleep(",
+        "ThreadPoolExecutor",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "accept_offer",
+        "send_offer",
+    ):
+        assert banned not in text

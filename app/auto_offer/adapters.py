@@ -38,6 +38,7 @@ class PlatformCapability(str, Enum):
     READ_OFFER_STATE = "read_offer_state"
     READ_INVENTORY_STATE = "read_inventory_state"
     READ_STEAM_TRADE_OFFER = "read_steam_trade_offer"
+    READ_STEAM_COMPLETED_TRADE = "read_steam_completed_trade"
     SEND_OFFER = "send_offer"
 
 
@@ -205,11 +206,78 @@ class SteamTradeOfferEvidence:
             )
 
 
+@dataclass(frozen=True)
+class CompletedTradeItemEvidence:
+    """Minimal source-to-post-trade identity evidence for one item."""
+
+    appid: int
+    contextid: str
+    assetid: str
+    amount: int
+    new_contextid: str
+    new_assetid: str
+
+    def __post_init__(self) -> None:
+        try:
+            _validate_completed_trade_item(self)
+        except PlatformAdapterProtocolError:
+            raise
+        except Exception as error:
+            raise PlatformAdapterProtocolError(
+                "completed trade item failed validation"
+            ) from error
+
+
+@dataclass(frozen=True)
+class RecipientInventoryItemEvidence:
+    """One exact item identity observed in the recipient inventory snapshot."""
+
+    appid: int
+    contextid: str
+    assetid: str
+    amount: int
+
+    def __post_init__(self) -> None:
+        try:
+            _validate_recipient_inventory_item(self)
+        except PlatformAdapterProtocolError:
+            raise
+        except Exception as error:
+            raise PlatformAdapterProtocolError(
+                "recipient inventory item failed validation"
+            ) from error
+
+
+@dataclass(frozen=True)
+class SteamCompletedTradeEvidence:
+    """Typed evidence for one exact completed trade and recipient snapshot."""
+
+    steam_tradeoffer_id: str
+    steam_trade_id: str
+    account_steam_id: str
+    counterparty_steam_id: str
+    completed_at: float
+    items_given: tuple[CompletedTradeItemEvidence, ...]
+    items_received: tuple[CompletedTradeItemEvidence, ...]
+    inventory_confirmed_items: tuple[RecipientInventoryItemEvidence, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            _validate_steam_completed_trade_evidence(self)
+        except PlatformAdapterProtocolError:
+            raise
+        except Exception as error:
+            raise PlatformAdapterProtocolError(
+                "completed trade evidence failed validation"
+            ) from error
+
+
 PlatformEvidence: TypeAlias = (
     DeliveryDirectionEvidence
     | OfferStateEvidence
     | InventoryStateEvidence
     | SteamTradeOfferEvidence
+    | SteamCompletedTradeEvidence
 )
 
 
@@ -221,6 +289,176 @@ def _require_id(value: object, field: str) -> None:
 def _require_timeout(value: object) -> None:
     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
         raise PlatformAdapterProtocolError("timeout_seconds must be a finite positive number")
+
+
+def _validate_completed_trade_item(item: object) -> None:
+    appid = getattr(item, "appid", _MISSING)
+    contextid = getattr(item, "contextid", _MISSING)
+    assetid = getattr(item, "assetid", _MISSING)
+    amount = getattr(item, "amount", _MISSING)
+    new_contextid = getattr(item, "new_contextid", _MISSING)
+    new_assetid = getattr(item, "new_assetid", _MISSING)
+    if type(appid) is not int or appid <= 0:
+        raise PlatformAdapterProtocolError(
+            "appid must be a positive integer"
+        )
+    _require_id(contextid, "contextid")
+    _require_id(assetid, "assetid")
+    if type(amount) is not int or amount <= 0:
+        raise PlatformAdapterProtocolError(
+            "amount must be a positive integer"
+        )
+    _require_id(new_contextid, "new_contextid")
+    _require_id(new_assetid, "new_assetid")
+
+
+def _validate_recipient_inventory_item(item: object) -> None:
+    appid = getattr(item, "appid", _MISSING)
+    contextid = getattr(item, "contextid", _MISSING)
+    assetid = getattr(item, "assetid", _MISSING)
+    amount = getattr(item, "amount", _MISSING)
+    if type(appid) is not int or appid <= 0:
+        raise PlatformAdapterProtocolError(
+            "appid must be a positive integer"
+        )
+    _require_id(contextid, "contextid")
+    _require_id(assetid, "assetid")
+    if type(amount) is not int or amount <= 0:
+        raise PlatformAdapterProtocolError(
+            "amount must be a positive integer"
+        )
+
+
+def _validate_steam_completed_trade_evidence(evidence: object) -> None:
+    steam_tradeoffer_id = getattr(evidence, "steam_tradeoffer_id", _MISSING)
+    steam_trade_id = getattr(evidence, "steam_trade_id", _MISSING)
+    account_steam_id = getattr(evidence, "account_steam_id", _MISSING)
+    counterparty_steam_id = getattr(evidence, "counterparty_steam_id", _MISSING)
+    completed_at = getattr(evidence, "completed_at", _MISSING)
+    items_given = getattr(evidence, "items_given", _MISSING)
+    items_received = getattr(evidence, "items_received", _MISSING)
+    inventory_confirmed_items = getattr(
+        evidence, "inventory_confirmed_items", _MISSING
+    )
+
+    _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
+    _require_id(steam_trade_id, "steam_trade_id")
+    _require_id(account_steam_id, "account_steam_id")
+    _require_id(counterparty_steam_id, "counterparty_steam_id")
+    if account_steam_id == counterparty_steam_id:
+        raise PlatformAdapterProtocolError(
+            "account and counterparty Steam IDs must differ"
+        )
+    if (
+        type(completed_at) not in (int, float)
+        or not math.isfinite(completed_at)
+        or completed_at < 0
+    ):
+        raise PlatformAdapterProtocolError(
+            "completed_at must be a finite non-negative number"
+        )
+
+    for field, items, item_type, validator in (
+        (
+            "items_given",
+            items_given,
+            CompletedTradeItemEvidence,
+            _validate_completed_trade_item,
+        ),
+        (
+            "items_received",
+            items_received,
+            CompletedTradeItemEvidence,
+            _validate_completed_trade_item,
+        ),
+        (
+            "inventory_confirmed_items",
+            inventory_confirmed_items,
+            RecipientInventoryItemEvidence,
+            _validate_recipient_inventory_item,
+        ),
+    ):
+        if type(items) is not tuple:
+            raise PlatformAdapterProtocolError(f"{field} must be a tuple")
+        for item in items:
+            if type(item) is not item_type:
+                raise PlatformAdapterProtocolError(
+                    f"{field} must contain {item_type.__name__}"
+                )
+            validator(item)
+
+    if not items_received:
+        raise PlatformAdapterProtocolError("items_received cannot be empty")
+
+    for field, items in (
+        ("items_given", items_given),
+        ("items_received", items_received),
+    ):
+        source_identities = [
+            (item.appid, item.contextid, item.assetid) for item in items
+        ]
+        new_identities = [
+            (item.appid, item.new_contextid, item.new_assetid) for item in items
+        ]
+        if len(set(source_identities)) != len(source_identities):
+            raise PlatformAdapterProtocolError(
+                f"{field} contains duplicate source identity"
+            )
+        if len(set(new_identities)) != len(new_identities):
+            raise PlatformAdapterProtocolError(
+                f"{field} contains duplicate post-trade identity"
+            )
+
+    inventory_identities = [
+        (item.appid, item.contextid, item.assetid)
+        for item in inventory_confirmed_items
+    ]
+    if len(set(inventory_identities)) != len(inventory_identities):
+        raise PlatformAdapterProtocolError(
+            "inventory_confirmed_items contains duplicate identity"
+        )
+    received_identities = {
+        (item.appid, item.new_contextid, item.new_assetid, item.amount)
+        for item in items_received
+    }
+    for item in inventory_confirmed_items:
+        if (item.appid, item.contextid, item.assetid, item.amount) not in received_identities:
+            raise PlatformAdapterProtocolError(
+                "inventory confirmation must match received post-trade identity"
+            )
+
+    for field, items, key in (
+        (
+            "items_given",
+            items_given,
+            lambda item: (
+                item.appid,
+                item.contextid,
+                item.assetid,
+                item.new_contextid,
+                item.new_assetid,
+                item.amount,
+            ),
+        ),
+        (
+            "items_received",
+            items_received,
+            lambda item: (
+                item.appid,
+                item.contextid,
+                item.assetid,
+                item.new_contextid,
+                item.new_assetid,
+                item.amount,
+            ),
+        ),
+        (
+            "inventory_confirmed_items",
+            inventory_confirmed_items,
+            lambda item: (item.appid, item.contextid, item.assetid, item.amount),
+        ),
+    ):
+        object.__setattr__(evidence, field, tuple(sorted(items, key=key)))
 
 
 _MISSING = object()
@@ -255,7 +493,10 @@ def _validate_platform_request(request: object) -> None:
         )
     _require_timeout(_request_attribute(request, "timeout_seconds"))
     steam_tradeoffer_id = _request_attribute(request, "steam_tradeoffer_id")
-    if capability is PlatformCapability.READ_STEAM_TRADE_OFFER:
+    if capability in {
+        PlatformCapability.READ_STEAM_TRADE_OFFER,
+        PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+    }:
         _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
     elif steam_tradeoffer_id is not None:
         raise PlatformAdapterProtocolError(
@@ -315,6 +556,7 @@ class PlatformResult:
             PlatformCapability.READ_OFFER_STATE: OfferStateEvidence,
             PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,
             PlatformCapability.READ_STEAM_TRADE_OFFER: SteamTradeOfferEvidence,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE: SteamCompletedTradeEvidence,
         }.get(self.request.capability)
         if expected_evidence is None:
             raise PlatformAdapterProtocolError("success is not allowed for this capability")
@@ -330,7 +572,10 @@ class PlatformResult:
             raise PlatformAdapterProtocolError(
                 "success evidence failed defensive validation"
             ) from error
-        if self.request.capability is PlatformCapability.READ_STEAM_TRADE_OFFER:
+        if self.request.capability in {
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        }:
             if (
                 self.evidence.steam_tradeoffer_id != self.request.steam_tradeoffer_id
                 or self.evidence.account_steam_id
@@ -491,6 +736,7 @@ class FakePlatformAdapter:
 
 __all__ = [
     "DEFAULT_PLATFORM_CAPABILITIES",
+    "CompletedTradeItemEvidence",
     "DeliveryDirectionEvidence",
     "FakePlatformAdapter",
     "InventoryStateEvidence",
@@ -505,6 +751,8 @@ __all__ = [
     "PlatformRequest",
     "PlatformResult",
     "PlatformResultStatus",
+    "RecipientInventoryItemEvidence",
+    "SteamCompletedTradeEvidence",
     "SteamTradeOfferEvidence",
     "SteamTradeOfferLifecycle",
     "TradeOfferItemEvidence",
