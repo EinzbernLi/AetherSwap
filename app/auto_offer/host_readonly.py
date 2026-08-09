@@ -65,7 +65,7 @@ def _validated_store_path(value: object) -> str | Path:
         if not value or value.strip() != value:
             raise HostReadOnlyBridgeConfigurationError("invalid_store_path")
         return value
-    if type(value) is Path:
+    if isinstance(value, Path):
         return value
     raise HostReadOnlyBridgeConfigurationError("invalid_store_path")
 
