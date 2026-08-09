@@ -33,6 +33,14 @@ _DEFAULT_MAX_RECEIPT_OBJECTS = 256
 _DEFAULT_MAX_JSON_BYTES = 2_000_000
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _ENCODED_SECURE_SEPARATOR_RE = re.compile(r"%7c%7c", re.IGNORECASE)
+_URL_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+_RECEIPT_URL_RE = re.compile(
+    r"^https://steamcommunity\.com/trade/[1-9][0-9]*/receipt$"
+)
+_INVENTORY_URL_RE = re.compile(
+    r"^https://steamcommunity\.com/inventory/"
+    r"[1-9][0-9]*/[1-9][0-9]*/[A-Za-z0-9._~-]+$"
+)
 
 
 class SteamReadOnlyTransportError(RuntimeError):
@@ -66,6 +74,27 @@ def _strict_identifier(value: object, field: str) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise PlatformAdapterProtocolError(f"{field} must be a non-whitespace string")
     return value
+
+
+def _safe_url_path_segment(value: object, field: str) -> str:
+    value = _strict_identifier(value, field)
+    if not value.isascii() or _URL_PATH_SEGMENT_RE.fullmatch(value) is None:
+        raise PlatformAdapterProtocolError(
+            f"{field} must be a safe URL path segment"
+        )
+    return value
+
+
+def _require_allowed_read_url(url: object) -> str:
+    if type(url) is not str:
+        raise PlatformAdapterProtocolError("Steam read URL is not allowlisted")
+    if url == _GET_TRADE_OFFER_URL:
+        return url
+    if _RECEIPT_URL_RE.fullmatch(url):
+        return url
+    if _INVENTORY_URL_RE.fullmatch(url):
+        return url
+    raise PlatformAdapterProtocolError("Steam read URL is not allowlisted")
 
 
 def _positive_int(value: object, field: str) -> int:
@@ -397,6 +426,7 @@ class SteamCompletedTradeHttpReader:
         params: Mapping[str, object] | None = None,
         community: bool,
     ) -> object:
+        url = _require_allowed_read_url(url)
         kwargs: dict[str, object] = {
             "params": params,
             "timeout": self._timeout,
@@ -484,7 +514,10 @@ class SteamCompletedTradeHttpReader:
         received_item: Mapping[str, object],
     ) -> tuple[dict[str, object], ...]:
         appid = received_item["appid"]
-        contextid = received_item["new_contextid"]
+        contextid = _safe_url_path_segment(
+            received_item["new_contextid"],
+            "new_contextid",
+        )
         assetid = received_item["new_assetid"]
         amount = received_item["amount"]
         url = f"{_STEAM_COMMUNITY}/inventory/{recipient_steam_id}/{appid}/{contextid}"
