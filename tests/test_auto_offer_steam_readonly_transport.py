@@ -664,6 +664,65 @@ def test_recipient_inventory_request_and_exact_positive_confirmation():
 
 
 @pytest.mark.parametrize(
+    "malicious_context",
+    ["3/evil", "../3", "3?x=1", "3#fragment", "3%2Fevil", "3\\evil", "３"],
+)
+def test_malicious_receipt_context_is_blocked_before_inventory_get(
+    malicious_context,
+):
+    session = FakeSession(
+        [
+            json_response(offer_payload()),
+            html_response(
+                receipt_html(receipt_item(new_contextid=malicious_context))
+            ),
+        ]
+    )
+    with pytest.raises(PlatformAdapterProtocolError, match="safe URL path segment"):
+        reader_for(session)(OFFER_ID, STEAM_ID)
+    assert len(session.calls) == 2
+
+
+def test_safe_unreserved_inventory_context_remains_supported():
+    contextid = "context-3._~"
+    session = positive_session(
+        receipt=receipt_html(receipt_item(new_contextid=contextid)),
+        inventory=inventory_payload(
+            assets=[
+                {
+                    "appid": APP_ID,
+                    "contextid": contextid,
+                    "assetid": NEW_ASSET,
+                    "amount": 1,
+                }
+            ]
+        ),
+    )
+    result = reader_for(session)(OFFER_ID, STEAM_ID)
+    assert result["items_received"][0]["new_contextid"] == contextid
+    assert result["inventory_confirmed_items"][0]["contextid"] == contextid
+    assert session.calls[2][0].endswith(f"/{APP_ID}/{contextid}")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://steamcommunity.com/trade/2001/receipt",
+        "https://example.com/trade/2001/receipt",
+        "https://steamcommunity.com/login",
+        "https://steamcommunity.com/trade/2001/receipt?x=1",
+        f"https://steamcommunity.com/inventory/{STEAM_ID}/{APP_ID}/3/extra",
+    ],
+)
+def test_runtime_get_rejects_non_allowlisted_url_before_session_call(url):
+    session = FakeSession()
+    reader = reader_for(session)
+    with pytest.raises(PlatformAdapterProtocolError, match="not allowlisted"):
+        reader._get(url, community=True)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
     "asset",
     [
         {"appid": APP_ID, "contextid": "4", "assetid": NEW_ASSET, "amount": 1},
