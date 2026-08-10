@@ -24,6 +24,7 @@ from app.config_loader import (
     get_steam_credentials,
     load_app_config_validated,
 )
+from app.auto_offer.host_integration import is_auto_offer_enabled
 from app.notify import send_pushplus, build_holdings_report_content, compute_holdings_stats
 from app.inventory_cs2 import scan_cs2_inventory
 from app.accounts import get_current_account, update_account
@@ -276,6 +277,8 @@ def receive_worker() -> None:
             cfg = load_app_config_validated()
             interval = max(10, int(cfg.get("pipeline", {}).get("receive_poll_interval_seconds", 30) or 30))
             time.sleep(interval)
+            if is_auto_offer_enabled(cfg):
+                continue
             if not is_steam_background_allowed() or not _buff_background_request_is_safe():
                 continue
             # Hold the complete receive transaction (BUFF task lookup, Steam
