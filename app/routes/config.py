@@ -39,13 +39,33 @@ class ImportFullBody(BaseModel):
     transactions: Optional[dict] = None
     accounts: Optional[dict] = None
     log: Optional[list] = None
+
+def _has_explicit_auto_offer_enabled_patch(patch: dict) -> bool:
+    section = patch.get("auto_offer") if isinstance(patch, dict) else None
+    return isinstance(section, dict) and "enabled" in section
+
 @router.get("/api/config")
 def api_get_config(response: Response):
     response.headers["Cache-Control"] = "no-store"
     return {"config": load_app_config_validated()}
 @router.post("/api/config")
 def api_save_config(body: ConfigBody):
-    saved = update_app_config_validated(body.config)
+    if _has_explicit_auto_offer_enabled_patch(body.config):
+        from app.pipeline import (
+            PipelineMaintenanceBlocked,
+            update_auto_offer_enabled_config,
+        )
+
+        try:
+            saved = update_auto_offer_enabled_config(body.config)
+        except PipelineMaintenanceBlocked as exc:
+            return {
+                "ok": False,
+                "code": "AUTO_OFFER_CONFIG_CHANGE_BLOCKED",
+                "error": str(exc),
+            }
+    else:
+        saved = update_app_config_validated(body.config)
     return {"ok": True, "config": saved}
 def _api_data_init_unlocked():
     from app.state import clear_log
