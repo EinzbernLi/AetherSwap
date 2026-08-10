@@ -142,7 +142,7 @@ The real buyer-send gate remains CLOSED after TASK-026 implementation until:
 1. TASK-026 is exact-SHA Windows verified;
 2. exact-head CI passes;
 3. merge and post-merge CI/review pass;
-4. the clean reusable local verification base has been established;
+4. disposable exact-source verification policy is active, with candidate source acquired ephemerally and exact Git tree identity proven before local tests;
 5. host/runtime write wiring is separately frozen;
 6. OWNER separately authorizes an exact one-order live canary.
 
