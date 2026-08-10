@@ -1065,3 +1065,407 @@ def test_coordinator_has_no_lifecycle_sqlite_or_runtime_surface():
     )
     for term in forbidden:
         assert term not in text
+
+
+class RecordingStore:
+    def __init__(self, current, *, fail_on_advance=None, failure=None, events=None):
+        self.current = current
+        self.fail_on_advance = fail_on_advance
+        self.failure = failure or AutoOfferStoreError("secret-store-error")
+        self.events = [] if events is None else events
+        self.advance_count = 0
+
+    def get_by_purchase_id(self, purchase_id):
+        self.events.append(("get", purchase_id, self.current.revision))
+        return self.current
+
+    def advance(self, current, target):
+        self.advance_count += 1
+        self.events.append(
+            (
+                "advance",
+                current.snapshot.delivery_status,
+                target.delivery_status,
+                current.revision,
+            )
+        )
+        if self.fail_on_advance == self.advance_count:
+            raise self.failure
+        if current != self.current:
+            raise AutoOfferStoreStaleWriteError("stale")
+        self.current = StoredDelivery(target, current.revision + 1)
+        return self.current
+
+
+class RecordingSendAdapter:
+    def __init__(self, result_factory=None, *, error=None, events=None, capabilities=None):
+        self.capabilities = frozenset(
+            {PlatformCapability.SEND_OFFER}
+            if capabilities is None
+            else capabilities
+        )
+        self.result_factory = result_factory
+        self.error = error
+        self.events = [] if events is None else events
+        self.calls = []
+
+    def execute(self, request):
+        self.calls.append(request)
+        self.events.append(("adapter", request.revision, request.buff_order_id))
+        if self.error is not None:
+            raise self.error
+        if self.result_factory is None:
+            return None
+        return self.result_factory(request)
+
+
+def buyer_awaiting(revision=1):
+    return make_delivery(
+        make_snapshot(
+            DeliveryStatus.AWAITING_OFFER,
+            DeliveryMode.BUYER_SENDS_OFFER,
+        ),
+        revision=revision,
+    )
+
+
+def sequence_clock(*values):
+    iterator = iter(values)
+    return lambda: next(iterator)
+
+
+def test_write_coordinator_is_same_authority_and_requires_explicit_enablement():
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    assert ReadOnlyDeliveryCoordinator is DeliveryCoordinator
+    item = buyer_awaiting()
+    adapter = RecordingSendAdapter()
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="write_capability_not_allowed"):
+        DeliveryCoordinator(
+            RecordingStore(item),
+            {PlatformCapability.SEND_OFFER: adapter},
+            timeout_seconds=1.0,
+        )
+    with pytest.raises(ReadOnlyCoordinatorError, match="invalid_allow_writes"):
+        DeliveryCoordinator(
+            RecordingStore(item),
+            {},
+            timeout_seconds=1.0,
+            allow_writes=1,
+        )
+    with pytest.raises(ReadOnlyCoordinatorError, match="invalid_clock"):
+        DeliveryCoordinator(
+            RecordingStore(item),
+            {},
+            timeout_seconds=1.0,
+            allow_writes=True,
+            clock=object(),
+        )
+
+
+def test_send_adapter_must_declare_only_send_offer():
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    item = buyer_awaiting()
+    adapter = RecordingSendAdapter(
+        capabilities={
+            PlatformCapability.SEND_OFFER,
+            PlatformCapability.READ_OFFER_STATE,
+        }
+    )
+    with pytest.raises(ReadOnlyCoordinatorError, match="adapter_capability_mismatch"):
+        DeliveryCoordinator(
+            RecordingStore(item),
+            {PlatformCapability.SEND_OFFER: adapter},
+            timeout_seconds=1.0,
+            allow_writes=True,
+        )
+
+
+def test_send_offer_persists_attempt_before_single_adapter_call_and_then_sent():
+    from app.auto_offer.adapters import SendOfferEvidence
+    from app.auto_offer.coordinator import DeliveryCoordinator, SendOfferStepResult
+
+    events = []
+    item = buyer_awaiting(revision=4)
+    store = RecordingStore(item, events=events)
+    adapter = RecordingSendAdapter(
+        lambda request: PlatformResult(
+            request,
+            PlatformResultStatus.SUCCESS,
+            evidence=SendOfferEvidence("offer-42"),
+        ),
+        events=events,
+    )
+    result = DeliveryCoordinator(
+        store,
+        {PlatformCapability.SEND_OFFER: adapter},
+        timeout_seconds=7.0,
+        allow_writes=True,
+        clock=sequence_clock(10.0, 11.0),
+    ).step(item)
+
+    assert isinstance(result, SendOfferStepResult)
+    assert [event[0] for event in events] == ["get", "advance", "adapter", "advance"]
+    assert events[1][1:3] == (
+        DeliveryStatus.AWAITING_OFFER,
+        DeliveryStatus.OFFER_ATTEMPTED,
+    )
+    assert events[3][1:3] == (
+        DeliveryStatus.OFFER_ATTEMPTED,
+        DeliveryStatus.OFFER_SENT,
+    )
+    assert len(adapter.calls) == 1
+    request = adapter.calls[0]
+    assert request.revision == 5
+    assert request.capability is PlatformCapability.SEND_OFFER
+    assert request.steam_tradeoffer_id is None
+    assert request.purchase_id == item.snapshot.purchase_id
+    assert request.buff_order_id == item.snapshot.buff_order_id
+    assert request.account_id == item.snapshot.account_id
+    assert request.recipient_steam_id == item.snapshot.recipient_steam_id
+    assert result.attempted.snapshot.offer_attempted_at == 10.0
+    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+    assert result.after.snapshot.steam_tradeoffer_id == "offer-42"
+    assert result.after.snapshot.offer_sent_at == 11.0
+    assert result.after.revision == 6
+
+
+def _forged_send_success(request, evidence):
+    forged = object.__new__(PlatformResult)
+    object.__setattr__(forged, "request", request)
+    object.__setattr__(forged, "status", PlatformResultStatus.SUCCESS)
+    object.__setattr__(forged, "detail", None)
+    object.__setattr__(forged, "evidence", evidence)
+    return forged
+
+
+@pytest.mark.parametrize("kind", ["timeout", "exception", "malformed", "failure", "bare", "wrong"])
+def test_every_unproven_invoked_send_outcome_becomes_result_unknown_without_retry(kind):
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    item = buyer_awaiting()
+    store = RecordingStore(item)
+    if kind == "timeout":
+        adapter = RecordingSendAdapter(error=PlatformAdapterTimeoutError("secret"))
+    elif kind == "exception":
+        adapter = RecordingSendAdapter(error=RuntimeError("secret"))
+    elif kind == "malformed":
+        adapter = RecordingSendAdapter(lambda request: object())
+    elif kind == "failure":
+        adapter = RecordingSendAdapter(
+            lambda request: PlatformResult(
+                request,
+                PlatformResultStatus.FAILURE,
+                "send_failed",
+            )
+        )
+    elif kind == "bare":
+        adapter = RecordingSendAdapter(
+            lambda request: _forged_send_success(request, None)
+        )
+    else:
+        adapter = RecordingSendAdapter(
+            lambda request: _forged_send_success(
+                request, OfferStateEvidence("offer-1")
+            )
+        )
+
+    result = DeliveryCoordinator(
+        store,
+        {PlatformCapability.SEND_OFFER: adapter},
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(10.0),
+    ).step(item)
+
+    assert len(adapter.calls) == 1
+    assert result.attempted.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
+    assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+    assert result.after.snapshot.delivery_error == "write_result_unknown"
+    assert result.after.snapshot.steam_tradeoffer_id is None
+    assert result.after.revision == item.revision + 2
+
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="read_step_not_available"):
+        DeliveryCoordinator(
+            store,
+            {PlatformCapability.SEND_OFFER: adapter},
+            timeout_seconds=1.0,
+            allow_writes=True,
+            clock=sequence_clock(20.0),
+        ).step(result.after)
+    assert len(adapter.calls) == 1
+
+
+def test_missing_send_adapter_and_invalid_preflight_clock_never_record_attempt():
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    item = buyer_awaiting()
+    store = RecordingStore(item)
+    coordinator = DeliveryCoordinator(
+        store,
+        {},
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(10.0),
+    )
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="send_offer_adapter_required"):
+        coordinator.step(item)
+    assert store.advance_count == 0
+
+    adapter = RecordingSendAdapter()
+    store = RecordingStore(item)
+    coordinator = DeliveryCoordinator(
+        store,
+        {PlatformCapability.SEND_OFFER: adapter},
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(nan),
+    )
+    with pytest.raises(ReadOnlyCoordinatorError, match="invalid_clock_value"):
+        coordinator.step(item)
+    assert store.advance_count == 0
+    assert adapter.calls == []
+
+
+def test_stale_store_preflight_never_records_attempt_or_calls_send():
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    supplied = buyer_awaiting(revision=1)
+    persisted = buyer_awaiting(revision=2)
+    store = RecordingStore(persisted)
+    adapter = RecordingSendAdapter()
+    coordinator = DeliveryCoordinator(
+        store,
+        {PlatformCapability.SEND_OFFER: adapter},
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(10.0),
+    )
+    with pytest.raises(ReadOnlyCoordinatorConflictError, match="persisted_delivery_mismatch"):
+        coordinator.step(supplied)
+    assert store.advance_count == 0
+    assert adapter.calls == []
+
+
+def test_attempt_persistence_failure_happens_before_and_prevents_external_call():
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    item = buyer_awaiting()
+    store = RecordingStore(item, fail_on_advance=1)
+    adapter = RecordingSendAdapter()
+    coordinator = DeliveryCoordinator(
+        store,
+        {PlatformCapability.SEND_OFFER: adapter},
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(10.0),
+    )
+    with pytest.raises(ReadOnlyCoordinatorError, match="store_advance_failed"):
+        coordinator.step(item)
+    assert adapter.calls == []
+    assert store.current == item
+
+
+def test_success_persistence_failure_leaves_durable_attempt_and_never_resends():
+    from app.auto_offer.adapters import SendOfferEvidence
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    item = buyer_awaiting()
+    store = RecordingStore(item, fail_on_advance=2)
+    adapter = RecordingSendAdapter(
+        lambda request: PlatformResult(
+            request,
+            PlatformResultStatus.SUCCESS,
+            evidence=SendOfferEvidence("offer-1"),
+        )
+    )
+    coordinator = DeliveryCoordinator(
+        store,
+        {PlatformCapability.SEND_OFFER: adapter},
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(10.0, 11.0),
+    )
+    with pytest.raises(ReadOnlyCoordinatorError, match="store_advance_failed"):
+        coordinator.step(item)
+    assert len(adapter.calls) == 1
+    assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
+    assert store.current.snapshot.offer_attempted_at == 10.0
+
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="read_step_not_available"):
+        DeliveryCoordinator(
+            store,
+            {PlatformCapability.SEND_OFFER: adapter},
+            timeout_seconds=1.0,
+            allow_writes=True,
+            clock=sequence_clock(20.0),
+        ).step(store.current)
+    assert len(adapter.calls) == 1
+
+
+def test_result_unknown_persistence_failure_leaves_durable_attempt_and_never_resends():
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    item = buyer_awaiting()
+    store = RecordingStore(item, fail_on_advance=2)
+    adapter = RecordingSendAdapter(error=PlatformAdapterTimeoutError("secret"))
+    coordinator = DeliveryCoordinator(
+        store,
+        {PlatformCapability.SEND_OFFER: adapter},
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(10.0),
+    )
+    with pytest.raises(ReadOnlyCoordinatorError, match="store_advance_failed"):
+        coordinator.step(item)
+    assert len(adapter.calls) == 1
+    assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
+
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="read_step_not_available"):
+        DeliveryCoordinator(
+            store,
+            {PlatformCapability.SEND_OFFER: adapter},
+            timeout_seconds=1.0,
+            allow_writes=True,
+            clock=sequence_clock(20.0),
+        ).step(store.current)
+    assert len(adapter.calls) == 1
+
+
+def test_post_call_clock_failure_or_regression_becomes_result_unknown():
+    from app.auto_offer.adapters import SendOfferEvidence
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    for clock in (sequence_clock(10.0), sequence_clock(10.0, 9.0)):
+        item = buyer_awaiting()
+        store = RecordingStore(item)
+        adapter = RecordingSendAdapter(
+            lambda request: PlatformResult(
+                request,
+                PlatformResultStatus.SUCCESS,
+                evidence=SendOfferEvidence("offer-1"),
+            )
+        )
+        result = DeliveryCoordinator(
+            store,
+            {PlatformCapability.SEND_OFFER: adapter},
+            timeout_seconds=1.0,
+            allow_writes=True,
+            clock=clock,
+        ).step(item)
+        assert len(adapter.calls) == 1
+        assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+        assert result.after.snapshot.delivery_error == "write_result_unknown"
+
+
+def test_write_authority_does_not_import_or_wire_task007_executor():
+    from pathlib import Path
+
+    path = Path(__file__).parents[1] / "app" / "auto_offer" / "coordinator.py"
+    text = path.read_text(encoding="utf-8")
+    assert "DeliveryExecutor" not in text
+    assert "executor" not in text.lower()
+    assert "buyer_send_offer" not in text
+    assert "POST" not in text
+    assert "retry" not in text.lower()

@@ -1,15 +1,16 @@
-"""One-shot read-only platform step coordination.
+"""One-shot fail-closed platform step coordination.
 
-The coordinator owns routing, adapter normalization, and one optional Store
-CAS write.  Reconciliation remains the only authority that can propose a
-delivery target.
+The coordinator owns routing, adapter normalization, and contract-approved Store
+CAS writes.  Read reconciliation remains the authority for read-evidence targets;
+the buyer SEND_OFFER path owns only its durable attempt/send transitions.
 """
 
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from .adapters import (
@@ -22,6 +23,7 @@ from .adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SendOfferEvidence,
 )
 from .contracts import (
     DeliveryContractError,
@@ -73,12 +75,27 @@ class ReadOnlyCoordinatorConflictError(ReadOnlyCoordinatorError):
 
 
 class ReadOnlyCoordinatorBlockedError(ReadOnlyCoordinatorError):
-    """The current state or capability cannot be handled by this read-only step."""
+    """The current state or capability cannot be handled safely."""
 
 
 def _validate_timeout(value: object) -> None:
     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
         raise ReadOnlyCoordinatorError("invalid_timeout")
+
+
+def _validate_clock(clock: object) -> None:
+    if not callable(clock):
+        raise ReadOnlyCoordinatorError("invalid_clock")
+
+
+def _validate_timestamp(value: object) -> float:
+    if (
+        type(value) not in (int, float)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ReadOnlyCoordinatorError("invalid_clock_value")
+    return float(value)
 
 
 def _validate_delivery(delivery: object) -> None:
@@ -90,6 +107,13 @@ def _validate_delivery(delivery: object) -> None:
         validate_delivery_snapshot(delivery.snapshot)
     except DeliveryContractError as exc:
         raise ReadOnlyCoordinatorError("invalid_delivery") from exc
+
+
+def _same_delivery_identity(left: StoredDelivery, right: StoredDelivery) -> bool:
+    return all(
+        getattr(left.snapshot, field) == getattr(right.snapshot, field)
+        for field in _IDENTITY_FIELDS
+    )
 
 
 def _request_matches_delivery(
@@ -167,7 +191,7 @@ def _exception_result(request: PlatformRequest, error: BaseException) -> Platfor
     return PlatformResult(request=request, status=status, detail=detail)
 
 
-def _required_capability(delivery: StoredDelivery) -> PlatformCapability:
+def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
     status = delivery.snapshot.delivery_status
     mode = delivery.snapshot.delivery_mode
     if status is DeliveryStatus.PENDING_DIRECTION:
@@ -246,7 +270,7 @@ def _validate_step_result_parts(
 
 @dataclass(frozen=True)
 class ReadOnlyStepResult:
-    """Immutable result of one coordinator step."""
+    """Immutable result of one read-side coordinator step."""
 
     before: StoredDelivery
     platform_result: PlatformResult
@@ -264,8 +288,56 @@ class ReadOnlyStepResult:
         )
 
 
-class ReadOnlyDeliveryCoordinator:
-    """Coordinate one read-only platform check and one optional CAS advance."""
+@dataclass(frozen=True)
+class SendOfferStepResult:
+    """Immutable result of one durably recorded SEND_OFFER attempt."""
+
+    before: StoredDelivery
+    attempted: StoredDelivery
+    platform_result: PlatformResult
+    after: StoredDelivery
+
+    def __post_init__(self) -> None:
+        try:
+            _validate_delivery(self.before)
+            _validate_delivery(self.attempted)
+            _validate_delivery(self.after)
+            PlatformResult.__post_init__(self.platform_result)
+        except Exception as exc:
+            raise ReadOnlyCoordinatorError("invalid_send_step_result") from exc
+        if (
+            self.before.snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
+            or self.before.snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
+            or self.attempted.snapshot.delivery_status
+            is not DeliveryStatus.OFFER_ATTEMPTED
+            or self.attempted.revision != self.before.revision + 1
+            or not _same_delivery_identity(self.before, self.attempted)
+            or not _same_delivery_identity(self.attempted, self.after)
+            or not _request_matches_delivery(
+                self.platform_result.request, self.attempted
+            )
+            or self.platform_result.request.capability
+            is not PlatformCapability.SEND_OFFER
+            or self.after.revision != self.attempted.revision + 1
+        ):
+            raise ReadOnlyCoordinatorError("invalid_send_step_result")
+        if self.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT:
+            if (
+                self.platform_result.status is not PlatformResultStatus.SUCCESS
+                or type(self.platform_result.evidence) is not SendOfferEvidence
+                or self.after.snapshot.steam_tradeoffer_id
+                != self.platform_result.evidence.steam_tradeoffer_id
+            ):
+                raise ReadOnlyCoordinatorError("invalid_send_step_result")
+        elif self.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+            if self.after.snapshot.delivery_error != "write_result_unknown":
+                raise ReadOnlyCoordinatorError("invalid_send_step_result")
+        else:
+            raise ReadOnlyCoordinatorError("invalid_send_step_result")
+
+
+class DeliveryCoordinator:
+    """Coordinate one exact platform step and contract-approved Store CAS writes."""
 
     def __init__(
         self,
@@ -273,18 +345,30 @@ class ReadOnlyDeliveryCoordinator:
         adapters: Mapping[PlatformCapability, PlatformAdapter],
         *,
         timeout_seconds: float,
+        allow_writes: bool = False,
+        clock=None,
     ) -> None:
         _validate_store(store)
         _validate_timeout(timeout_seconds)
+        if type(allow_writes) is not bool:
+            raise ReadOnlyCoordinatorError("invalid_allow_writes")
+        actual_clock = time.time if clock is None else clock
+        _validate_clock(actual_clock)
         if not isinstance(adapters, Mapping):
             raise ReadOnlyCoordinatorError("invalid_adapter_registry")
         configured = {}
         for capability, adapter in adapters.items():
             if type(capability) is not PlatformCapability:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
-            if capability is PlatformCapability.SEND_OFFER:
+            if (
+                capability is PlatformCapability.SEND_OFFER
+                and not allow_writes
+            ):
                 raise ReadOnlyCoordinatorBlockedError("write_capability_not_allowed")
-            if capability not in _READ_CAPABILITIES:
+            if (
+                capability not in _READ_CAPABILITIES
+                and capability is not PlatformCapability.SEND_OFFER
+            ):
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
             try:
                 declared = adapter.capabilities
@@ -294,10 +378,17 @@ class ReadOnlyDeliveryCoordinator:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch") from exc
             if not callable(execute) or capability not in declared_set:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
+            if (
+                capability is PlatformCapability.SEND_OFFER
+                and declared_set != frozenset({PlatformCapability.SEND_OFFER})
+            ):
+                raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
             configured[capability] = adapter
         self._store = store
         self._adapters = MappingProxyType(configured)
         self._timeout_seconds = timeout_seconds
+        self._allow_writes = allow_writes
+        self._clock = actual_clock
 
     def _read_current(self, delivery: StoredDelivery) -> None:
         try:
@@ -312,6 +403,13 @@ class ReadOnlyDeliveryCoordinator:
             raise ReadOnlyCoordinatorError("store_read_failed") from exc
         if type(persisted) is not StoredDelivery or persisted != delivery:
             raise ReadOnlyCoordinatorConflictError("persisted_delivery_mismatch")
+
+    def _now(self) -> float:
+        try:
+            value = self._clock()
+        except Exception:
+            raise ReadOnlyCoordinatorError("clock_failed") from None
+        return _validate_timestamp(value)
 
     def _make_request(
         self,
@@ -358,7 +456,23 @@ class ReadOnlyDeliveryCoordinator:
             raise ReadOnlyCoordinatorError("planner_failed")
         return decision
 
-    def _persist(
+    def _advance(
+        self,
+        current: StoredDelivery,
+        target,
+    ) -> StoredDelivery:
+        try:
+            return self._store.advance(current, target)
+        except AutoOfferStoreStaleWriteError as exc:
+            raise ReadOnlyCoordinatorConflictError("stale_write") from exc
+        except AutoOfferStoreConflictError as exc:
+            raise ReadOnlyCoordinatorConflictError("store_advance_conflict") from exc
+        except AutoOfferStoreError as exc:
+            raise ReadOnlyCoordinatorError("store_advance_failed") from exc
+        except Exception as exc:
+            raise ReadOnlyCoordinatorError("store_advance_failed") from exc
+
+    def _persist_read(
         self,
         before: StoredDelivery,
         decision: ReconciliationDecision,
@@ -372,16 +486,7 @@ class ReadOnlyDeliveryCoordinator:
                 after=before,
                 persisted=False,
             )
-        try:
-            after = self._store.advance(decision.delivery, decision.target)
-        except AutoOfferStoreStaleWriteError as exc:
-            raise ReadOnlyCoordinatorConflictError("stale_write") from exc
-        except AutoOfferStoreConflictError as exc:
-            raise ReadOnlyCoordinatorConflictError("store_advance_conflict") from exc
-        except AutoOfferStoreError as exc:
-            raise ReadOnlyCoordinatorError("store_advance_failed") from exc
-        except Exception as exc:
-            raise ReadOnlyCoordinatorError("store_advance_failed") from exc
+        after = self._advance(decision.delivery, decision.target)
         try:
             return ReadOnlyStepResult(
                 before=before,
@@ -393,11 +498,83 @@ class ReadOnlyDeliveryCoordinator:
         except Exception as exc:
             raise ReadOnlyCoordinatorError("store_advance_invalid") from exc
 
-    def step(self, delivery: StoredDelivery) -> ReadOnlyStepResult:
-        """Execute at most one read and one planner-approved CAS advance."""
+    def _persist_result_unknown(
+        self,
+        attempted: StoredDelivery,
+    ) -> StoredDelivery:
+        target = replace(
+            attempted.snapshot,
+            delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+            delivery_error="write_result_unknown",
+        )
+        return self._advance(attempted, target)
+
+    def _step_send_offer(self, delivery: StoredDelivery) -> SendOfferStepResult:
+        if not self._allow_writes:
+            raise ReadOnlyCoordinatorBlockedError("write_capability_required")
+        adapter = self._adapters.get(PlatformCapability.SEND_OFFER)
+        if adapter is None:
+            raise ReadOnlyCoordinatorBlockedError("send_offer_adapter_required")
+
+        attempted_at = self._now()
+        attempted_target = replace(
+            delivery.snapshot,
+            delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+            offer_attempted_at=attempted_at,
+        )
+        attempted = self._advance(delivery, attempted_target)
+
+        request = self._make_request(attempted, PlatformCapability.SEND_OFFER)
+        platform_result = self._execute(adapter, request)
+        if (
+            platform_result.status is PlatformResultStatus.SUCCESS
+            and type(platform_result.evidence) is SendOfferEvidence
+        ):
+            try:
+                sent_at = self._now()
+            except ReadOnlyCoordinatorError:
+                after = self._persist_result_unknown(attempted)
+                return SendOfferStepResult(
+                    before=delivery,
+                    attempted=attempted,
+                    platform_result=platform_result,
+                    after=after,
+                )
+            if sent_at < attempted_at:
+                after = self._persist_result_unknown(attempted)
+                return SendOfferStepResult(
+                    before=delivery,
+                    attempted=attempted,
+                    platform_result=platform_result,
+                    after=after,
+                )
+            sent_target = replace(
+                attempted.snapshot,
+                delivery_status=DeliveryStatus.OFFER_SENT,
+                steam_tradeoffer_id=platform_result.evidence.steam_tradeoffer_id,
+                offer_sent_at=sent_at,
+            )
+            after = self._advance(attempted, sent_target)
+        else:
+            after = self._persist_result_unknown(attempted)
+        return SendOfferStepResult(
+            before=delivery,
+            attempted=attempted,
+            platform_result=platform_result,
+            after=after,
+        )
+
+    def step(self, delivery: StoredDelivery) -> ReadOnlyStepResult | SendOfferStepResult:
+        """Execute one read step or one explicitly enabled crash-safe send attempt."""
         _validate_delivery(delivery)
         self._read_current(delivery)
-        capability = _required_capability(delivery)
+        if (
+            delivery.snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
+            and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        ):
+            return self._step_send_offer(delivery)
+
+        capability = _required_read_capability(delivery)
         request = self._make_request(delivery, capability)
         adapter = self._adapters.get(capability)
         if adapter is None:
@@ -409,13 +586,20 @@ class ReadOnlyDeliveryCoordinator:
         else:
             platform_result = self._execute(adapter, request)
         decision = self._plan(delivery, platform_result)
-        return self._persist(delivery, decision, platform_result)
+        return self._persist_read(delivery, decision, platform_result)
+
+
+ReadOnlyDeliveryCoordinator = DeliveryCoordinator
+DeliveryReadStepResult = ReadOnlyStepResult
 
 
 __all__ = [
+    "DeliveryCoordinator",
+    "DeliveryReadStepResult",
     "ReadOnlyCoordinatorBlockedError",
     "ReadOnlyCoordinatorConflictError",
     "ReadOnlyCoordinatorError",
     "ReadOnlyDeliveryCoordinator",
     "ReadOnlyStepResult",
+    "SendOfferStepResult",
 ]
