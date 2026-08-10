@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import copy
 from contextlib import contextmanager
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -11,6 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config_loader import get_buff_credentials, load_app_config_validated
 from app.config_schema import DEFAULTS, _validate_ranges, merge, validate_and_fill
+from app.auto_offer.contracts import result_blocks_next_purchase
+from app.auto_offer.host_integration import (
+    HostAutoOfferIntegration,
+    build_host_auto_offer_integration,
+)
 from app.pipeline_context import PipelineContext
 from app.pipeline_steps import (
     TARGET_REACHED,
@@ -121,7 +127,7 @@ def _fetch_and_filter_deals(ctx: PipelineContext, cfg: dict, retry_interval: int
     return filtered, False
 
 
-def _process_deals_for_target(
+def _process_deals_for_target_impl(
     ctx: PipelineContext,
     filtered: list,
     cfg: dict,
@@ -135,6 +141,8 @@ def _process_deals_for_target(
     skipped_this_round: set,
     stability_failed_this_round: set,
     is_time_allowed=None,
+    auto_offer_integration: HostAutoOfferIntegration | None = None,
+    effective_cfg: dict | None = None,
 ):
     acc = current_acc
     bought = total_bought
@@ -151,6 +159,13 @@ def _process_deals_for_target(
         except Exception:
             return False
 
+    purchase_cfg = effective_cfg if effective_cfg is not None else cfg
+
+    def append_purchase(purchase: dict) -> None:
+        ctx.state.append_purchase(purchase)
+        if auto_offer_integration is not None:
+            auto_offer_integration.register_committed_purchase(purchase)
+
     while acc < target:
         if ctx.is_stop_requested():
             ctx.log("用户请求停止", "warn", category="buff")
@@ -159,6 +174,18 @@ def _process_deals_for_target(
         if not time_window_is_open():
             ctx.log("购买时间窗已关闭，暂停候选分析与下单", "info", category="pipeline")
             return acc, bought, TIME_WINDOW_CLOSED
+
+        if auto_offer_integration is not None:
+            host_purchases = ctx.state.get_purchases()
+            result = auto_offer_integration.next_purchase_result(host_purchases)
+            if result_blocks_next_purchase(result):
+                ctx.log(
+                    f"Auto Offer gate blocked next purchase: {result.value}",
+                    "error",
+                    category="buff",
+                )
+                ctx.set_status("error", f"AUTO_OFFER_{result.value.upper()}")
+                return acc, bought, True
 
         ctx.set_status("running", "CHECKING_STABILITY", progress_total=n_filtered, progress_done=0, progress_item="")
         chosen, new_stability_failed = pick_stable_item(
@@ -193,12 +220,12 @@ def _process_deals_for_target(
             if is_time_allowed is not None:
                 checkout_kwargs["is_time_allowed"] = time_window_is_open
             paid = lock_and_confirm_payment(
-                buyer, chosen, cfg, target, acc,
+                buyer, chosen, purchase_cfg, target, acc,
                 ctx.state.set_pending_payment,
                 ctx.state.wait_payment_confirm,
                 ctx.state.confirm_payment,
                 ctx.state.is_stop_requested,
-                ctx.state.append_purchase,
+                append_purchase,
                 **checkout_kwargs,
             )
         except Exception as exc:
@@ -278,6 +305,52 @@ def _process_deals_for_target(
         jittered_sleep(1.0, 0.0)
 
     return acc, bought, False
+
+
+def _process_deals_for_target(
+    ctx: PipelineContext,
+    filtered: list,
+    cfg: dict,
+    target: float,
+    current_acc: float,
+    total_bought: int,
+    steam_client,
+    analyzer,
+    buyer,
+    failed_goods_ids: set,
+    skipped_this_round: set,
+    stability_failed_this_round: set,
+    is_time_allowed=None,
+):
+    integration = build_host_auto_offer_integration(
+        config=cfg,
+        buff_client=buyer,
+    )
+    try:
+        effective_cfg = cfg
+        if integration is not None:
+            effective_cfg = copy.deepcopy(cfg)
+            effective_cfg.setdefault("buff", {})["auto_ask_seller_to_send"] = False
+        return _process_deals_for_target_impl(
+            ctx,
+            filtered,
+            cfg,
+            target,
+            current_acc,
+            total_bought,
+            steam_client,
+            analyzer,
+            buyer,
+            failed_goods_ids,
+            skipped_this_round,
+            stability_failed_this_round,
+            is_time_allowed=is_time_allowed,
+            auto_offer_integration=integration,
+            effective_cfg=effective_cfg,
+        )
+    finally:
+        if integration is not None:
+            integration.close()
 
 
 def _run_pipeline(config: dict) -> None:

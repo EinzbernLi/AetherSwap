@@ -23,6 +23,9 @@ DEFAULTS = {
         # in by an advanced user.
         "auto_ask_seller_to_send": False,
     },
+    "auto_offer": {
+        "enabled": False,
+    },
     "stability": {
         "days": 30,
         "cv_threshold": 0.05,
