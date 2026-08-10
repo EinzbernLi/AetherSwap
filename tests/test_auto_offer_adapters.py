@@ -873,3 +873,61 @@ def test_fake_adapter_rejects_forged_cross_bound_completed_trade_evidence(change
     ).execute(item)
     assert result.status is PlatformResultStatus.MALFORMED
     assert result.evidence is None
+
+
+def test_send_offer_evidence_is_strict_frozen_and_capability_bound():
+    from app.auto_offer.adapters import SendOfferEvidence
+
+    evidence = SendOfferEvidence("offer-99")
+    with pytest.raises(FrozenInstanceError):
+        evidence.steam_tradeoffer_id = "other"
+    for value in ("", " offer-99", "offer-99 ", True, 99):
+        with pytest.raises(PlatformAdapterProtocolError):
+            SendOfferEvidence(value)
+
+    item = request(capability=PlatformCapability.SEND_OFFER)
+    result = PlatformResult(
+        item,
+        PlatformResultStatus.SUCCESS,
+        evidence=evidence,
+    )
+    assert result.is_success is True
+    assert result.evidence.steam_tradeoffer_id == "offer-99"
+
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            item,
+            PlatformResultStatus.SUCCESS,
+            evidence=OfferStateEvidence("offer-99"),
+        )
+    with pytest.raises(PlatformAdapterProtocolError):
+        PlatformResult(
+            item,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            evidence=evidence,
+        )
+
+
+def test_fake_send_offer_requires_exact_typed_success_evidence():
+    from app.auto_offer.adapters import SendOfferEvidence
+
+    item = request(capability=PlatformCapability.SEND_OFFER)
+    typed = FakePlatformAdapter(
+        capabilities={PlatformCapability.SEND_OFFER},
+        outcomes={
+            item: PlatformResult(
+                item,
+                PlatformResultStatus.SUCCESS,
+                evidence=SendOfferEvidence("offer-100"),
+            )
+        },
+    ).execute(item)
+    assert typed.status is PlatformResultStatus.SUCCESS
+    assert typed.evidence == SendOfferEvidence("offer-100")
+
+    bare = FakePlatformAdapter(
+        capabilities={PlatformCapability.SEND_OFFER},
+        outcomes={item: PlatformResultStatus.SUCCESS},
+    ).execute(item)
+    assert bare.status is PlatformResultStatus.MALFORMED
+    assert bare.detail == "success_evidence_required"

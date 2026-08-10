@@ -77,6 +77,16 @@ class OfferStateEvidence:
 
 
 @dataclass(frozen=True)
+class SendOfferEvidence:
+    """The exact Steam offer ID proven by one SEND_OFFER invocation."""
+
+    steam_tradeoffer_id: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+
+
+@dataclass(frozen=True)
 class InventoryStateEvidence:
     """Canonical asset IDs from one readable recipient inventory snapshot."""
 
@@ -275,6 +285,7 @@ class SteamCompletedTradeEvidence:
 PlatformEvidence: TypeAlias = (
     DeliveryDirectionEvidence
     | OfferStateEvidence
+    | SendOfferEvidence
     | InventoryStateEvidence
     | SteamTradeOfferEvidence
     | SteamCompletedTradeEvidence
@@ -557,6 +568,7 @@ class PlatformResult:
             PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,
             PlatformCapability.READ_STEAM_TRADE_OFFER: SteamTradeOfferEvidence,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: SteamCompletedTradeEvidence,
+            PlatformCapability.SEND_OFFER: SendOfferEvidence,
         }.get(self.request.capability)
         if expected_evidence is None:
             raise PlatformAdapterProtocolError("success is not allowed for this capability")
@@ -752,6 +764,7 @@ __all__ = [
     "PlatformResult",
     "PlatformResultStatus",
     "RecipientInventoryItemEvidence",
+    "SendOfferEvidence",
     "SteamCompletedTradeEvidence",
     "SteamTradeOfferEvidence",
     "SteamTradeOfferLifecycle",
