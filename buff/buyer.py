@@ -186,6 +186,7 @@ API_WX_PAY_QRCODE = "https://buff.163.com/api/market/bill_order/wx_pay_qrcode"
 API_BATCH_WX_PAY_QRCODE = "https://buff.163.com/api/market/goods/batch_buy/wx_pay_qrcode"
 API_ASK_SELLER_SEND = "https://buff.163.com/api/market/bill_order/ask_seller_to_send_offer"
 API_STEAM_TRADE = "https://buff.163.com/api/market/steam_trade"
+API_WAIT_SEND_OFFERS = "https://buff.163.com/api/market/buy_order/wait_send_offers"
 def _parse_cookies(cookie_str: str) -> dict:
     out = {}
     for item in cookie_str.split(";"):
@@ -608,6 +609,29 @@ class BuffBuyer:
                 return None
             data = response.get("data")
             return data if isinstance(data, list) else None
+        except (BuffAuthExpired, BuffRequestBlocked):
+            raise
+        except Exception:
+            return None
+
+    def get_buy_orders_waiting_to_send_offer(
+        self, game: str = "csgo", appid: int = 730
+    ) -> Optional[list]:
+        """Return exact BUFF buyer orders waiting for the buyer to send an offer."""
+
+        try:
+            response = self._make_request(
+                "GET",
+                API_WAIT_SEND_OFFERS,
+                params={"game": str(game), "appid": str(appid)},
+            )
+            if response.get("code") != "OK":
+                return None
+            data = response.get("data")
+            if not isinstance(data, dict):
+                return None
+            items = data.get("items")
+            return items if isinstance(items, list) else None
         except (BuffAuthExpired, BuffRequestBlocked):
             raise
         except Exception:

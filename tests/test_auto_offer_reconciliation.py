@@ -308,6 +308,30 @@ def test_pending_direction_proposes_only_seller_awaiting_offer():
     validate_delivery_transition(item.snapshot, decision.target)
 
 
+def test_pending_direction_proposes_buyer_awaiting_offer_without_tradeoffer_id():
+    item = delivery()
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_DELIVERY_DIRECTION,
+            DeliveryDirectionEvidence("buyer_sends_offer"),
+        ),
+    )
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.retryable is True
+    assert decision.detail == "buyer_direction_proven"
+    assert decision.target is not None
+    assert decision.target.delivery_status is DeliveryStatus.AWAITING_OFFER
+    assert decision.target.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+    assert decision.target.steam_tradeoffer_id is None
+    assert decision.target.offer_attempted_at is None
+    assert decision.target.offer_sent_at is None
+    assert decision.target.received_at is None
+    validate_delivery_snapshot(decision.target)
+    validate_delivery_transition(item.snapshot, decision.target)
+
+
 def test_pending_direction_wrong_capability_cannot_advance():
     item = delivery()
     decision = plan_read_evidence_transition(

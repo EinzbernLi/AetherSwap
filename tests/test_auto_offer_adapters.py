@@ -333,8 +333,11 @@ def test_evidence_values_are_immutable_validated_and_canonical():
     assert inventory.assetids == ("asset-1", "asset-2")
     with pytest.raises(FrozenInstanceError):
         inventory.assetids = ()
-    with pytest.raises(PlatformAdapterProtocolError):
-        DeliveryDirectionEvidence("buyer_sends_offer")
+    assert DeliveryDirectionEvidence("seller_sends_offer").direction == "seller_sends_offer"
+    assert DeliveryDirectionEvidence("buyer_sends_offer").direction == "buyer_sends_offer"
+    for direction in ("unknown", "SELLER_SENDS_OFFER", " buyer_sends_offer"):
+        with pytest.raises(PlatformAdapterProtocolError):
+            DeliveryDirectionEvidence(direction)
     with pytest.raises(PlatformAdapterProtocolError):
         OfferStateEvidence(" offer-1")
     for assetids, total in (

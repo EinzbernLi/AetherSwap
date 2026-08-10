@@ -316,8 +316,16 @@ def plan_read_evidence_transition(
         if (
             request.capability is PlatformCapability.READ_DELIVERY_DIRECTION
             and type(evidence) is DeliveryDirectionEvidence
-            and evidence.direction == "seller_sends_offer"
         ):
+            if evidence.direction == "buyer_sends_offer":
+                target = replace(
+                    snapshot,
+                    delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+                    delivery_status=DeliveryStatus.AWAITING_OFFER,
+                )
+                return _propose(delivery, target, "buyer_direction_proven")
+            if evidence.direction != "seller_sends_offer":
+                return _blocked(delivery, "evidence_not_allowed")
             target = replace(
                 snapshot,
                 delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
