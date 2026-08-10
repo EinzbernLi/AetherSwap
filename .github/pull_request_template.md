@@ -1,80 +1,106 @@
 ## 对应任务
 
-- TASK：TASK-XXX
-- Issue：Closes #XXX
+- TASK / GOV / HARDENING：
+- Issue：
 - base：`integration/auto-buyer-offer`
+- execution mode：`GitHub-only` / `Local-required`
 - 风险等级：LOW / MEDIUM / HIGH / CRITICAL
-- 本 PR 只关联或关闭一个任务；默认 Draft。
+- exact accepted source/tree SHA：
+- exact head SHA：
 
-## 角色与验收状态
+项目固定事实见 [`.agent/PROJECT_CONTEXT.md`](../.agent/PROJECT_CONTEXT.md)，流程见 [`.agent/WORKFLOW.md`](../.agent/WORKFLOW.md)。
 
-- Luna：实现、测试、自检和 Draft PR；不负责最终验收。
-- Sol：派单、GitHub 状态、生成验收请求、原样传递网页端 GPT 结论并按结论执行；不得自行批准。
-- 网页端 GPT：针对精确完整 PR head SHA 作出最终验收。
-- 仓库所有者：负责 integration → main 最终批准和真实功能启用。
-- 当前 head SHA：
-- CI：passed / failed / not_configured
-- 网页端 GPT 验收状态：pending / awaiting-gpt-review / APPROVE / CHANGES_REQUESTED / BLOCKED
-- REVIEWED_HEAD_SHA：
-- 新提交后旧验收立即失效。
+## 角色与发布状态
+
+- Sol / Web GPT：同一个技术总控与最终技术验收角色；负责 exact-source、commit、PR、CI、merge-to-integration 和 post-merge review。
+- Luna：仅在 `Local-required` 时提供本机实现/测试/source-tree handoff 证据；不负责最终技术验收和常规 GitHub 发布。
+- OWNER：真实平台写操作、integration → `main` 和重大范围/外部风险的独立授权者。
+- integration 内 task publication：技术门禁通过后可由 Sol 连续推进，无需逐步重复 OWNER 授权。
 
 ## 修改范围
 
-<!-- 列出实际修改的任务白名单文件。 -->
+<!-- 列出实际任务白名单文件；必须与 Issue 冻结范围一致。 -->
 
 ## 未修改范围
 
-确认未修改：任务禁止范围、无关业务代码、现有业务测试、依赖、配置和 `main`。
+确认未修改：任务禁止范围、无关业务/测试/依赖/配置、`main` 以及 Issue 未授权文件。
 
 ## 行为变化
 
-<!-- 文档-only 也须明确说明。 -->
+<!-- 文档-only 也明确写“无 runtime 行为变化”。 -->
 
-## 安全不变量
+## 当前轮验证
 
-- [ ] 未猜测 BUFF 契约；不确定即 `BLOCKED`。
-- [ ] 未记录 Cookie、API Key、令牌、`buyer_info` 或加密前会话。
-- [ ] 不可幂等写请求未自动重试；不明确结果为 `result_unknown` 且不重发。
-- [ ] 订单单记录、付款后首次报价、四方 SteamID、精确库存绑定均保持。
-- [ ] `pending_receipt=True` 未改变；无 `accept_all`；worker 不负责首次发送。
-- [ ] 未删除或弱化测试。
+- 环境/执行位置：
+- target：
+- historical regression：
+- host regression：
+- full suite：
+- baseline：
+- `git diff --check` / static scan：
+- 真实 Steam/BUFF 请求：
 
-## 检查或测试命令及真实结果
+只填写本轮实际执行结果；历史结果如需引用必须明确标为 historical evidence。
 
-- 命令：
-- 真实结果：
+## Local-required source handoff
 
-## 故障测试
+<!-- GitHub-only 填 N/A。 -->
 
-- 场景或命令：
-- 真实结果：
+- workspace：
+- base SHA / base tree：
+- unreferenced source tree SHA：
+- exact paths / hashes：
+- remote read-back：PASS / FAIL / N/A
+- line-ending / minimal-diff check：PASS / FAIL / N/A
+- 受保护 checkout 未触碰：PASS / FAIL / N/A
 
-## 风险
+## Historical + Simplicity Review
 
-## 回滚
+- [ ] 只完成当前 TASK。
+- [ ] 无重复状态机/执行器/写入权威。
+- [ ] 无纯未来需求抽象。
+- [ ] host touchpoints 最小。
+- [ ] 安全复杂度有当前不变量依据。
+- [ ] 历史依赖/架构兼容。
 
-## 未解决问题
+结论与已知债务：
 
-## Luna 自检报告
+## Exact source / commit review
 
-### 修改范围检查
+- commit SHA：
+- parent SHA：
+- exact changed paths：
+- GitHub-native diff：PASS / CHANGES_REQUESTED
+- Sol technical verdict：PASS / CHANGES_REQUESTED / BLOCKED
 
-### 验收标准逐项核对
+## CI
 
-### 检查/测试命令和真实结果
+- exact head CI run：
+- result：passed / failed / not_configured
+- baseline：
 
-### 自查过程中发现并修复的问题
+## 安全确认
 
-<!-- 如未发现，明确填写“未发现”。 -->
+完整规则见 [`AGENTS.md`](../AGENTS.md)。
 
-### 剩余风险
+- [ ] 未泄露 credentials/secrets。
+- [ ] 未用跳过/弱化测试换取 PASS。
+- [ ] 未执行未授权的真实平台写请求。
+- [ ] 不可幂等未知结果没有自动重发。
+- [ ] TASK 安全不变量保持。
 
-### 未解决问题
+## Merge 与 post-merge
 
-## 网页端 GPT 验收原文
+- merge SHA：
+- integration HEAD：
+- post-merge CI：
+- base → merge exact diff：PASS / FAIL
+- Mandatory Historical + Simplicity Review：PASS / CHANGES_REQUESTED / BLOCKED
 
-<!-- Sol 必须粘贴完整原文，不得概括、改写或删除阻塞项。 -->
+只有 post-merge 门禁完成后才关闭 TASK。integration → `main` 不因本 PR 的 integration merge 自动获得授权。
 
-## 交付声明
+## 风险 / 回滚 / 未解决问题
 
-我没有审查或合并自己的 PR；已按 [.agent/REVIEW_CHECKLIST.md](../.agent/REVIEW_CHECKLIST.md) 自检。网页端 GPT 未响应时保持 `awaiting-gpt-review`；任何新提交均使旧验收失效；无论验收结果如何都不得自动合入 `main`。
+- 风险：
+- 回滚：
+- 未解决问题：
