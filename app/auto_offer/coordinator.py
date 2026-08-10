@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from .adapters import (
+    OfferStateEvidence,
     PlatformAdapter,
     PlatformAdapterError,
     PlatformAdapterProtocolError,
@@ -200,6 +201,17 @@ def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
         if mode is DeliveryMode.BUYER_SENDS_OFFER:
             raise ReadOnlyCoordinatorBlockedError("write_capability_required")
         if mode is DeliveryMode.SELLER_SENDS_OFFER:
+            return PlatformCapability.READ_OFFER_STATE
+    if status is DeliveryStatus.OFFER_ATTEMPTED:
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            return PlatformCapability.READ_OFFER_STATE
+    if status is DeliveryStatus.RESULT_UNKNOWN:
+        snapshot = delivery.snapshot
+        if (
+            mode is DeliveryMode.BUYER_SENDS_OFFER
+            and snapshot.offer_attempted_at is not None
+            and snapshot.steam_tradeoffer_id is None
+        ):
             return PlatformCapability.READ_OFFER_STATE
     if status is DeliveryStatus.AWAITING_INVENTORY:
         return PlatformCapability.READ_STEAM_COMPLETED_TRADE
@@ -448,8 +460,24 @@ class DeliveryCoordinator:
         before: StoredDelivery,
         platform_result: PlatformResult,
     ) -> ReconciliationDecision:
+        observed_at = None
+        if (
+            before.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+            and before.snapshot.delivery_status in {
+                DeliveryStatus.OFFER_ATTEMPTED,
+                DeliveryStatus.RESULT_UNKNOWN,
+            }
+            and platform_result.status is PlatformResultStatus.SUCCESS
+            and platform_result.request.capability is PlatformCapability.READ_OFFER_STATE
+            and type(platform_result.evidence) is OfferStateEvidence
+        ):
+            observed_at = self._now()
         try:
-            decision = plan_read_evidence_transition(before, platform_result)
+            decision = plan_read_evidence_transition(
+                before,
+                platform_result,
+                observed_at=observed_at,
+            )
         except Exception as exc:
             raise ReadOnlyCoordinatorError("planner_failed") from exc
         if type(decision) is not ReconciliationDecision:
@@ -578,6 +606,15 @@ class DeliveryCoordinator:
         request = self._make_request(delivery, capability)
         adapter = self._adapters.get(capability)
         if adapter is None:
+            if (
+                capability is PlatformCapability.READ_OFFER_STATE
+                and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+                and delivery.snapshot.delivery_status in {
+                    DeliveryStatus.OFFER_ATTEMPTED,
+                    DeliveryStatus.RESULT_UNKNOWN,
+                }
+            ):
+                raise ReadOnlyCoordinatorBlockedError("read_step_not_available")
             platform_result = PlatformResult(
                 request=request,
                 status=PlatformResultStatus.UNSUPPORTED,

@@ -6,6 +6,7 @@ I/O, call a platform, or execute a transition.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 
 from .adapters import (
@@ -113,6 +114,43 @@ def _propose(
     validate_delivery_snapshot(target)
     validate_delivery_transition(delivery.snapshot, target)
     return _decision(delivery, target, AutoOfferResult.WAITING, True, detail)
+
+
+def _safe_recovery_observed_at(
+    attempted_at: float | None,
+    observed_at: object,
+) -> float | None:
+    if attempted_at is None:
+        return None
+    if (
+        type(observed_at) not in (int, float)
+        or isinstance(observed_at, bool)
+        or not math.isfinite(observed_at)
+        or observed_at < attempted_at
+    ):
+        return None
+    return float(observed_at)
+
+
+def _plan_buyer_offer_recovery(
+    delivery: StoredDelivery,
+    evidence: OfferStateEvidence,
+    observed_at: object,
+) -> ReconciliationDecision:
+    snapshot = delivery.snapshot
+    sent_at = _safe_recovery_observed_at(snapshot.offer_attempted_at, observed_at)
+    if sent_at is None:
+        return _blocked(delivery, "recovery_observation_time_invalid")
+    if snapshot.steam_tradeoffer_id is not None:
+        return _blocked(delivery, "evidence_not_allowed")
+    target = replace(
+        snapshot,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id=evidence.steam_tradeoffer_id,
+        offer_sent_at=sent_at,
+        delivery_error=None,
+    )
+    return _propose(delivery, target, "buyer_offer_recovered")
 
 
 def _safe_steam_trade_offer_evidence(
@@ -286,6 +324,8 @@ class ReconciliationDecision:
 def plan_read_evidence_transition(
     delivery: StoredDelivery,
     platform_result: PlatformResult,
+    *,
+    observed_at: float | None = None,
 ) -> ReconciliationDecision:
     """Plan one safe read-only transition without executing or persisting it."""
 
@@ -302,6 +342,32 @@ def plan_read_evidence_transition(
     snapshot = delivery.snapshot
     request = platform_result.request
     evidence = platform_result.evidence
+
+    if (
+        snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and snapshot.delivery_status in {
+            DeliveryStatus.OFFER_ATTEMPTED,
+            DeliveryStatus.RESULT_UNKNOWN,
+        }
+    ):
+        if (
+            request.capability is PlatformCapability.READ_OFFER_STATE
+            and type(evidence) is OfferStateEvidence
+        ):
+            return _plan_buyer_offer_recovery(delivery, evidence, observed_at)
+        if (
+            snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+            and request.capability is PlatformCapability.READ_OFFER_STATE
+        ):
+            return _decision(
+                delivery,
+                None,
+                AutoOfferResult.WAITING,
+                True,
+                "result_unknown_recovery_not_proven",
+            )
+        if snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED:
+            return _blocked(delivery, "evidence_not_allowed")
 
     if snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
         return _decision(
