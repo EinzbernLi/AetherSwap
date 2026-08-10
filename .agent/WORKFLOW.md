@@ -1,37 +1,100 @@
 # TASK 工作流
 
-与 [AGENTS.md](../AGENTS.md)、[TASK_TEMPLATE.md](TASK_TEMPLATE.md)、[REVIEW_CHECKLIST.md](REVIEW_CHECKLIST.md)、[PR 模板](../.github/pull_request_template.md) 配套。
+与 [`AGENTS.md`](../AGENTS.md)、[`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md)、[`TASK_TEMPLATE.md`](TASK_TEMPLATE.md)、[`REVIEW_CHECKLIST.md`](REVIEW_CHECKLIST.md) 和 [PR 模板](../.github/pull_request_template.md) 配套。
 
-## 角色分工
+## 1. 开始与冻结
 
-- Luna 负责单个 TASK 的实现、测试、自检和 Draft PR，不负责最终验收，不得审查或合并自己的 PR。
-- Sol 总控负责派单、GitHub 状态管理、生成固定格式验收请求、原样传递网页端 GPT 完整验收正文并按结论执行；不得自行批准 PR。
-- 网页端 GPT 读取 GitHub，并针对精确完整 PR head SHA 作出最终验收。
-- 仓库所有者负责 `integration/auto-buyer-offer` → `main` 的最终批准和真实自动报价功能启用。
+1. Sol 读取 GitHub 当前状态和项目固定上下文，确定当前唯一 TASK。
+2. 在 Issue 中冻结：目标、base SHA、允许/禁止文件、风险、依赖、安全不变量、验收标准。
+3. 判断执行模式：
+   - **GitHub-only**：GitHub 已具备完成任务所需源码/工具，Sol 直接实现和验证；
+   - **Local-required**：必须依赖 OWNER Windows 环境、本机文件/软件或本机复现，才交给 Luna。
+4. 范围不足返回 `SCOPE_BLOCKED`；本机环境阻塞返回 `ENVIRONMENT_BLOCKED`。两者都不得被自行扩范围掩盖。
 
-## 开始
+## 2. GitHub-only 执行
 
-1. Sol 分配一个 TASK，明确目标、允许和禁止文件、基线、分支、风险、依赖和验收标准。
-2. Luna 确认分支符合 `luna/TASK-xxx-short-name`，PR base 为 `integration/auto-buyer-offer`，禁止修改 `main`。
-3. Luna 读取完整 Issue、现有实现和测试；BUFF 契约或结果语义不明确即 `BLOCKED`，禁止猜测。
-4. Luna 只修改任务卡白名单；范围冲突、依赖缺失、权限不足或结果不明确时报告 Sol。
+GitHub-only 任务默认由 Sol 完成：编辑、exact diff、commit、task branch/ref、PR、CI、merge-to-integration 和 post-merge review 都保持在 GitHub。
 
-## 执行与交付
+不要为了“分工”把纯 GitHub 操作交给 Luna，也不要创建没有必要的本地 checkout。
 
-Luna 实现后运行匹配检查，阅读完整 diff，核对文件范围、相对链接、Markdown 和安全不变量，并按 [REVIEW_CHECKLIST.md](REVIEW_CHECKLIST.md) 自检。使用 [PR 模板](../.github/pull_request_template.md) 创建或更新同一 Draft PR，真实填写命令、结果、风险、回滚和未解决问题。
+## 3. Local-required 执行
 
-不可幂等写请求不自动重试；不明确结果为 `result_unknown` 且不重发。凭据、Cookie、令牌、`buyer_info` 和加密前会话不得进入协作产物。保持付款后首次报价时序、四方 SteamID 校验、精确库存绑定、`pending_receipt=True` 语义及 worker 职责。
+Luna 只执行 Issue 已冻结的本机任务：
 
-## 网页端 GPT 验收
+- 使用隔离 workspace/worktree；
+- 使用 [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) 指定的 verifier；
+- 不扰动受保护历史 checkout；
+- 只修改白名单；
+- 运行本轮真实 target / regression / full / baseline 等冻结验收；
+- 报告真实命令、环境、collection/pass/fail/skip、changed files、diff/status、安全扫描和未解决问题。
 
-1. Sol 从 GitHub 获取当前 PR head 的完整 SHA，并按 [TASK_TEMPLATE.md](TASK_TEMPLATE.md) 生成验收请求。
-2. 网页端 GPT 未响应时，任务状态保持 `awaiting-gpt-review`；禁止 Sol 或 Luna 代替验收。
-3. Sol 必须将网页端 GPT 的完整验收正文原样写回 PR，不得概括、改写或删除阻塞项。
-4. 验收只对 `REVIEWED_HEAD_SHA` 指向的精确完整 SHA 有效；任何新提交都使旧验收立即失效。
+历史测试结果只能作为历史证据，不能冒充当前轮验证。
 
-## 返工、阻塞与合并
+### Source-tree handoff
 
-- `CHANGES_REQUESTED`：Sol 原样写回验收正文，交回同一 Luna 任务；不创建重复 Issue、分支或 PR。Luna 返工并重新自检，新提交产生新 head SHA，Sol 重新发起验收，旧验收不得复用。
-- `BLOCKED`：Issue 标记 `agent:blocked`，禁止合并，停止当前任务及所有依赖任务，等待网页端 GPT 或仓库所有者明确解除。
-- `APPROVE`：只有精确 SHA、CI、范围、base、依赖和阻塞门禁全部通过时，Sol 才可合入 `integration/auto-buyer-offer`。
-- 无论验收结果如何，都不得自动合入 `main`。
+本机实现通过后，Luna 不负责常规 commit/push/PR/merge。最终源码默认按以下方式交回 GitHub：
+
+1. 确认 frozen base SHA / base tree；
+2. 生成基于该 base tree 的 unreferenced Git tree；
+3. tree 只包含 TASK 白名单产生的实际变化；
+4. 记录 exact paths、每文件 hash、tree SHA；
+5. 从 GitHub remote read-back blob/tree 并与本机 rehash 一致；
+6. 确认非 TASK blob 全部继承 base，且无整文件行尾/编码噪音；
+7. 把验证和 tree handoff 写回 Issue。
+
+大型 ZIP/base64 Issue payload 不是常规 source handoff。若某工具限制迫使使用替代协议，必须在 Issue 中说明，并仍保证 exact-source 可验证。
+
+## 4. Pre-commit review
+
+Sol 在 commit 前执行 Historical + Simplicity Review：
+
+- 当前 diff 是否只完成当前 TASK；
+- 每个新 helper/class/layer 是否现在就需要；
+- 是否形成重复状态机、执行器或写入权威；
+- 能否删掉某层而不削弱安全；
+- host touchpoints 是否最小；
+- 是否加入纯未来需求抽象；
+- 安全复杂度保留，投机复杂度拒绝。
+
+如果 local-required，Sol 只从 GitHub handoff 接受 exact source；不能只凭测试摘要批准未知字节。
+
+## 5. Commit 与发布
+
+技术门禁通过后，Sol 负责：
+
+1. 从已验收 source/tree 创建 exact commit；
+2. GitHub-native compare 再核对 parent、tree、changed paths 和 minimal diff；
+3. 创建/移动 task branch ref；
+4. 创建 PR 到 `integration/auto-buyer-offer`；
+5. 核对 exact PR head 与 CI；
+6. CI 和技术审查通过后 merge 到 integration。
+
+已经授权且冻结的 TASK 不要求 OWNER 为上述每一步重复授权。
+
+若 exact-source、exact-commit 或 CI 出现新问题，停止发布并记录 `CHANGES_REQUESTED`；修正后必须重新验收新的 exact source/head。
+
+## 6. Merge 后
+
+merge 后必须：
+
+1. 确认 integration HEAD 和 merge tree；
+2. 核对 base → merge diff 没有额外文件/内容；
+3. 等待并核对 post-merge CI（workflow 已配置时）；
+4. 执行 Mandatory Historical + Simplicity Review；
+5. 把 merge SHA、CI 和历史审查结论写回 Issue；
+6. 只有全部 PASS 才关闭 TASK。
+
+Mandatory Historical Review 要特别检查新 TASK 是否与历史模块形成重复权威。第一个真实 write-side Auto Offer TASK 之前，必须明确处理 TASK-007 `DeliveryExecutor` 与 Planner/Coordinator/Runtime 的长期角色。
+
+## 7. 需要 OWNER 的独立门禁
+
+以下事项不因 GitHub 发布授权而自动放开：
+
+- 真实 Steam/BUFF/平台写请求、交易、确认或自动化启用；
+- `integration/auto-buyer-offer` → `main`；
+- 冻结 TASK 外的范围扩张；
+- 仓库发布链路之外的重大外部风险动作。
+
+## 8. Luna 执行路由
+
+Sol 按任务复杂度选择 Luna 的模型/思考等级，并在对话中单独告诉 OWNER。该选择不写进可复用 TASK prompt 或仓库规范；prompt 只保存任务事实、范围和执行要求。
