@@ -210,6 +210,22 @@ def _exact_order_matches(
     return matches
 
 
+def _exact_wait_send_order_matches(
+    records: list[Mapping[str, Any]], order_id: str
+) -> list[Mapping[str, Any]] | None:
+    matches: list[Mapping[str, Any]] = []
+    for record in records:
+        value = record.get("id")
+        if isinstance(value, bool) or type(value) not in (str, int):
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        if normalized == order_id:
+            matches.append(record)
+    return matches
+
+
 def _identity_values(
     record: Mapping[str, Any], fields: tuple[str, ...]
 ) -> tuple[str, ...] | None:
@@ -299,6 +315,8 @@ class BuffReadOnlyAdapter:
         parsed = _records_from_payload(raw)
         if isinstance(parsed, PlatformResultStatus):
             if parsed is PlatformResultStatus.RESULT_UNKNOWN:
+                if request.capability is PlatformCapability.READ_DELIVERY_DIRECTION:
+                    return self._execute_buyer_wait_send(request)
                 return _result(request, parsed, "order_not_proven")
             return _result(request, parsed, "malformed_payload")
 
@@ -308,6 +326,8 @@ class BuffReadOnlyAdapter:
                 request, PlatformResultStatus.MALFORMED, "malformed_payload"
             )
         if not matches:
+            if request.capability is PlatformCapability.READ_DELIVERY_DIRECTION:
+                return self._execute_buyer_wait_send(request)
             return _result(
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
@@ -329,9 +349,7 @@ class BuffReadOnlyAdapter:
                     request, PlatformResultStatus.MALFORMED, "malformed_payload"
                 )
             if not proven:
-                return _result(
-                    request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
-                )
+                return self._execute_buyer_wait_send(request)
             return _result(
                 request,
                 PlatformResultStatus.SUCCESS,
@@ -354,6 +372,57 @@ class BuffReadOnlyAdapter:
             PlatformResultStatus.SUCCESS,
             "offer_pending",
             OfferStateEvidence(offer_id),
+        )
+
+    def _execute_buyer_wait_send(self, request: PlatformRequest) -> PlatformResult:
+        reader = getattr(
+            self._client,
+            "get_buy_orders_waiting_to_" + "send_" + "offer",
+            None,
+        )
+        if not callable(reader):
+            return _result(request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven")
+
+        raw = _call_read(lambda: reader("csgo", 730))
+        if isinstance(raw, _ReadFailure):
+            return _result(request, raw.status, raw.detail)
+        parsed = _records_from_payload(raw)
+        if isinstance(parsed, PlatformResultStatus):
+            if parsed is PlatformResultStatus.RESULT_UNKNOWN:
+                return _result(request, parsed, "order_not_proven")
+            return _result(request, parsed, "malformed_payload")
+
+        matches = _exact_wait_send_order_matches(parsed, request.buff_order_id)
+        if matches is None:
+            return _result(
+                request, PlatformResultStatus.MALFORMED, "malformed_payload"
+            )
+        if not matches:
+            return _result(
+                request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+            )
+        if len(matches) > 1:
+            return _result(request, PlatformResultStatus.MALFORMED, "ambiguous_order")
+
+        record = matches[0]
+        if "buyer_steamid" not in record:
+            return _result(
+                request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+            )
+        buyer_steam_id = _normalize_identifier(record["buyer_steamid"])
+        if buyer_steam_id is None:
+            return _result(request, PlatformResultStatus.MALFORMED, "malformed_payload")
+        if buyer_steam_id != request.recipient_steam_id:
+            return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
+        if record.get("state_text") != "等待你发起报价":
+            return _result(
+                request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+            )
+        return _result(
+            request,
+            PlatformResultStatus.SUCCESS,
+            "buyer_sends_offer",
+            DeliveryDirectionEvidence("buyer_sends_offer"),
         )
 
 

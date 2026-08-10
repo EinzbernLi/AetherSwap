@@ -13,6 +13,7 @@ from buff.buyer import (
     API_SELL_ORDER,
     API_STEAM_TRADE,
     API_USER_INFO,
+    API_WAIT_SEND_OFFERS,
     API_WX_PAY_QRCODE,
     DEFAULT_USER_AGENT,
     PAY_METHOD_WECHAT,
@@ -1271,6 +1272,48 @@ def test_verify_session_is_one_lightweight_get_and_trade_poll_uses_same_session(
     assert session.calls[0][2]["headers"]["Referer"] == "https://buff.163.com/"
     assert session.calls[1][1] == API_STEAM_TRADE
     assert "to_receive" in session.calls[1][2]["headers"]["Referer"]
+
+
+def test_wait_send_offer_reader_uses_exact_get_endpoint_and_owned_session():
+    session = FakeSession(
+        FakeResponse(
+            {
+                "code": "OK",
+                "data": {"items": [{"id": "order-1"}]},
+            }
+        )
+    )
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c",
+        session=session,
+        request_policy=no_wait_policy(),
+    )
+
+    assert buyer.get_buy_orders_waiting_to_send_offer() == [{"id": "order-1"}]
+    assert len(session.calls) == 1
+    assert session.calls[0][0] == "GET"
+    assert session.calls[0][1] == API_WAIT_SEND_OFFERS
+    assert session.calls[0][2]["params"] == {"game": "csgo", "appid": "730"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"code": "NOT_OK", "data": {"items": [{"id": "order-1"}]}},
+        {"code": "OK", "data": {}},
+        {"code": "OK", "data": {"items": "order-1"}},
+        {"code": "OK", "data": []},
+    ],
+)
+def test_wait_send_offer_reader_fails_closed_for_invalid_envelopes(payload):
+    session = FakeSession(FakeResponse(payload))
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c",
+        session=session,
+        request_policy=no_wait_policy(),
+    )
+
+    assert buyer.get_buy_orders_waiting_to_send_offer() is None
 
 
 @pytest.mark.parametrize(

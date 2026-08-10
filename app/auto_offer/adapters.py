@@ -60,9 +60,9 @@ class DeliveryDirectionEvidence:
     direction: str = "seller_sends_offer"
 
     def __post_init__(self) -> None:
-        if self.direction != "seller_sends_offer":
+        if self.direction not in {"seller_sends_offer", "buyer_sends_offer"}:
             raise PlatformAdapterProtocolError(
-                "direction evidence must be seller_sends_offer"
+                "direction evidence must be seller_sends_offer or buyer_sends_offer"
             )
 
 

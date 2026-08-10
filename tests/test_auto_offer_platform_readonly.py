@@ -48,16 +48,25 @@ def request(**changes):
 
 
 class BuffStub:
-    def __init__(self, payload=None, error=None):
+    def __init__(self, payload=None, error=None, wait_payload=None, wait_error=None):
         self.payload = payload
         self.error = error
         self.calls = 0
+        self.wait_payload = wait_payload
+        self.wait_error = wait_error
+        self.wait_calls = []
 
     def get_steam_trades(self):
         self.calls += 1
         if self.error:
             raise self.error
         return self.payload
+
+    def get_buy_orders_waiting_to_send_offer(self, game="csgo", appid=730):
+        self.wait_calls.append((game, appid))
+        if self.wait_error:
+            raise self.wait_error
+        return self.wait_payload
 
 
 class InventoryStub:
@@ -106,6 +115,16 @@ def buff_record(**changes):
         "buyer_steam_id": "steam-1",
         "state": 1,
         "tradeofferid": "offer-1",
+    }
+    value.update(changes)
+    return value
+
+
+def wait_send_record(**changes):
+    value = {
+        "id": "buff-order-1",
+        "buyer_steamid": "steam-1",
+        "state_text": "等待你发起报价",
     }
     value.update(changes)
     return value
@@ -302,6 +321,119 @@ def test_buff_unique_direction_requires_recipient_and_proves_seller_send():
     assert mismatch.status is PlatformResultStatus.FAILURE
     assert mismatch.detail == "identity_mismatch"
     assert mismatch.is_success is False
+
+
+def test_seller_direction_success_is_authoritative_and_skips_buyer_fallback():
+    client = BuffStub(
+        [buff_record()],
+        wait_payload=[wait_send_record()],
+    )
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "seller_sends_offer"
+    assert client.wait_calls == []
+
+
+def test_buyer_fallback_uses_exact_wait_send_id_identity_and_state():
+    client = BuffStub(
+        payload=[],
+        wait_payload=[wait_send_record()],
+    )
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "buyer_sends_offer"
+    assert result.evidence == DeliveryDirectionEvidence("buyer_sends_offer")
+    assert client.wait_calls == [("csgo", 730)]
+
+
+@pytest.mark.parametrize(
+    "seller_payload",
+    [None, [], [{"id": "buff-order-1"}], [buff_record(direction="buyer_sends_offer")]],
+)
+def test_buyer_fallback_only_follows_unknown_seller_result(seller_payload):
+    client = BuffStub(seller_payload, wait_payload=[wait_send_record()])
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "buyer_sends_offer"
+    assert client.wait_calls == [("csgo", 730)]
+
+
+@pytest.mark.parametrize("error", [TimeoutError("slow"), RuntimeError("failed")])
+def test_seller_safety_failure_is_not_masked_by_buyer_fallback(error):
+    client = BuffStub(error=error, wait_payload=[wait_send_record()])
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+    assert result.status in {
+        PlatformResultStatus.TIMEOUT,
+        PlatformResultStatus.FAILURE,
+    }
+    assert client.wait_calls == []
+
+
+@pytest.mark.parametrize(
+    "wait_payload,expected_status,expected_detail",
+    [
+        ([], PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"),
+        ([wait_send_record(), wait_send_record()], PlatformResultStatus.MALFORMED, "ambiguous_order"),
+        ([wait_send_record(id="other")], PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"),
+        ([wait_send_record(state_text="等待卖家发货")], PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"),
+        ([wait_send_record(buyer_steamid="other-steam")], PlatformResultStatus.FAILURE, "identity_mismatch"),
+        ([wait_send_record(buyer_steamid=None)], PlatformResultStatus.MALFORMED, "malformed_payload"),
+        ([{"id": "buff-order-1", "buyer_steamid": "steam-1", "state_text": "等待你发起报价"}], PlatformResultStatus.SUCCESS, "buyer_sends_offer"),
+    ],
+)
+def test_buyer_wait_send_outcomes_are_exact_and_fail_closed(
+    wait_payload, expected_status, expected_detail
+):
+    client = BuffStub([], wait_payload=wait_payload)
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+    assert result.status is expected_status
+    assert result.detail == expected_detail
+    if expected_status is PlatformResultStatus.SUCCESS:
+        assert result.evidence == DeliveryDirectionEvidence("buyer_sends_offer")
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
+        {"id": "", "buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
+        {"id": True, "buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
+        {"id": ["buff-order-1"], "buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
+    ],
+)
+def test_buyer_wait_send_invalid_order_id_fails_closed(record):
+    result = buff_adapter(BuffStub([], wait_payload=[record])).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.evidence is None
+
+
+def test_buyer_wait_send_requires_exact_buyer_steamid_field_without_aliases():
+    result = buff_adapter(
+        BuffStub(
+            [],
+            wait_payload=[
+                {
+                    "id": "buff-order-1",
+                    "buyer_steam_id": "steam-1",
+                    "state_text": "等待你发起报价",
+                }
+            ],
+        )
+    ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_not_proven"
 
 
 def test_buff_offer_state_requires_exact_order_trade_offer_and_known_pending_state():
