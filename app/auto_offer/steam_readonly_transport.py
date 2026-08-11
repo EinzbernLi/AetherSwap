@@ -697,7 +697,11 @@ class SteamTradeOfferHttpReader(SteamCompletedTradeHttpReader):
         if not items_given and not items_received:
             raise PlatformAdapterProtocolError("trade offer must contain at least one item")
 
-        lifecycle = {2: "active", 3: "accepted"}.get(state)
+        lifecycle = {
+            2: "active",
+            3: "accepted",
+            9: "created_needs_confirmation",
+        }.get(state)
         if lifecycle is None:
             return None
         return {
