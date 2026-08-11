@@ -174,6 +174,16 @@ class AutoOfferStore:
 
     def ensure_initial(self, snapshot: DeliverySnapshot) -> StoredDelivery:
         """Insert one pending-direction delivery, or return its exact duplicate."""
+
+        stored, _created = self.ensure_initial_with_created(snapshot)
+        return stored
+
+    def ensure_initial_with_created(
+        self,
+        snapshot: DeliverySnapshot,
+    ) -> tuple[StoredDelivery, bool]:
+        """Atomically return the initial row and whether this call inserted it."""
+
         connection = self._ready_connection()
         self._validate_initial(snapshot)
         self._begin(connection)
@@ -194,7 +204,7 @@ class AutoOfferStore:
                         "delivery identity conflicts with persisted snapshot"
                     )
                 connection.commit()
-                return existing
+                return existing, False
 
             connection.execute(
                 f"INSERT INTO {_TABLE_NAME} ({_INSERT_COLUMNS}) "
@@ -202,7 +212,7 @@ class AutoOfferStore:
                 self._snapshot_values(snapshot) + (1,),
             )
             connection.commit()
-            return StoredDelivery(snapshot=snapshot, revision=1)
+            return StoredDelivery(snapshot=snapshot, revision=1), True
         except AutoOfferStoreError:
             self._rollback(connection)
             raise

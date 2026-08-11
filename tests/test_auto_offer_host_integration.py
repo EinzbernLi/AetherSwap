@@ -88,7 +88,7 @@ def test_default_off_and_invalid_flag_are_fail_closed(monkeypatch):
     monkeypatch.setattr(host_integration, "get_steam_credentials", tripwire)
     monkeypatch.setattr(
         host_integration,
-        "build_host_readonly_auto_offer_bridge",
+        "_build_active_host_auto_offer_bridge",
         tripwire,
     )
     assert (
@@ -113,7 +113,7 @@ def test_enabled_builder_uses_exact_current_account_existing_client_and_fixed_st
 
     monkeypatch.setattr(
         host_integration,
-        "build_host_readonly_auto_offer_bridge",
+        "_build_active_host_auto_offer_bridge",
         build_bridge,
     )
     buyer = object()
@@ -126,7 +126,6 @@ def test_enabled_builder_uses_exact_current_account_existing_client_and_fixed_st
     assert calls[0]["buff_client"] is buyer
     assert calls[0]["account_id"] == ACCOUNT_ID
     assert calls[0]["account_steam_id"] == STEAM_ID
-    assert calls[0]["steam_credentials"]["cookies"] == COOKIE
     assert calls[0]["store_path"] == (
         Path(host_integration.__file__).resolve().parents[2]
         / "config"
@@ -482,9 +481,8 @@ def test_enabled_receive_worker_skips_legacy_transaction(monkeypatch):
     assert sleep_calls == [30, 30]
 
 
-def test_production_task022_files_have_no_write_side_capability_markers():
-    production_files = [
-        Path("app/auto_offer/host_integration.py"),
+def test_task028_write_markers_are_confined_to_host_integration():
+    untouched_host_files = [
         Path("app/config_schema.py"),
         Path("app/pipeline.py"),
         Path("app/services/workers.py"),
@@ -496,7 +494,11 @@ def test_production_task022_files_have_no_write_side_capability_markers():
         ".step(",
         "accept_steam_trade_offer",
     )
-    for path in production_files:
+    for path in untouched_host_files:
         source = path.read_text(encoding="utf-8")
         for marker in forbidden:
             assert marker not in source, f"{marker} found in {path}"
+
+    host_source = Path("app/auto_offer/host_integration.py").read_text(encoding="utf-8")
+    for marker in ("DeliveryExecutor", "threading.Thread", "_make_request(", ".execute("):
+        assert marker not in host_source, f"{marker} found in host integration"
