@@ -176,20 +176,53 @@ def _safe_steam_trade_offer_evidence(
     return evidence
 
 
+def _confirmation_waiting(
+    delivery: StoredDelivery,
+    detail: str = "trade_offer_confirmation_still_required",
+) -> ReconciliationDecision:
+    return _decision(
+        delivery,
+        None,
+        AutoOfferResult.WAITING,
+        True,
+        detail,
+    )
+
+
+def _confirmation_recovered(
+    delivery: StoredDelivery,
+    lifecycle: SteamTradeOfferLifecycle,
+) -> ReconciliationDecision:
+    detail = (
+        "trade_offer_confirmation_recovered_active"
+        if lifecycle is SteamTradeOfferLifecycle.ACTIVE
+        else "trade_offer_confirmation_recovered_accepted"
+    )
+    return _propose(
+        delivery,
+        replace(
+            delivery.snapshot,
+            delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+            delivery_error=None,
+        ),
+        detail,
+    )
+
+
 def _plan_steam_trade_offer_lifecycle(
     delivery: StoredDelivery,
     evidence: SteamTradeOfferEvidence,
 ) -> ReconciliationDecision:
-    """Plan the one allowed adjacent transition from typed offer evidence."""
+    """Plan the one allowed transition from exact typed offer evidence."""
 
     snapshot = delivery.snapshot
-    if snapshot.delivery_status in {
-        DeliveryStatus.OFFER_RECEIVED,
-        DeliveryStatus.OFFER_SENT,
-    }:
-        if evidence.lifecycle is SteamTradeOfferLifecycle.ACTIVE:
+    status = snapshot.delivery_status
+    lifecycle = evidence.lifecycle
+
+    if status is DeliveryStatus.OFFER_RECEIVED:
+        if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
             detail = "trade_offer_confirmed_active"
-        elif evidence.lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+        elif lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
             detail = "trade_offer_confirmed_accepted"
         else:
             return _blocked(delivery, "evidence_not_allowed")
@@ -198,8 +231,57 @@ def _plan_steam_trade_offer_lifecycle(
             replace(snapshot, delivery_status=DeliveryStatus.OFFER_CONFIRMED),
             detail,
         )
-    if snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED:
-        if evidence.lifecycle is SteamTradeOfferLifecycle.ACTIVE:
+
+    if status is DeliveryStatus.OFFER_SENT:
+        if lifecycle is SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION:
+            return _propose(
+                delivery,
+                replace(
+                    snapshot,
+                    delivery_status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+                ),
+                "trade_offer_confirmation_required",
+            )
+        if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
+            detail = "trade_offer_confirmed_active"
+        elif lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+            detail = "trade_offer_confirmed_accepted"
+        else:
+            return _blocked(delivery, "evidence_not_allowed")
+        return _propose(
+            delivery,
+            replace(snapshot, delivery_status=DeliveryStatus.OFFER_CONFIRMED),
+            detail,
+        )
+
+    if status in {
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+    }:
+        if lifecycle is SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION:
+            return _confirmation_waiting(delivery)
+        if lifecycle in {
+            SteamTradeOfferLifecycle.ACTIVE,
+            SteamTradeOfferLifecycle.ACCEPTED,
+        }:
+            return _confirmation_recovered(delivery, lifecycle)
+        return _blocked(delivery, "evidence_not_allowed")
+
+    if status is DeliveryStatus.RESULT_UNKNOWN and snapshot.steam_tradeoffer_id is not None:
+        if lifecycle is SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION:
+            return _confirmation_waiting(
+                delivery,
+                "confirmation_result_unknown_still_requires_confirmation",
+            )
+        if lifecycle in {
+            SteamTradeOfferLifecycle.ACTIVE,
+            SteamTradeOfferLifecycle.ACCEPTED,
+        }:
+            return _confirmation_recovered(delivery, lifecycle)
+        return _blocked(delivery, "evidence_not_allowed")
+
+    if status is DeliveryStatus.OFFER_CONFIRMED:
+        if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
             return _decision(
                 delivery,
                 None,
@@ -207,7 +289,7 @@ def _plan_steam_trade_offer_lifecycle(
                 True,
                 "trade_offer_not_accepted",
             )
-        if evidence.lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+        if lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
             return _propose(
                 delivery,
                 replace(
@@ -349,6 +431,7 @@ def plan_read_evidence_transition(
             DeliveryStatus.OFFER_ATTEMPTED,
             DeliveryStatus.RESULT_UNKNOWN,
         }
+        and snapshot.steam_tradeoffer_id is None
     ):
         if (
             request.capability is PlatformCapability.READ_OFFER_STATE
@@ -368,6 +451,15 @@ def plan_read_evidence_transition(
             )
         if snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED:
             return _blocked(delivery, "evidence_not_allowed")
+
+    if (
+        snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+        and snapshot.steam_tradeoffer_id is not None
+    ):
+        safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)
+        if type(safe_evidence) is str:
+            return _blocked(delivery, safe_evidence)
+        return _plan_steam_trade_offer_lifecycle(delivery, safe_evidence)
 
     if snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
         return _decision(
@@ -438,6 +530,8 @@ def plan_read_evidence_transition(
     if snapshot.delivery_status in {
         DeliveryStatus.OFFER_RECEIVED,
         DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMED,
     }:
         safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)
