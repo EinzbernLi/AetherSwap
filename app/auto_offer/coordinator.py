@@ -207,18 +207,24 @@ def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
             return PlatformCapability.READ_OFFER_STATE
     if status is DeliveryStatus.RESULT_UNKNOWN:
         snapshot = delivery.snapshot
-        if (
-            mode is DeliveryMode.BUYER_SENDS_OFFER
-            and snapshot.offer_attempted_at is not None
-            and snapshot.steam_tradeoffer_id is None
-        ):
-            return PlatformCapability.READ_OFFER_STATE
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            if (
+                snapshot.offer_attempted_at is not None
+                and snapshot.steam_tradeoffer_id is None
+            ):
+                return PlatformCapability.READ_OFFER_STATE
+            if snapshot.steam_tradeoffer_id is not None:
+                return PlatformCapability.READ_STEAM_TRADE_OFFER
     if status is DeliveryStatus.AWAITING_INVENTORY:
         return PlatformCapability.READ_STEAM_COMPLETED_TRADE
     if status is DeliveryStatus.OFFER_RECEIVED:
         if mode is DeliveryMode.SELLER_SENDS_OFFER:
             return PlatformCapability.READ_STEAM_TRADE_OFFER
-    if status is DeliveryStatus.OFFER_SENT:
+    if status in {
+        DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+    }:
         if mode is DeliveryMode.BUYER_SENDS_OFFER:
             return PlatformCapability.READ_STEAM_TRADE_OFFER
     if status is DeliveryStatus.OFFER_CONFIRMED:
@@ -367,7 +373,7 @@ class DeliveryCoordinator:
         actual_clock = time.time if clock is None else clock
         _validate_clock(actual_clock)
         if not isinstance(adapters, Mapping):
-            raise ReadOnlyCoordinatorError("invalid_adapter_registry")
+            raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
         configured = {}
         for capability, adapter in adapters.items():
             if type(capability) is not PlatformCapability:
@@ -467,6 +473,7 @@ class DeliveryCoordinator:
                 DeliveryStatus.OFFER_ATTEMPTED,
                 DeliveryStatus.RESULT_UNKNOWN,
             }
+            and before.snapshot.steam_tradeoffer_id is None
             and platform_result.status is PlatformResultStatus.SUCCESS
             and platform_result.request.capability is PlatformCapability.READ_OFFER_STATE
             and type(platform_result.evidence) is OfferStateEvidence
