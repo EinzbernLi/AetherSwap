@@ -630,6 +630,7 @@ def _steam_trade_offer_evidence(
     lifecycle_value = {
         "active": SteamTradeOfferLifecycle.ACTIVE,
         "accepted": SteamTradeOfferLifecycle.ACCEPTED,
+        "created_needs_confirmation": SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION,
     }.get(lifecycle)
     if lifecycle_value is None:
         return _result(
@@ -652,11 +653,13 @@ def _steam_trade_offer_evidence(
         return _result(
             request, PlatformResultStatus.MALFORMED, "malformed_payload"
         )
-    detail = (
-        "trade_offer_active"
-        if lifecycle_value is SteamTradeOfferLifecycle.ACTIVE
-        else "trade_offer_accepted"
-    )
+    detail = {
+        SteamTradeOfferLifecycle.ACTIVE: "trade_offer_active",
+        SteamTradeOfferLifecycle.ACCEPTED: "trade_offer_accepted",
+        SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION: (
+            "trade_offer_created_needs_confirmation"
+        ),
+    }[lifecycle_value]
     return _result(
         request, PlatformResultStatus.SUCCESS, detail, evidence
     )
