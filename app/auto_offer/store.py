@@ -25,6 +25,8 @@ _RECOVERABLE_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
         DeliveryStatus.AWAITING_OFFER,
         DeliveryStatus.OFFER_ATTEMPTED,
         DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
         DeliveryStatus.OFFER_CONFIRMED,
         DeliveryStatus.AWAITING_INVENTORY,
