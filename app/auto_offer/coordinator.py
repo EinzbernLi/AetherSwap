@@ -373,7 +373,7 @@ class DeliveryCoordinator:
         actual_clock = time.time if clock is None else clock
         _validate_clock(actual_clock)
         if not isinstance(adapters, Mapping):
-            raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
+            raise ReadOnlyCoordinatorError("invalid_adapter_registry")
         configured = {}
         for capability, adapter in adapters.items():
             if type(capability) is not PlatformCapability:
