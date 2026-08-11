@@ -40,7 +40,19 @@ def _invalidate_config_cache() -> None:
         _config_cache = {}
         _config_cache_ts = 0.0
         _config_cache_revision = None
+def _with_runtime_steam_identity_secret(config: dict) -> dict:
+    """Derive the legacy runtime alias from the canonical credential owner."""
+    result = copy.deepcopy(config)
+    steam = get_steam()
+    secret = steam.get("identity_secret") if isinstance(steam, dict) else None
+    section = result.get("steam_confirm")
+    if not isinstance(section, dict):
+        section = {}
+        result["steam_confirm"] = section
+    section["identity_secret"] = secret if type(secret) is str else ""
+    return result
 def get_steam_credentials() -> dict:
+    load_app_config()
     return get_steam()
 def get_buff_credentials() -> dict:
     return get_buff()
@@ -68,9 +80,12 @@ def load_app_config_validated() -> dict:
             and revision == _config_cache_revision
             and (now - _config_cache_ts) < _CONFIG_CACHE_TTL
         ):
-            return copy.deepcopy(_config_cache)
+            return _with_runtime_steam_identity_secret(_config_cache)
         raw, revision, stable = _load_stable_app_config()
         result = _validate_ranges(validate_and_fill(merge(DEFAULTS, raw)))
+        steam_confirm = result.get("steam_confirm")
+        if isinstance(steam_confirm, dict):
+            steam_confirm["identity_secret"] = ""
         if stable:
             _config_cache = result
             _config_cache_ts = now
@@ -81,7 +96,7 @@ def load_app_config_validated() -> dict:
             _config_cache = {}
             _config_cache_ts = 0.0
             _config_cache_revision = None
-        return copy.deepcopy(result)
+        return _with_runtime_steam_identity_secret(result)
 def save_app_config_validated(data: dict) -> None:
     with _config_update_lock:
         filled = _validate_ranges(validate_and_fill(merge(DEFAULTS, data)))
