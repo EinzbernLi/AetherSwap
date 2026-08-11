@@ -10,12 +10,17 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config_loader import get_buff_credentials, load_app_config_validated
+from app.config_loader import (
+    get_buff_credentials,
+    load_app_config_validated,
+    update_app_config_validated,
+)
 from app.config_schema import DEFAULTS, _validate_ranges, merge, validate_and_fill
 from app.auto_offer.contracts import result_blocks_next_purchase
 from app.auto_offer.host_integration import (
     HostAutoOfferIntegration,
     build_host_auto_offer_integration,
+    is_auto_offer_enabled,
 )
 from app.pipeline_context import PipelineContext
 from app.pipeline_steps import (
@@ -668,6 +673,58 @@ def is_pipeline_running() -> bool:
         return _pipeline_thread is not None and _pipeline_thread.is_alive()
 
 
+def update_auto_offer_enabled_config(patch: dict) -> dict:
+    """Apply an explicit Auto Offer flag patch on the pipeline lifecycle lock."""
+
+    if not isinstance(patch, dict):
+        raise PipelineMaintenanceBlocked("Auto Offer 配置格式无效")
+    section = patch.get("auto_offer")
+    if not isinstance(section, dict) or "enabled" not in section:
+        raise PipelineMaintenanceBlocked("Auto Offer 开关补丁缺少 enabled")
+
+    with _pipeline_start_lock:
+        current = load_app_config_validated()
+        current_enabled = is_auto_offer_enabled(current)
+        prospective = _validate_ranges(
+            validate_and_fill(merge(DEFAULTS, merge(current, patch)))
+        )
+        requested_enabled = is_auto_offer_enabled(prospective)
+        transitioning = requested_enabled is not current_enabled
+        if transitioning and _shutdown_pending:
+            raise PipelineMaintenanceBlocked(
+                "应用正在重置并等待退出，不能切换 Auto Offer 开关"
+            )
+        if (
+            transitioning
+            and _pipeline_thread is not None
+            and _pipeline_thread.is_alive()
+        ):
+            raise PipelineMaintenanceBlocked(
+                "买入流水线仍在运行，不能切换 Auto Offer 开关"
+            )
+        return update_app_config_validated(patch)
+
+
+def _snapshot_pipeline_start_config(config: dict) -> dict:
+    """Detach caller config and bind Auto Offer to the persisted flag."""
+
+    run_config = copy.deepcopy(config if isinstance(config, dict) else {})
+    persisted_enabled = is_auto_offer_enabled(load_app_config_validated())
+    section_present = "auto_offer" in run_config
+    section = run_config.get("auto_offer")
+    if persisted_enabled:
+        if not isinstance(section, dict):
+            section = {}
+            run_config["auto_offer"] = section
+        section["enabled"] = True
+    elif section_present:
+        if not isinstance(section, dict):
+            run_config["auto_offer"] = {"enabled": False}
+        else:
+            section["enabled"] = False
+    return run_config
+
+
 def _run_pipeline_guarded(config: dict) -> None:
     global _pipeline_thread
     try:
@@ -791,13 +848,17 @@ def start_pipeline(
                         return False
                 if get_pipeline_start_blocker():
                     return False
+                try:
+                    run_config = _snapshot_pipeline_start_config(config)
+                except Exception:
+                    return False
                 # Mark activity while holding the same auth/activity slots used
                 # by login and background reads. No request can slip through
                 # the acknowledgement -> STARTING transition.
                 get_state().set_status("running", "STARTING")
                 t = threading.Thread(
                     target=_run_pipeline_guarded,
-                    args=(config,),
+                    args=(run_config,),
                     daemon=True,
                     name="buy-pipeline",
                 )
