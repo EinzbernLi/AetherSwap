@@ -97,6 +97,8 @@ def test_delivery_status_values_are_exact():
         "awaiting_offer",
         "offer_attempted",
         "offer_sent",
+        "offer_confirmation_required",
+        "offer_confirmation_attempted",
         "offer_received",
         "offer_confirmed",
         "awaiting_inventory",
@@ -120,6 +122,8 @@ def test_buyer_path_is_valid():
         DeliveryStatus.AWAITING_OFFER,
         DeliveryStatus.OFFER_ATTEMPTED,
         DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.RECEIVED,
@@ -135,6 +139,8 @@ def test_buyer_path_is_valid():
                 if status
                 in {
                     DeliveryStatus.OFFER_SENT,
+                    DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+                    DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
                     DeliveryStatus.OFFER_CONFIRMED,
                     DeliveryStatus.AWAITING_INVENTORY,
                     DeliveryStatus.RECEIVED,
@@ -217,6 +223,8 @@ def test_buyer_status_transitions_are_forward_only():
         DeliveryStatus.AWAITING_OFFER,
         DeliveryStatus.OFFER_ATTEMPTED,
         DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.RECEIVED,
@@ -747,7 +755,6 @@ def test_bound_tradeoffer_id_is_immutable_across_normal_paths():
 @pytest.mark.parametrize(
     "target_status",
     [
-        DeliveryStatus.RESULT_UNKNOWN,
         DeliveryStatus.BLOCKED,
         DeliveryStatus.CANCELLED,
         DeliveryStatus.REFUNDED,
@@ -764,11 +771,7 @@ def test_bound_tradeoffer_id_is_preserved_on_exception_targets(
     target = replace(
         current,
         delivery_status=target_status,
-        delivery_error=(
-            "write_result_unknown"
-            if target_status is DeliveryStatus.RESULT_UNKNOWN
-            else None
-        ),
+        delivery_error=None,
     )
     validate_delivery_transition(current, target)
     for bad_id in ("trade-2", None):

@@ -1156,7 +1156,21 @@ def test_trade_offer_reader_accepted_does_not_require_trade_id_or_receipt():
     assert len(session.calls) == 1
 
 
-@pytest.mark.parametrize("state", [1, 4, 5, 6, 7, 8, 9, 10, 11, 99])
+def test_trade_offer_reader_created_needs_confirmation_is_exact_evidence():
+    payload = offer_payload(trade_offer_state=9, tradeid=None, time_updated=None)
+    session = FakeSession([json_response(payload)])
+    result = trade_offer_reader_for(session)(OFFER_ID)
+    assert result["steam_tradeoffer_id"] == OFFER_ID
+    assert result["account_steam_id"] == STEAM_ID
+    assert result["counterparty_steam_id"] == COUNTERPARTY_ID
+    assert result["is_our_offer"] is False
+    assert result["lifecycle"] == "created_needs_confirmation"
+    assert "steam_trade_id" not in result
+    assert "completed_at" not in result
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("state", [1, 4, 5, 6, 7, 8, 10, 11, 99])
 def test_trade_offer_reader_non_positive_lifecycle_returns_no_evidence(state):
     session = FakeSession([json_response(offer_payload(trade_offer_state=state))])
     assert trade_offer_reader_for(session)(OFFER_ID) is None

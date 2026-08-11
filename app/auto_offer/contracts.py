@@ -34,6 +34,8 @@ class DeliveryStatus(str, Enum):
     AWAITING_OFFER = "awaiting_offer"
     OFFER_ATTEMPTED = "offer_attempted"
     OFFER_SENT = "offer_sent"
+    OFFER_CONFIRMATION_REQUIRED = "offer_confirmation_required"
+    OFFER_CONFIRMATION_ATTEMPTED = "offer_confirmation_attempted"
     OFFER_RECEIVED = "offer_received"
     OFFER_CONFIRMED = "offer_confirmed"
     AWAITING_INVENTORY = "awaiting_inventory"
@@ -70,6 +72,8 @@ NORMAL_DIRECTION_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset
         DeliveryStatus.AWAITING_OFFER,
         DeliveryStatus.OFFER_ATTEMPTED,
         DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
         DeliveryStatus.OFFER_CONFIRMED,
         DeliveryStatus.AWAITING_INVENTORY,
@@ -88,10 +92,19 @@ _PRE_BINDING_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
 _TRADEOFFER_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
     {
         DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
         DeliveryStatus.OFFER_CONFIRMED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.RECEIVED,
+    }
+)
+
+_WRITE_ATTEMPT_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
+    {
+        DeliveryStatus.OFFER_ATTEMPTED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
     }
 )
 
@@ -162,6 +175,17 @@ def _validate_snapshot_shape(snapshot: DeliverySnapshot) -> None:
             raise DeliveryContractError("delivery_error is not an allowed code")
 
 
+def _validate_buyer_bound_offer_state(snapshot: DeliverySnapshot, status_name: str) -> None:
+    if snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER:
+        raise DeliveryContractError(f"{status_name} requires buyer mode")
+    if snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None:
+        raise DeliveryContractError(f"{status_name} requires buyer timing")
+    if snapshot.steam_tradeoffer_id is None:
+        raise DeliveryContractError(f"{status_name} requires a trade offer ID")
+    if snapshot.received_at is not None:
+        raise DeliveryContractError(f"{status_name} cannot have received_at")
+
+
 def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
     """Validate IDs, timestamps, direction, receipt proof, and error codes."""
     _validate_snapshot_shape(snapshot)
@@ -187,16 +211,14 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
         if snapshot.received_at is not None:
             raise DeliveryContractError("offer_attempted cannot have received_at")
     elif status is DeliveryStatus.OFFER_SENT:
-        if mode is not DeliveryMode.BUYER_SENDS_OFFER:
-            raise DeliveryContractError("offer_sent requires buyer mode")
-        if snapshot.offer_attempted_at is None:
-            raise DeliveryContractError("offer_sent requires offer_attempted_at")
-        if snapshot.offer_sent_at is None:
-            raise DeliveryContractError("offer_sent requires offer_sent_at")
-        if snapshot.steam_tradeoffer_id is None:
-            raise DeliveryContractError("offer_sent requires a trade offer ID")
-        if snapshot.received_at is not None:
-            raise DeliveryContractError("offer_sent cannot have received_at")
+        _validate_buyer_bound_offer_state(snapshot, "offer_sent")
+    elif status in {
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+    }:
+        _validate_buyer_bound_offer_state(snapshot, status.value)
+        if snapshot.delivery_error is not None:
+            raise DeliveryContractError(f"{status.value} cannot have delivery_error")
     elif status is DeliveryStatus.OFFER_RECEIVED:
         if mode is not DeliveryMode.SELLER_SENDS_OFFER:
             raise DeliveryContractError("offer_received requires seller mode")
@@ -251,6 +273,19 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
             raise DeliveryContractError("result_unknown requires write_result_unknown")
         if snapshot.received_at is not None:
             raise DeliveryContractError("result_unknown cannot have received_at")
+        # Keep historical RESULT_UNKNOWN rows readable.  New writes into this
+        # status are tightened at the snapshot transition boundary below.
+        if (
+            mode is DeliveryMode.BUYER_SENDS_OFFER
+            and snapshot.steam_tradeoffer_id is not None
+            and (
+                snapshot.offer_attempted_at is None
+                or snapshot.offer_sent_at is None
+            )
+        ):
+            raise DeliveryContractError(
+                "buyer confirmation result_unknown requires bound offer timing"
+            )
 
     if (
         snapshot.offer_attempted_at is not None
@@ -277,6 +312,8 @@ _BUYER_PATH: Final[tuple[DeliveryStatus, ...]] = (
     DeliveryStatus.AWAITING_OFFER,
     DeliveryStatus.OFFER_ATTEMPTED,
     DeliveryStatus.OFFER_SENT,
+    DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+    DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
     DeliveryStatus.OFFER_CONFIRMED,
     DeliveryStatus.AWAITING_INVENTORY,
     DeliveryStatus.RECEIVED,
@@ -345,6 +382,8 @@ def _transition_statuses(
     if current is target:
         raise DeliveryContractError("delivery transition must change status")
 
+    # Status-only callers retain the historical exception-target contract.
+    # Snapshot transitions tighten write-unknown authority below.
     if target is DeliveryStatus.RESULT_UNKNOWN:
         return
     if target in {
@@ -353,8 +392,11 @@ def _transition_statuses(
         DeliveryStatus.REFUNDED,
     }:
         return
-    if current is DeliveryStatus.RESULT_UNKNOWN and target is DeliveryStatus.OFFER_ATTEMPTED:
-        raise DeliveryContractError("result_unknown cannot transition to offer_attempted")
+    if current is DeliveryStatus.RESULT_UNKNOWN and target in {
+        DeliveryStatus.OFFER_ATTEMPTED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+    }:
+        raise DeliveryContractError("result_unknown cannot transition to a write attempt")
 
     if current is DeliveryStatus.RESULT_UNKNOWN:
         if mode is None:
@@ -371,6 +413,19 @@ def _transition_statuses(
 
     if mode is None:
         raise DeliveryContractError("this transition requires a delivery mode")
+
+    if mode is DeliveryMode.BUYER_SENDS_OFFER and (
+        (
+            current is DeliveryStatus.OFFER_SENT
+            and target is DeliveryStatus.OFFER_CONFIRMED
+        )
+        or (
+            current is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+            and target is DeliveryStatus.OFFER_CONFIRMED
+        )
+    ):
+        return
+
     path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
     try:
         current_index = path.index(current)
@@ -379,6 +434,31 @@ def _transition_statuses(
         raise DeliveryContractError("status is not valid for the delivery mode") from exc
     if target_index != current_index + 1:
         raise DeliveryContractError("delivery status transition is not allowed")
+
+
+def _validate_snapshot_unknown_transition(
+    current: DeliverySnapshot,
+    target: DeliverySnapshot,
+) -> None:
+    if target.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+        if current.delivery_status not in _WRITE_ATTEMPT_STATUSES:
+            raise DeliveryContractError(
+                "result_unknown requires a durable write-attempt state"
+            )
+        return
+    if current.delivery_status is not DeliveryStatus.RESULT_UNKNOWN:
+        return
+    if (
+        current.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and current.steam_tradeoffer_id is not None
+    ):
+        if target.delivery_status is not DeliveryStatus.OFFER_CONFIRMED:
+            raise DeliveryContractError(
+                "confirmation result_unknown recovery requires exact offer evidence"
+            )
+        return
+    # Historical unbound RESULT_UNKNOWN rows retain the original mode-specific
+    # later-evidence recovery contract; they can no longer be newly created.
 
 
 def validate_delivery_transition(
@@ -414,6 +494,7 @@ def validate_delivery_transition(
             raise DeliveryContractError("snapshot transitions must derive delivery mode")
         delivery_mode = target.delivery_mode or current.delivery_mode
         _validate_tradeoffer_binding(current, target, delivery_mode)
+        _validate_snapshot_unknown_transition(current, target)
         current = current.delivery_status
         target = target.delivery_status
 

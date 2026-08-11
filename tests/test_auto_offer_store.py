@@ -155,10 +155,41 @@ def test_invalid_transition_and_result_unknown_resend_are_rejected(tmp_path):
     initial = store.ensure_initial(snapshot())
     with pytest.raises(DeliveryContractError):
         store.advance(initial, snapshot(delivery_mode=DeliveryMode.BUYER_SENDS_OFFER, delivery_status=DeliveryStatus.OFFER_SENT, steam_tradeoffer_id="offer-1", offer_attempted_at=1.0, offer_sent_at=2.0))
-    unknown = snapshot(delivery_status=DeliveryStatus.RESULT_UNKNOWN, delivery_error="write_result_unknown")
-    unknown_stored = store.advance(initial, unknown)
-    with pytest.raises(DeliveryContractError):
-        store.advance(unknown_stored, replace(unknown, delivery_mode=DeliveryMode.BUYER_SENDS_OFFER, delivery_status=DeliveryStatus.OFFER_ATTEMPTED, offer_attempted_at=3.0))
+
+    arbitrary_unknown = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    with pytest.raises(DeliveryContractError, match="durable write-attempt"):
+        store.advance(initial, arbitrary_unknown)
+
+    awaiting = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+    )
+    current = store.advance(initial, awaiting)
+    attempted = replace(
+        awaiting,
+        delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+        offer_attempted_at=3.0,
+    )
+    attempted_stored = store.advance(current, attempted)
+    unknown = replace(
+        attempted,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    unknown_stored = store.advance(attempted_stored, unknown)
+    with pytest.raises(DeliveryContractError, match="write attempt"):
+        store.advance(
+            unknown_stored,
+            replace(
+                unknown,
+                delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+                delivery_error=None,
+            ),
+        )
 
 
 def test_stale_revision_never_overwrites_new_state(tmp_path):
@@ -316,17 +347,28 @@ def test_bound_tradeoffer_id_cannot_rebind_or_clear_and_row_stays_unchanged(tmp_
     assert advanced.snapshot.steam_tradeoffer_id == "offer-1"
 
 
-def test_result_unknown_first_binding_remains_supported_in_store(tmp_path):
+def test_historical_result_unknown_first_binding_remains_supported_in_store(tmp_path):
     store = make_store(tmp_path)
     initial = store.ensure_initial(snapshot())
-    unknown = snapshot(
-        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
-        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
-        delivery_error="write_result_unknown",
+    store._connection.execute(
+        "UPDATE auto_offer_delivery SET delivery_mode = ?, delivery_status = ?, "
+        "delivery_error = ?, revision = ? WHERE purchase_id = ?",
+        (
+            DeliveryMode.BUYER_SENDS_OFFER.value,
+            DeliveryStatus.RESULT_UNKNOWN.value,
+            "write_result_unknown",
+            initial.revision + 1,
+            initial.snapshot.purchase_id,
+        ),
     )
-    unknown_stored = store.advance(initial, unknown)
+    store._connection.commit()
+
+    unknown_stored = store.get_by_purchase_id("purchase-1")
+    assert unknown_stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+    assert unknown_stored.snapshot.steam_tradeoffer_id is None
+
     sent = replace(
-        unknown,
+        unknown_stored.snapshot,
         delivery_status=DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id="offer-1",
         offer_attempted_at=1.0,
