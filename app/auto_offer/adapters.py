@@ -40,6 +40,7 @@ class PlatformCapability(str, Enum):
     READ_STEAM_TRADE_OFFER = "read_steam_trade_offer"
     READ_STEAM_COMPLETED_TRADE = "read_steam_completed_trade"
     SEND_OFFER = "send_offer"
+    CONFIRM_OFFER = "confirm_offer"
 
 
 class PlatformResultStatus(str, Enum):
@@ -84,6 +85,18 @@ class SendOfferEvidence:
 
     def __post_init__(self) -> None:
         _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+
+
+@dataclass(frozen=True)
+class ConfirmOfferEvidence:
+    """Proof that one exact Steam Trade Offer mobile confirmation succeeded."""
+
+    steam_tradeoffer_id: str
+    account_steam_id: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_id(self.account_steam_id, "account_steam_id")
 
 
 @dataclass(frozen=True)
@@ -286,6 +299,7 @@ PlatformEvidence: TypeAlias = (
     DeliveryDirectionEvidence
     | OfferStateEvidence
     | SendOfferEvidence
+    | ConfirmOfferEvidence
     | InventoryStateEvidence
     | SteamTradeOfferEvidence
     | SteamCompletedTradeEvidence
@@ -507,11 +521,12 @@ def _validate_platform_request(request: object) -> None:
     if capability in {
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        PlatformCapability.CONFIRM_OFFER,
     }:
         _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
     elif steam_tradeoffer_id is not None:
         raise PlatformAdapterProtocolError(
-            "steam_tradeoffer_id is only valid for READ_STEAM_TRADE_OFFER"
+            "steam_tradeoffer_id is only valid for tradeoffer-bound capabilities"
         )
 
 
@@ -569,6 +584,7 @@ class PlatformResult:
             PlatformCapability.READ_STEAM_TRADE_OFFER: SteamTradeOfferEvidence,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: SteamCompletedTradeEvidence,
             PlatformCapability.SEND_OFFER: SendOfferEvidence,
+            PlatformCapability.CONFIRM_OFFER: ConfirmOfferEvidence,
         }.get(self.request.capability)
         if expected_evidence is None:
             raise PlatformAdapterProtocolError("success is not allowed for this capability")
@@ -587,6 +603,7 @@ class PlatformResult:
         if self.request.capability in {
             PlatformCapability.READ_STEAM_TRADE_OFFER,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            PlatformCapability.CONFIRM_OFFER,
         }:
             if (
                 self.evidence.steam_tradeoffer_id != self.request.steam_tradeoffer_id
@@ -749,6 +766,7 @@ class FakePlatformAdapter:
 __all__ = [
     "DEFAULT_PLATFORM_CAPABILITIES",
     "CompletedTradeItemEvidence",
+    "ConfirmOfferEvidence",
     "DeliveryDirectionEvidence",
     "FakePlatformAdapter",
     "InventoryStateEvidence",
