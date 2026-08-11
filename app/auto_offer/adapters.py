@@ -130,6 +130,7 @@ class SteamTradeOfferLifecycle(str, Enum):
 
     ACTIVE = "active"
     ACCEPTED = "accepted"
+    CREATED_NEEDS_CONFIRMATION = "created_needs_confirmation"
 
 
 @dataclass(frozen=True)
