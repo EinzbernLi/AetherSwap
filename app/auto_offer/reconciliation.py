@@ -267,7 +267,11 @@ def _plan_steam_trade_offer_lifecycle(
             return _confirmation_recovered(delivery, lifecycle)
         return _blocked(delivery, "evidence_not_allowed")
 
-    if status is DeliveryStatus.RESULT_UNKNOWN and snapshot.steam_tradeoffer_id is not None:
+    if (
+        status is DeliveryStatus.RESULT_UNKNOWN
+        and snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and snapshot.steam_tradeoffer_id is not None
+    ):
         if lifecycle is SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION:
             return _confirmation_waiting(
                 delivery,
@@ -454,6 +458,7 @@ def plan_read_evidence_transition(
 
     if (
         snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+        and snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         and snapshot.steam_tradeoffer_id is not None
     ):
         safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)
