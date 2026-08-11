@@ -271,20 +271,20 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
     if status is DeliveryStatus.RESULT_UNKNOWN:
         if snapshot.delivery_error != "write_result_unknown":
             raise DeliveryContractError("result_unknown requires write_result_unknown")
-        if mode is not DeliveryMode.BUYER_SENDS_OFFER:
-            raise DeliveryContractError("result_unknown requires buyer mode")
         if snapshot.received_at is not None:
             raise DeliveryContractError("result_unknown cannot have received_at")
-        if snapshot.offer_attempted_at is None:
-            raise DeliveryContractError("result_unknown requires offer_attempted_at")
-        if snapshot.steam_tradeoffer_id is None:
-            if snapshot.offer_sent_at is not None:
-                raise DeliveryContractError(
-                    "send result_unknown cannot have offer_sent_at without a trade offer ID"
-                )
-        elif snapshot.offer_sent_at is None:
+        # Keep historical RESULT_UNKNOWN rows readable.  New writes into this
+        # status are tightened at the snapshot transition boundary below.
+        if (
+            mode is DeliveryMode.BUYER_SENDS_OFFER
+            and snapshot.steam_tradeoffer_id is not None
+            and (
+                snapshot.offer_attempted_at is None
+                or snapshot.offer_sent_at is None
+            )
+        ):
             raise DeliveryContractError(
-                "confirmation result_unknown requires offer_sent_at"
+                "buyer confirmation result_unknown requires bound offer timing"
             )
 
     if (
@@ -448,18 +448,17 @@ def _validate_snapshot_unknown_transition(
         return
     if current.delivery_status is not DeliveryStatus.RESULT_UNKNOWN:
         return
-    if current.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER:
-        raise DeliveryContractError("result_unknown recovery requires buyer mode")
-    if current.steam_tradeoffer_id is None:
-        if target.delivery_status is not DeliveryStatus.OFFER_SENT:
+    if (
+        current.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and current.steam_tradeoffer_id is not None
+    ):
+        if target.delivery_status is not DeliveryStatus.OFFER_CONFIRMED:
             raise DeliveryContractError(
-                "send result_unknown recovery requires exact offer evidence"
+                "confirmation result_unknown recovery requires exact offer evidence"
             )
         return
-    if target.delivery_status is not DeliveryStatus.OFFER_CONFIRMED:
-        raise DeliveryContractError(
-            "confirmation result_unknown recovery requires exact offer evidence"
-        )
+    # Historical unbound RESULT_UNKNOWN rows retain the original mode-specific
+    # later-evidence recovery contract; they can no longer be newly created.
 
 
 def validate_delivery_transition(
