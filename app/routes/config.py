@@ -1,4 +1,5 @@
 """Config, data init, export/import, holdings report routes."""
+import copy
 from typing import Optional
 
 from fastapi import APIRouter, Query, Response
@@ -19,6 +20,11 @@ from app.config_loader import (
 from config import load_app_config, save_credentials, get_all_credentials
 from app.accounts import list_accounts, replace_all as accounts_replace_all
 router = APIRouter()
+_IDENTITY_SECRET_MASK = "********"
+_IDENTITY_SECRET_ERRORS = {
+    "steam_identity_secret_invalid",
+    "steam_identity_secret_conflict",
+}
 def _save_credentials_with_auth_lock(data: dict) -> None:
     """Serialize bulk credential replacement with active BUFF operations."""
     from app.services.buff_auth import (
@@ -43,30 +49,86 @@ class ImportFullBody(BaseModel):
 def _has_explicit_auto_offer_enabled_patch(patch: dict) -> bool:
     section = patch.get("auto_offer") if isinstance(patch, dict) else None
     return isinstance(section, dict) and "enabled" in section
+def _api_safe_config(config: dict) -> dict:
+    safe = copy.deepcopy(config if isinstance(config, dict) else {})
+    section = safe.get("steam_confirm")
+    if isinstance(section, dict):
+        value = section.get("identity_secret")
+        section["identity_secret"] = _IDENTITY_SECRET_MASK if type(value) is str and value else ""
+    return safe
+def _strip_identity_secret_mask(config: dict) -> dict:
+    patch = copy.deepcopy(config if isinstance(config, dict) else {})
+    section = patch.get("steam_confirm")
+    if isinstance(section, dict) and section.get("identity_secret") == _IDENTITY_SECRET_MASK:
+        section.pop("identity_secret", None)
+    return patch
+def _app_config_identity_secret(data: object) -> Optional[str]:
+    if not isinstance(data, dict):
+        return None
+    section = data.get("steam_confirm")
+    if not isinstance(section, dict):
+        return None
+    value = section.get("identity_secret")
+    return value if type(value) is str and value else None
+def _credentials_identity_secret(data: object) -> Optional[str]:
+    if not isinstance(data, dict):
+        return None
+    section = data.get("steam")
+    if not isinstance(section, dict):
+        return None
+    value = section.get("identity_secret")
+    return value if type(value) is str and value else None
+def _preflight_import_identity_secret(app_config: object, credentials: object) -> None:
+    legacy = _app_config_identity_secret(app_config)
+    canonical = _credentials_identity_secret(credentials)
+    if legacy is not None and canonical is not None and legacy != canonical:
+        raise RuntimeError("steam_identity_secret_conflict")
 
 @router.get("/api/config")
 def api_get_config(response: Response):
     response.headers["Cache-Control"] = "no-store"
-    return {"config": load_app_config_validated()}
+    return {"config": _api_safe_config(load_app_config_validated())}
 @router.post("/api/config")
 def api_save_config(body: ConfigBody):
-    if _has_explicit_auto_offer_enabled_patch(body.config):
+    patch = _strip_identity_secret_mask(body.config)
+    if _has_explicit_auto_offer_enabled_patch(patch):
         from app.pipeline import (
             PipelineMaintenanceBlocked,
             update_auto_offer_enabled_config,
         )
 
         try:
-            saved = update_auto_offer_enabled_config(body.config)
+            saved = update_auto_offer_enabled_config(patch)
         except PipelineMaintenanceBlocked as exc:
             return {
                 "ok": False,
                 "code": "AUTO_OFFER_CONFIG_CHANGE_BLOCKED",
                 "error": str(exc),
             }
+        except ValueError as exc:
+            detail = str(exc)
+            if detail in _IDENTITY_SECRET_ERRORS:
+                code = (
+                    "STEAM_IDENTITY_SECRET_CONFLICT"
+                    if detail == "steam_identity_secret_conflict"
+                    else "STEAM_IDENTITY_SECRET_INVALID"
+                )
+                return {"ok": False, "code": code, "error": detail}
+            raise
     else:
-        saved = update_app_config_validated(body.config)
-    return {"ok": True, "config": saved}
+        try:
+            saved = update_app_config_validated(patch)
+        except ValueError as exc:
+            detail = str(exc)
+            if detail in _IDENTITY_SECRET_ERRORS:
+                code = (
+                    "STEAM_IDENTITY_SECRET_CONFLICT"
+                    if detail == "steam_identity_secret_conflict"
+                    else "STEAM_IDENTITY_SECRET_INVALID"
+                )
+                return {"ok": False, "code": code, "error": detail}
+            raise
+    return {"ok": True, "config": _api_safe_config(saved)}
 def _api_data_init_unlocked():
     from app.state import clear_log
     from pathlib import Path
@@ -273,6 +335,7 @@ def api_import_full(body: ImportFullBody):
 
     try:
         with exclusive_pipeline_maintenance("full_import"):
+            _preflight_import_identity_secret(body.app_config, body.credentials)
             snapshot = {
                 "app_config": load_app_config(),
                 "credentials": get_all_credentials(),
@@ -287,10 +350,10 @@ def api_import_full(body: ImportFullBody):
                 "log": get_log(0),
             }
             try:
-                if body.app_config is not None:
-                    save_app_config_validated(body.app_config)
                 if body.credentials is not None:
                     save_credentials(body.credentials)
+                if body.app_config is not None:
+                    save_app_config_validated(body.app_config)
                 if body.transactions is not None:
                     tx = body.transactions
                     replace_transactions(
