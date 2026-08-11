@@ -204,6 +204,36 @@ class BuffClient:
     def get_steam_trades(self) -> Optional[list]:
         return self._run(lambda buyer: buyer.get_steam_trades())
 
+    def get_buy_orders_waiting_to_send_offer(
+        self, game: str = "csgo", appid: int = 730
+    ) -> Optional[list]:
+        """Read buyer-send direction through the owned authenticated buyer."""
+
+        return self._run(
+            lambda buyer: buyer.get_buy_orders_waiting_to_send_offer(game, appid)
+        )
+
+    def send_buyer_offer(
+        self,
+        *,
+        steam_cookie_string: str,
+        buff_order_id: str,
+        steam_id: str,
+        timeout_seconds: float,
+    ) -> dict:
+        """Execute exactly one buyer-send transport call inside facade ownership."""
+
+        from buff.buyer_send import BuffBuyerSendTransport
+
+        return self._run(
+            lambda buyer: BuffBuyerSendTransport(buyer).send(
+                steam_cookie_string=steam_cookie_string,
+                buff_order_id=buff_order_id,
+                steam_id=steam_id,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+
     def get_goods_steam_price_cny(
         self, search_name: str, game: str = "csgo"
     ) -> Optional[float]:
