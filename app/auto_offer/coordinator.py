@@ -1,8 +1,9 @@
 """One-shot fail-closed platform step coordination.
 
 The coordinator owns routing, adapter normalization, and contract-approved Store
-CAS writes.  Read reconciliation remains the authority for read-evidence targets;
-the buyer SEND_OFFER path owns only its durable attempt/send transitions.
+CAS writes. Read reconciliation remains the authority for read-evidence targets;
+non-idempotent SEND_OFFER and CONFIRM_OFFER writes persist durable attempt states
+before their exact adapter invocation.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from .adapters import (
+    ConfirmOfferEvidence,
     OfferStateEvidence,
     PlatformAdapter,
     PlatformAdapterError,
@@ -53,10 +55,17 @@ _READ_CAPABILITIES = frozenset(
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
     }
 )
+_WRITE_CAPABILITIES = frozenset(
+    {
+        PlatformCapability.SEND_OFFER,
+        PlatformCapability.CONFIRM_OFFER,
+    }
+)
 _TRADEOFFER_BOUND_CAPABILITIES = frozenset(
     {
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        PlatformCapability.CONFIRM_OFFER,
     }
 )
 _IDENTITY_FIELDS = (
@@ -354,6 +363,67 @@ class SendOfferStepResult:
             raise ReadOnlyCoordinatorError("invalid_send_step_result")
 
 
+@dataclass(frozen=True)
+class ConfirmOfferStepResult:
+    """Immutable result of one durably recorded exact confirmation attempt."""
+
+    before: StoredDelivery
+    attempted: StoredDelivery
+    platform_result: PlatformResult
+    after: StoredDelivery
+
+    def __post_init__(self) -> None:
+        try:
+            _validate_delivery(self.before)
+            _validate_delivery(self.attempted)
+            _validate_delivery(self.after)
+            PlatformResult.__post_init__(self.platform_result)
+        except Exception as exc:
+            raise ReadOnlyCoordinatorError("invalid_confirm_step_result") from exc
+        if (
+            self.before.snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
+            or self.before.snapshot.delivery_status
+            is not DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+            or self.attempted.snapshot.delivery_status
+            is not DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
+            or self.attempted.revision != self.before.revision + 1
+            or not _same_delivery_identity(self.before, self.attempted)
+            or not _same_delivery_identity(self.attempted, self.after)
+            or not _request_matches_delivery(
+                self.platform_result.request, self.attempted
+            )
+            or self.platform_result.request.capability
+            is not PlatformCapability.CONFIRM_OFFER
+        ):
+            raise ReadOnlyCoordinatorError("invalid_confirm_step_result")
+        if self.after.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED:
+            if (
+                self.after.revision != self.attempted.revision + 1
+                or self.platform_result.status is not PlatformResultStatus.SUCCESS
+                or type(self.platform_result.evidence) is not ConfirmOfferEvidence
+                or self.after.snapshot.steam_tradeoffer_id
+                != self.platform_result.evidence.steam_tradeoffer_id
+            ):
+                raise ReadOnlyCoordinatorError("invalid_confirm_step_result")
+        elif self.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+            if (
+                self.after.revision != self.attempted.revision + 1
+                or self.platform_result.status is not PlatformResultStatus.RESULT_UNKNOWN
+                or self.after.snapshot.delivery_error != "write_result_unknown"
+            ):
+                raise ReadOnlyCoordinatorError("invalid_confirm_step_result")
+        elif self.after == self.attempted:
+            if self.platform_result.status not in {
+                PlatformResultStatus.UNSUPPORTED,
+                PlatformResultStatus.TIMEOUT,
+                PlatformResultStatus.FAILURE,
+                PlatformResultStatus.MALFORMED,
+            }:
+                raise ReadOnlyCoordinatorError("invalid_confirm_step_result")
+        else:
+            raise ReadOnlyCoordinatorError("invalid_confirm_step_result")
+
+
 class DeliveryCoordinator:
     """Coordinate one exact platform step and contract-approved Store CAS writes."""
 
@@ -364,12 +434,17 @@ class DeliveryCoordinator:
         *,
         timeout_seconds: float,
         allow_writes: bool = False,
+        allow_confirmation_writes: bool = False,
         clock=None,
     ) -> None:
         _validate_store(store)
         _validate_timeout(timeout_seconds)
         if type(allow_writes) is not bool:
             raise ReadOnlyCoordinatorError("invalid_allow_writes")
+        if type(allow_confirmation_writes) is not bool:
+            raise ReadOnlyCoordinatorError("invalid_allow_confirmation_writes")
+        if allow_confirmation_writes and not allow_writes:
+            raise ReadOnlyCoordinatorError("confirmation_writes_require_allow_writes")
         actual_clock = time.time if clock is None else clock
         _validate_clock(actual_clock)
         if not isinstance(adapters, Mapping):
@@ -378,15 +453,13 @@ class DeliveryCoordinator:
         for capability, adapter in adapters.items():
             if type(capability) is not PlatformCapability:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
-            if (
-                capability is PlatformCapability.SEND_OFFER
-                and not allow_writes
-            ):
+            if capability is PlatformCapability.SEND_OFFER and not allow_writes:
                 raise ReadOnlyCoordinatorBlockedError("write_capability_not_allowed")
-            if (
-                capability not in _READ_CAPABILITIES
-                and capability is not PlatformCapability.SEND_OFFER
+            if capability is PlatformCapability.CONFIRM_OFFER and (
+                not allow_writes or not allow_confirmation_writes
             ):
+                raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
+            if capability not in _READ_CAPABILITIES and capability not in _WRITE_CAPABILITIES:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
             try:
                 declared = adapter.capabilities
@@ -396,16 +469,14 @@ class DeliveryCoordinator:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch") from exc
             if not callable(execute) or capability not in declared_set:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
-            if (
-                capability is PlatformCapability.SEND_OFFER
-                and declared_set != frozenset({PlatformCapability.SEND_OFFER})
-            ):
+            if capability in _WRITE_CAPABILITIES and declared_set != frozenset({capability}):
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
             configured[capability] = adapter
         self._store = store
         self._adapters = MappingProxyType(configured)
         self._timeout_seconds = timeout_seconds
         self._allow_writes = allow_writes
+        self._allow_confirmation_writes = allow_confirmation_writes
         self._clock = actual_clock
 
     def _read_current(self, delivery: StoredDelivery) -> None:
@@ -599,8 +670,46 @@ class DeliveryCoordinator:
             after=after,
         )
 
-    def step(self, delivery: StoredDelivery) -> ReadOnlyStepResult | SendOfferStepResult:
-        """Execute one read step or one explicitly enabled crash-safe send attempt."""
+    def _step_confirm_offer(self, delivery: StoredDelivery) -> ConfirmOfferStepResult:
+        if not self._allow_writes or not self._allow_confirmation_writes:
+            raise ReadOnlyCoordinatorBlockedError("confirmation_write_capability_required")
+        adapter = self._adapters.get(PlatformCapability.CONFIRM_OFFER)
+        if adapter is None:
+            raise ReadOnlyCoordinatorBlockedError("confirm_offer_adapter_required")
+
+        attempted_target = replace(
+            delivery.snapshot,
+            delivery_status=DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+        )
+        attempted = self._advance(delivery, attempted_target)
+
+        request = self._make_request(attempted, PlatformCapability.CONFIRM_OFFER)
+        platform_result = self._execute(adapter, request)
+        if (
+            platform_result.status is PlatformResultStatus.SUCCESS
+            and type(platform_result.evidence) is ConfirmOfferEvidence
+        ):
+            confirmed_target = replace(
+                attempted.snapshot,
+                delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+            )
+            after = self._advance(attempted, confirmed_target)
+        elif platform_result.status is PlatformResultStatus.RESULT_UNKNOWN:
+            after = self._persist_result_unknown(attempted)
+        else:
+            after = attempted
+        return ConfirmOfferStepResult(
+            before=delivery,
+            attempted=attempted,
+            platform_result=platform_result,
+            after=after,
+        )
+
+    def step(
+        self,
+        delivery: StoredDelivery,
+    ) -> ReadOnlyStepResult | SendOfferStepResult | ConfirmOfferStepResult:
+        """Execute one read step or one explicitly enabled crash-safe write attempt."""
         _validate_delivery(delivery)
         self._read_current(delivery)
         if (
@@ -608,6 +717,13 @@ class DeliveryCoordinator:
             and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         ):
             return self._step_send_offer(delivery)
+        if (
+            self._allow_confirmation_writes
+            and delivery.snapshot.delivery_status
+            is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+            and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        ):
+            return self._step_confirm_offer(delivery)
 
         capability = _required_read_capability(delivery)
         request = self._make_request(delivery, capability)
@@ -638,6 +754,7 @@ DeliveryReadStepResult = ReadOnlyStepResult
 
 
 __all__ = [
+    "ConfirmOfferStepResult",
     "DeliveryCoordinator",
     "DeliveryReadStepResult",
     "ReadOnlyCoordinatorBlockedError",
