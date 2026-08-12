@@ -330,6 +330,11 @@ def _process_deals_for_target(
     integration = build_host_auto_offer_integration(
         config=cfg,
         buff_client=buyer,
+        complete_purchase_receipt_by_id=(
+            ctx.state.complete_purchase_receipt_by_id
+            if is_auto_offer_enabled(cfg)
+            else None
+        ),
     )
     try:
         effective_cfg = cfg

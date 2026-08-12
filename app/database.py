@@ -347,6 +347,88 @@ def db_update_purchase_by_id(db_id: int, data: dict) -> bool:
         session.add(row)
         session.commit()
         return True
+def db_complete_purchase_receipt_by_id(
+    db_id: int,
+    buff_order_id: str,
+    assetid: str,
+) -> bool:
+    """Atomically commit one exact, already-proven recipient receipt fact."""
+    if type(db_id) is not int or db_id <= 0:
+        return False
+    if (
+        type(buff_order_id) is not str
+        or not buff_order_id
+        or buff_order_id.strip() != buff_order_id
+    ):
+        return False
+    if type(assetid) is not str or not assetid or assetid.strip() != assetid:
+        return False
+
+    from sqlalchemy import text as sa_text
+
+    connection = get_engine().connect()
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        row = connection.execute(
+            sa_text(
+                "SELECT id, buff_order_id, pending_receipt, assetid "
+                "FROM purchase WHERE id = :db_id"
+            ),
+            {"db_id": db_id},
+        ).fetchone()
+        if row is None or row[1] != buff_order_id:
+            connection.rollback()
+            return False
+
+        duplicate = connection.execute(
+            sa_text(
+                "SELECT id FROM purchase "
+                "WHERE assetid = :assetid AND id != :db_id LIMIT 1"
+            ),
+            {"assetid": assetid, "db_id": db_id},
+        ).fetchone()
+        if duplicate is not None:
+            connection.rollback()
+            return False
+
+        pending_receipt = row[2]
+        current_assetid = row[3]
+        if pending_receipt in (False, 0) and current_assetid == assetid:
+            connection.commit()
+            return True
+        if pending_receipt not in (True, 1) or current_assetid not in (None, ""):
+            connection.rollback()
+            return False
+
+        cursor = connection.execute(
+            sa_text(
+                "UPDATE purchase SET assetid = :assetid, pending_receipt = 0 "
+                "WHERE id = :db_id AND buff_order_id = :buff_order_id "
+                "AND pending_receipt = 1 AND (assetid IS NULL OR assetid = '') "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM purchase other "
+                "WHERE other.id != :db_id AND other.assetid = :assetid"
+                ")"
+            ),
+            {
+                "assetid": assetid,
+                "db_id": db_id,
+                "buff_order_id": buff_order_id,
+            },
+        )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            return False
+        connection.commit()
+        return True
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        connection.close()
 def db_delete_purchase_by_id(db_id: int) -> bool:
     """按主键 ID 删除，O(1) 操作。"""
     if not db_id:

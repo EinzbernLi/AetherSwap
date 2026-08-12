@@ -8,6 +8,7 @@ from app.database import (
     db_append_purchase,
     db_append_sale,
     db_clear_transactions,
+    db_complete_purchase_receipt_by_id,
     db_delete_purchase,
     db_delete_purchase_by_id,
     db_delete_sale,
@@ -80,6 +81,13 @@ class State:
         return db_update_purchase(idx, data)
     def update_purchase_by_id(self, db_id: int, data: dict) -> bool:
         return db_update_purchase_by_id(db_id, data)
+    def complete_purchase_receipt_by_id(
+        self,
+        db_id: int,
+        buff_order_id: str,
+        assetid: str,
+    ) -> bool:
+        return db_complete_purchase_receipt_by_id(db_id, buff_order_id, assetid)
     def delete_purchase_by_id(self, db_id: int) -> bool:
         return db_delete_purchase_by_id(db_id)
     def update_sale(self, idx: int, data: dict) -> bool:

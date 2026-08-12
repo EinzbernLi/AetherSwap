@@ -39,6 +39,7 @@ from app.services.buff_checkout_guard import get_unresolved_checkout
 
 _STORE_PATH = Path(__file__).resolve().parents[2] / "config" / "auto_offer.db"
 _TIMEOUT_SECONDS = 15.0
+_MAX_RECOVERY_STEPS_PER_DELIVERY = 6
 
 
 class HostAutoOfferIntegrationError(RuntimeError):
@@ -101,6 +102,18 @@ def _exact_order_id(value: object) -> str | None:
     return value
 
 
+def _exact_assetid(value: object) -> str | None:
+    if type(value) is not str or not value or value.strip() != value:
+        return None
+    return value
+
+
+def _exact_db_id(value: object) -> int | None:
+    if type(value) is not int or value <= 0:
+        return None
+    return value
+
+
 def _steam_cookie_for_expected(expected_steam_id: str) -> str:
     expected = _canonical_steam_id(expected_steam_id)
     credentials = get_steam_credentials()
@@ -136,6 +149,51 @@ def _safe_close_session(session: object | None) -> bool:
         return True
     except Exception:
         return False
+
+
+def _persisted_recovery_policy(delivery: StoredDelivery) -> str:
+    """Return read/wait/block without ever granting a persisted first send."""
+
+    if type(delivery) is not StoredDelivery:
+        return "block"
+    snapshot = delivery.snapshot
+    status = snapshot.delivery_status
+    mode = snapshot.delivery_mode
+    if status is DeliveryStatus.PENDING_DIRECTION:
+        return "read"
+    if status is DeliveryStatus.AWAITING_OFFER:
+        if mode is DeliveryMode.SELLER_SENDS_OFFER:
+            return "read"
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            return "wait"
+        return "block"
+    if status is DeliveryStatus.OFFER_ATTEMPTED:
+        return "read" if mode is DeliveryMode.BUYER_SENDS_OFFER else "block"
+    if status is DeliveryStatus.RESULT_UNKNOWN:
+        return "read" if mode is DeliveryMode.BUYER_SENDS_OFFER else "block"
+    if status is DeliveryStatus.OFFER_RECEIVED:
+        return "read" if mode is DeliveryMode.SELLER_SENDS_OFFER else "block"
+    if status in {
+        DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+    }:
+        return "read" if mode is DeliveryMode.BUYER_SENDS_OFFER else "block"
+    if status is DeliveryStatus.OFFER_CONFIRMED:
+        if mode in {
+            DeliveryMode.SELLER_SENDS_OFFER,
+            DeliveryMode.BUYER_SENDS_OFFER,
+        }:
+            return "read"
+        return "block"
+    if status is DeliveryStatus.AWAITING_INVENTORY:
+        if mode in {
+            DeliveryMode.SELLER_SENDS_OFFER,
+            DeliveryMode.BUYER_SENDS_OFFER,
+        }:
+            return "read"
+        return "block"
+    return "block"
 
 
 class _BuffClientBuyerSendTransport:
@@ -256,6 +314,13 @@ class _ActiveHostAutoOfferBridge:
         except Exception:
             raise HostAutoOfferIntegrationError("store_read_failed") from None
 
+    def get_by_purchase_id(self, purchase_id: str) -> StoredDelivery | None:
+        self._require_open()
+        try:
+            return self._store.get_by_purchase_id(purchase_id)
+        except Exception:
+            raise HostAutoOfferIntegrationError("store_read_failed") from None
+
     def step(self, delivery: StoredDelivery):
         self._require_open()
         try:
@@ -364,12 +429,13 @@ def _build_active_host_auto_offer_bridge(
 
 
 class HostAutoOfferIntegration:
-    """Host-owned lifecycle, first-send authorization, and purchase gate seam."""
+    """Host-owned first-send, bounded recovery, and next-purchase gate seam."""
 
-    def __init__(self, bridge) -> None:
+    def __init__(self, bridge, *, complete_purchase_receipt_by_id=None) -> None:
         self._bridge = bridge
         self._account_id = bridge.account_id
         self._recipient_steam_id = bridge.recipient_steam_id
+        self._complete_purchase_receipt_by_id = complete_purchase_receipt_by_id
         self._fresh_deliveries: list[StoredDelivery] = []
         self._closed = False
 
@@ -416,13 +482,16 @@ class HostAutoOfferIntegration:
             raise HostAutoOfferIntegrationError("runtime_identity_mismatch")
         _steam_cookie_for_expected(current_steam_id)
 
-    def _dispatch_fresh_deliveries(self) -> None:
-        if not self._fresh_deliveries or not self._checkout_is_resolved():
-            return
+    def _dispatch_fresh_deliveries(self) -> set[str]:
+        if not self._fresh_deliveries:
+            return set()
+        deferred_order_ids = {
+            item.snapshot.buff_order_id for item in self._fresh_deliveries
+        }
+        if not self._checkout_is_resolved():
+            return deferred_order_ids
         self._require_runtime_identity()
 
-        # Consume the authorization tokens before any platform step.  If any
-        # step becomes ambiguous or raises, this run never retries those sends.
         fresh = tuple(self._fresh_deliveries)
         self._fresh_deliveries.clear()
 
@@ -434,7 +503,7 @@ class HostAutoOfferIntegration:
 
             snapshot = current.snapshot
             if snapshot.delivery_status is DeliveryStatus.PENDING_DIRECTION:
-                return
+                return deferred_order_ids
             if (
                 snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER
                 and snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
@@ -457,51 +526,166 @@ class HostAutoOfferIntegration:
                 if type(current) is not StoredDelivery:
                     raise HostAutoOfferIntegrationError("recovery_step_invalid")
                 if current.snapshot.delivery_status is not DeliveryStatus.OFFER_SENT:
-                    return
+                    return deferred_order_ids
             elif current.snapshot.delivery_status is not DeliveryStatus.OFFER_SENT:
                 raise HostAutoOfferIntegrationError("send_step_invalid")
+        return deferred_order_ids
+
+    def _host_pending_by_order(self, host_purchases: object) -> dict[str, Mapping[str, object]]:
+        if not isinstance(host_purchases, list):
+            raise HostAutoOfferIntegrationError("invalid_host_purchases")
+        pending: dict[str, Mapping[str, object]] = {}
+        for purchase in host_purchases:
+            if not isinstance(purchase, Mapping):
+                raise HostAutoOfferIntegrationError("invalid_host_purchase")
+            if purchase.get("pending_receipt") is not True:
+                continue
+            if purchase.get("assetid") not in (None, ""):
+                raise HostAutoOfferIntegrationError("pending_host_has_asset")
+            order_id = _exact_order_id(purchase.get("buff_order_id"))
+            db_id = _exact_db_id(purchase.get("_db_id"))
+            if order_id is None or db_id is None or order_id in pending:
+                raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+            pending[order_id] = purchase
+        return pending
+
+    def _validate_store_delivery(self, stored: object, order_id: str) -> StoredDelivery:
+        if type(stored) is not StoredDelivery:
+            raise HostAutoOfferIntegrationError("invalid_store_delivery")
+        snapshot = stored.snapshot
+        if (
+            snapshot.purchase_id != f"buff:{order_id}"
+            or snapshot.buff_order_id != order_id
+            or snapshot.account_id != self._account_id
+            or snapshot.recipient_steam_id != self._recipient_steam_id
+        ):
+            raise HostAutoOfferIntegrationError("store_identity_mismatch")
+        return stored
+
+    def _recoverable_by_order(self) -> dict[str, StoredDelivery]:
+        recoverable: dict[str, StoredDelivery] = {}
+        for stored in self._bridge.list_recoverable():
+            if type(stored) is not StoredDelivery:
+                raise HostAutoOfferIntegrationError("invalid_store_delivery")
+            order_id = _exact_order_id(stored.snapshot.buff_order_id)
+            if order_id is None or order_id in recoverable:
+                raise HostAutoOfferIntegrationError("invalid_store_order_identity")
+            recoverable[order_id] = self._validate_store_delivery(stored, order_id)
+        return recoverable
+
+    def _write_back_received(
+        self,
+        purchase: Mapping[str, object],
+        stored: StoredDelivery,
+    ) -> None:
+        order_id = _exact_order_id(purchase.get("buff_order_id"))
+        db_id = _exact_db_id(purchase.get("_db_id"))
+        if order_id is None or db_id is None:
+            raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+        stored = self._validate_store_delivery(stored, order_id)
+        snapshot = stored.snapshot
+        assetid = _exact_assetid(snapshot.assetid)
+        if (
+            snapshot.delivery_status is not DeliveryStatus.RECEIVED
+            or snapshot.pending_receipt is not False
+            or assetid is None
+        ):
+            raise HostAutoOfferIntegrationError("store_receipt_not_proven")
+        writer = self._complete_purchase_receipt_by_id
+        if not callable(writer):
+            raise HostAutoOfferIntegrationError("receipt_writer_required")
+        try:
+            completed = writer(db_id, order_id, assetid)
+        except Exception:
+            raise HostAutoOfferIntegrationError("host_receipt_write_failed") from None
+        if completed is not True:
+            raise HostAutoOfferIntegrationError("host_receipt_write_failed")
+
+    def _sync_terminal_received(
+        self,
+        host_pending: dict[str, Mapping[str, object]],
+        recoverable: Mapping[str, StoredDelivery],
+    ) -> None:
+        for order_id in tuple(host_pending):
+            if order_id in recoverable:
+                continue
+            stored = self._bridge.get_by_purchase_id(f"buff:{order_id}")
+            if stored is None:
+                raise HostAutoOfferIntegrationError("host_store_set_mismatch")
+            stored = self._validate_store_delivery(stored, order_id)
+            if stored.snapshot.delivery_status is not DeliveryStatus.RECEIVED:
+                raise HostAutoOfferIntegrationError("host_store_set_mismatch")
+            self._write_back_received(host_pending[order_id], stored)
+            del host_pending[order_id]
+
+    def _recover_persisted_delivery(
+        self,
+        delivery: StoredDelivery,
+    ) -> tuple[AutoOfferResult, StoredDelivery]:
+        current = delivery
+        for _step_index in range(_MAX_RECOVERY_STEPS_PER_DELIVERY):
+            policy = _persisted_recovery_policy(current)
+            if policy == "wait":
+                return AutoOfferResult.WAITING, current
+            if policy != "read":
+                return AutoOfferResult.BLOCKED, current
+
+            step_result = self._bridge.step(current)
+            after = getattr(step_result, "after", None)
+            persisted = getattr(step_result, "persisted", None)
+            decision = getattr(step_result, "decision", None)
+            decision_result = getattr(decision, "result", None)
+            if (
+                type(after) is not StoredDelivery
+                or type(persisted) is not bool
+                or type(decision_result) is not AutoOfferResult
+            ):
+                raise HostAutoOfferIntegrationError("recovery_step_invalid")
+            if decision_result is AutoOfferResult.BLOCKED:
+                return AutoOfferResult.BLOCKED, current
+            if not persisted:
+                if after != current:
+                    raise HostAutoOfferIntegrationError("recovery_step_invalid")
+                return AutoOfferResult.WAITING, current
+            if (
+                after.revision != current.revision + 1
+                or after.snapshot == current.snapshot
+            ):
+                raise HostAutoOfferIntegrationError("recovery_step_invalid")
+
+            current = after
+            if current.snapshot.delivery_status is DeliveryStatus.RECEIVED:
+                return AutoOfferResult.COMPLETE, current
+
+        return AutoOfferResult.BLOCKED, current
 
     def next_purchase_result(self, host_purchases: object) -> AutoOfferResult:
-        """Dispatch fresh first-send work, then gate the next host purchase."""
-
         try:
-            self._dispatch_fresh_deliveries()
+            deferred_fresh = self._dispatch_fresh_deliveries()
             self._require_runtime_identity()
-
-            if not isinstance(host_purchases, list):
+            host_pending = self._host_pending_by_order(host_purchases)
+            recoverable = self._recoverable_by_order()
+            self._sync_terminal_received(host_pending, recoverable)
+            if set(host_pending) != set(recoverable):
                 return AutoOfferResult.BLOCKED
-            host_order_ids: set[str] = set()
-            for purchase in host_purchases:
-                if not isinstance(purchase, Mapping):
-                    return AutoOfferResult.BLOCKED
-                if purchase.get("pending_receipt") is not True:
+
+            for order_id, stored in tuple(recoverable.items()):
+                if order_id in deferred_fresh:
                     continue
-                assetid = purchase.get("assetid")
-                if assetid not in (None, ""):
-                    if not isinstance(assetid, str) or not assetid.strip():
+                result, current = self._recover_persisted_delivery(stored)
+                if result is AutoOfferResult.BLOCKED:
+                    return AutoOfferResult.BLOCKED
+                if current.snapshot.delivery_status is DeliveryStatus.RECEIVED:
+                    purchase = host_pending.get(order_id)
+                    if purchase is None:
                         return AutoOfferResult.BLOCKED
-                    continue
-                order_id = _exact_order_id(purchase.get("buff_order_id"))
-                if order_id is None or order_id in host_order_ids:
-                    return AutoOfferResult.BLOCKED
-                host_order_ids.add(order_id)
+                    self._write_back_received(purchase, current)
+                    del host_pending[order_id]
 
-            store_order_ids: set[str] = set()
-            for stored_delivery in self._bridge.list_recoverable():
-                snapshot = stored_delivery.snapshot
-                if (
-                    snapshot.account_id != self._account_id
-                    or snapshot.recipient_steam_id != self._recipient_steam_id
-                ):
-                    return AutoOfferResult.BLOCKED
-                order_id = _exact_order_id(snapshot.buff_order_id)
-                if order_id is None or order_id in store_order_ids:
-                    return AutoOfferResult.BLOCKED
-                store_order_ids.add(order_id)
-
-            if host_order_ids != store_order_ids:
+            refreshed = self._recoverable_by_order()
+            if set(host_pending) != set(refreshed):
                 return AutoOfferResult.BLOCKED
-            if not host_order_ids:
+            if not host_pending:
                 return AutoOfferResult.COMPLETE
             return AutoOfferResult.WAITING
         except HostAutoOfferIntegrationError:
@@ -531,13 +715,14 @@ def build_host_auto_offer_integration(
     *,
     config: Mapping[str, object] | None,
     buff_client,
+    complete_purchase_receipt_by_id=None,
 ) -> HostAutoOfferIntegration | None:
-    """Build the active bridge only for an explicitly enabled validated run."""
-
     if not is_auto_offer_enabled(config):
         return None
 
     account_id, account_steam_id = _exact_current_account()
+    if not callable(complete_purchase_receipt_by_id):
+        raise HostAutoOfferIntegrationError("receipt_writer_required")
     try:
         bridge = _build_active_host_auto_offer_bridge(
             buff_client=buff_client,
@@ -549,7 +734,10 @@ def build_host_auto_offer_integration(
         raise HostAutoOfferIntegrationError(
             "auto_offer_bridge_build_failed"
         ) from exc
-    return HostAutoOfferIntegration(bridge)
+    return HostAutoOfferIntegration(
+        bridge,
+        complete_purchase_receipt_by_id=complete_purchase_receipt_by_id,
+    )
 
 
 __all__ = [
