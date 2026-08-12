@@ -1,9 +1,9 @@
 """Host-owned lifecycle for explicitly enabled native Auto Offer execution.
 
-The host integration remains default-off.  When enabled it owns one local Store,
-one Coordinator registry, one Steam read session, and the TASK-025 buyer-send
-adapter.  Platform work is synchronous and bounded; no worker, retry loop,
-scheduler, or background Auto Offer executor is created here.
+The host integration remains default-off. When enabled it owns one local Store,
+one Coordinator registry, one Steam session, and the reviewed exact SEND and
+mobile-confirmation adapters. Platform work is synchronous and bounded; no
+worker, retry loop, scheduler, or background Auto Offer executor is created.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 import requests
 
 from app.accounts import get_account, get_current_id
-from app.auto_offer.adapters import PlatformCapability
+from app.auto_offer.adapters import PlatformCapability, PlatformResultStatus
 from app.auto_offer.contracts import (
     AutoOfferResult,
     DeliveryMode,
@@ -22,12 +22,16 @@ from app.auto_offer.contracts import (
     DeliveryStatus,
 )
 from app.auto_offer.coordinator import DeliveryCoordinator
+from app.auto_offer.platform_confirmation import SteamTradeOfferConfirmationAdapter
 from app.auto_offer.platform_readonly import (
     BuffReadOnlyAdapter,
     SteamCompletedTradeReadOnlyAdapter,
     SteamTradeOfferReadOnlyAdapter,
 )
 from app.auto_offer.platform_write import BuffBuyerSendOfferAdapter
+from app.auto_offer.steam_confirmation_transport import (
+    SteamTradeOfferConfirmationTransport,
+)
 from app.auto_offer.steam_readonly_transport import (
     SteamCompletedTradeHttpReader,
     SteamTradeOfferHttpReader,
@@ -114,7 +118,7 @@ def _exact_db_id(value: object) -> int | None:
     return value
 
 
-def _steam_cookie_for_expected(expected_steam_id: str) -> str:
+def _steam_credentials_for_expected(expected_steam_id: str) -> Mapping[str, object]:
     expected = _canonical_steam_id(expected_steam_id)
     credentials = get_steam_credentials()
     if not isinstance(credentials, Mapping):
@@ -122,10 +126,33 @@ def _steam_cookie_for_expected(expected_steam_id: str) -> str:
     actual = _canonical_steam_id(credentials.get("steam_id"))
     if actual != expected:
         raise HostAutoOfferIntegrationError("steam_identity_mismatch")
+    return credentials
+
+
+def _steam_cookie_for_expected(expected_steam_id: str) -> str:
+    credentials = _steam_credentials_for_expected(expected_steam_id)
     cookies = credentials.get("cookies")
     if type(cookies) is not str or not cookies:
         raise HostAutoOfferIntegrationError("steam_cookie_required")
     return cookies
+
+
+def _steam_confirmation_credentials_for_expected(
+    expected_steam_id: str,
+) -> tuple[str, str]:
+    credentials = _steam_credentials_for_expected(expected_steam_id)
+    cookies = credentials.get("cookies")
+    identity_secret = credentials.get("identity_secret")
+    if type(cookies) is not str or not cookies:
+        raise HostAutoOfferIntegrationError("steam_cookie_required")
+    if (
+        type(identity_secret) is not str
+        or not identity_secret
+        or identity_secret.strip() != identity_secret
+        or any(character.isspace() for character in identity_secret)
+    ):
+        raise HostAutoOfferIntegrationError("steam_identity_secret_required")
+    return cookies, identity_secret
 
 
 def _safe_close_store(store: AutoOfferStore | None) -> bool:
@@ -152,7 +179,7 @@ def _safe_close_session(session: object | None) -> bool:
 
 
 def _persisted_recovery_policy(delivery: StoredDelivery) -> str:
-    """Return read/wait/block without ever granting a persisted first send."""
+    """Return read/confirm/wait/block without recreating first-send authority."""
 
     if type(delivery) is not StoredDelivery:
         return "block"
@@ -173,11 +200,11 @@ def _persisted_recovery_policy(delivery: StoredDelivery) -> str:
         return "read" if mode is DeliveryMode.BUYER_SENDS_OFFER else "block"
     if status is DeliveryStatus.OFFER_RECEIVED:
         return "read" if mode is DeliveryMode.SELLER_SENDS_OFFER else "block"
-    if status in {
-        DeliveryStatus.OFFER_SENT,
-        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
-        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
-    }:
+    if status is DeliveryStatus.OFFER_SENT:
+        return "read" if mode is DeliveryMode.BUYER_SENDS_OFFER else "block"
+    if status is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED:
+        return "confirm" if mode is DeliveryMode.BUYER_SENDS_OFFER else "block"
+    if status is DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED:
         return "read" if mode is DeliveryMode.BUYER_SENDS_OFFER else "block"
     if status is DeliveryStatus.OFFER_CONFIRMED:
         if mode in {
@@ -345,13 +372,15 @@ def _build_active_host_auto_offer_bridge(
     account_steam_id: str,
     store_path: str | Path = _STORE_PATH,
 ) -> _ActiveHostAutoOfferBridge:
-    """Build the one active read+SEND coordinator without platform I/O."""
+    """Build the one active read+SEND+confirmation Coordinator without I/O."""
 
     account = account_id
     if type(account) is not str or not account or account.strip() != account:
         raise HostAutoOfferIntegrationError("current_account_id_invalid")
     recipient = _canonical_steam_id(account_steam_id)
-    cookie_string = _steam_cookie_for_expected(recipient)
+    cookie_string, identity_secret = _steam_confirmation_credentials_for_expected(
+        recipient
+    )
 
     session = None
     store = None
@@ -374,9 +403,16 @@ def _build_active_host_auto_offer_bridge(
             session=session,
             timeout=timeout,
         )
+        confirmation_transport = SteamTradeOfferConfirmationTransport(
+            cookie_string,
+            identity_secret,
+            session=session,
+            timeout=timeout,
+        )
         if (
             trade_offer_reader.bound_account_steam_id != recipient
             or completed_trade_reader.bound_account_steam_id != recipient
+            or confirmation_transport.bound_account_steam_id != recipient
         ):
             raise HostAutoOfferIntegrationError("steam_identity_mismatch")
 
@@ -397,18 +433,25 @@ def _build_active_host_auto_offer_bridge(
             recipient_steam_id=recipient,
             steam_cookie_provider=lambda: _steam_cookie_for_expected(recipient),
         )
+        confirmation_adapter = SteamTradeOfferConfirmationAdapter(
+            confirmation_transport,
+            account_id=account,
+            recipient_steam_id=recipient,
+        )
         adapters = {
             PlatformCapability.READ_DELIVERY_DIRECTION: buff_adapter,
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
             PlatformCapability.SEND_OFFER: send_adapter,
+            PlatformCapability.CONFIRM_OFFER: confirmation_adapter,
         }
         coordinator = DeliveryCoordinator(
             store,
             adapters,
             timeout_seconds=_TIMEOUT_SECONDS,
             allow_writes=True,
+            allow_confirmation_writes=True,
         )
     except HostAutoOfferIntegrationError:
         _safe_close_store(store)
@@ -627,6 +670,61 @@ class HostAutoOfferIntegration:
             policy = _persisted_recovery_policy(current)
             if policy == "wait":
                 return AutoOfferResult.WAITING, current
+            if policy == "confirm":
+                before = current
+                step_result = self._bridge.step(current)
+                attempted = getattr(step_result, "attempted", None)
+                after = getattr(step_result, "after", None)
+                platform_result = getattr(step_result, "platform_result", None)
+                platform_status = getattr(platform_result, "status", None)
+                if (
+                    type(attempted) is not StoredDelivery
+                    or type(after) is not StoredDelivery
+                    or attempted.revision != before.revision + 1
+                    or attempted.snapshot.delivery_mode
+                    is not DeliveryMode.BUYER_SENDS_OFFER
+                    or attempted.snapshot.delivery_status
+                    is not DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
+                    or attempted.snapshot.purchase_id != before.snapshot.purchase_id
+                    or attempted.snapshot.buff_order_id != before.snapshot.buff_order_id
+                    or attempted.snapshot.account_id != before.snapshot.account_id
+                    or attempted.snapshot.recipient_steam_id
+                    != before.snapshot.recipient_steam_id
+                    or attempted.snapshot.steam_tradeoffer_id
+                    != before.snapshot.steam_tradeoffer_id
+                    or after.snapshot.delivery_mode != attempted.snapshot.delivery_mode
+                    or after.snapshot.purchase_id != attempted.snapshot.purchase_id
+                    or after.snapshot.buff_order_id != attempted.snapshot.buff_order_id
+                    or after.snapshot.account_id != attempted.snapshot.account_id
+                    or after.snapshot.recipient_steam_id
+                    != attempted.snapshot.recipient_steam_id
+                    or after.snapshot.steam_tradeoffer_id
+                    != attempted.snapshot.steam_tradeoffer_id
+                ):
+                    raise HostAutoOfferIntegrationError("confirmation_step_invalid")
+                if after == attempted:
+                    if platform_status not in {
+                        PlatformResultStatus.UNSUPPORTED,
+                        PlatformResultStatus.TIMEOUT,
+                        PlatformResultStatus.FAILURE,
+                        PlatformResultStatus.MALFORMED,
+                    }:
+                        raise HostAutoOfferIntegrationError("confirmation_step_invalid")
+                    return AutoOfferResult.BLOCKED, attempted
+                if after.revision != attempted.revision + 1:
+                    raise HostAutoOfferIntegrationError("confirmation_step_invalid")
+                if after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+                    if (
+                        platform_status is not PlatformResultStatus.RESULT_UNKNOWN
+                        or after.snapshot.delivery_error != "write_result_unknown"
+                    ):
+                        raise HostAutoOfferIntegrationError("confirmation_step_invalid")
+                    return AutoOfferResult.RESULT_UNKNOWN, after
+                if after.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED:
+                    if platform_status is not PlatformResultStatus.SUCCESS:
+                        raise HostAutoOfferIntegrationError("confirmation_step_invalid")
+                    return AutoOfferResult.WAITING, after
+                raise HostAutoOfferIntegrationError("confirmation_step_invalid")
             if policy != "read":
                 return AutoOfferResult.BLOCKED, current
 
@@ -673,8 +771,11 @@ class HostAutoOfferIntegration:
                 if order_id in deferred_fresh:
                     continue
                 result, current = self._recover_persisted_delivery(stored)
-                if result is AutoOfferResult.BLOCKED:
-                    return AutoOfferResult.BLOCKED
+                if result in {
+                    AutoOfferResult.BLOCKED,
+                    AutoOfferResult.RESULT_UNKNOWN,
+                }:
+                    return result
                 if current.snapshot.delivery_status is DeliveryStatus.RECEIVED:
                     purchase = host_pending.get(order_id)
                     if purchase is None:

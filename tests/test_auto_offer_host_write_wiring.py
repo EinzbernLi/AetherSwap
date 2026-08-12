@@ -19,6 +19,7 @@ from app.services.buff_client import BuffClient
 ACCOUNT_ID = "account-1"
 STEAM_ID = "76561198000000001"
 COOKIE = f"steamLoginSecure={STEAM_ID}%7C%7Ctoken"
+IDENTITY_SECRET = "eHh4eHh4eHh4eHh4eHh4eHh4eHg="
 
 
 def _delivery(
@@ -99,7 +100,11 @@ def _patch_identity(monkeypatch) -> None:
     monkeypatch.setattr(
         host_integration,
         "get_steam_credentials",
-        lambda: {"steam_id": STEAM_ID, "cookies": COOKIE},
+        lambda: {
+            "steam_id": STEAM_ID,
+            "cookies": COOKIE,
+            "identity_secret": IDENTITY_SECRET,
+        },
     )
 
 
@@ -505,13 +510,97 @@ def test_execution_time_steam_identity_is_rechecked(monkeypatch):
         lambda: {
             "steam_id": "76561198000000002",
             "cookies": COOKIE,
+            "identity_secret": IDENTITY_SECRET,
         },
     )
     with pytest.raises(host_integration.HostAutoOfferIntegrationError):
         host_integration._steam_cookie_for_expected(STEAM_ID)
 
 
-def test_active_builder_wires_one_write_enabled_coordinator_without_platform_io(
+def test_missing_confirmation_identity_secret_fails_before_session_or_platform_construction(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        host_integration,
+        "get_steam_credentials",
+        lambda: {"steam_id": STEAM_ID, "cookies": COOKIE},
+    )
+    monkeypatch.setattr(
+        host_integration.requests,
+        "Session",
+        lambda: (_ for _ in ()).throw(AssertionError("session constructed")),
+    )
+
+    with pytest.raises(
+        host_integration.HostAutoOfferIntegrationError,
+        match="steam_identity_secret_required",
+    ):
+        host_integration._build_active_host_auto_offer_bridge(
+            buff_client=object(),
+            account_id=ACCOUNT_ID,
+            account_steam_id=STEAM_ID,
+            store_path=tmp_path / "auto_offer.db",
+        )
+
+
+def test_malformed_confirmation_identity_secret_fails_closed_without_request(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeSession:
+        verify = True
+
+        def close(self):
+            calls.append(("session_close",))
+
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("GET executed")
+
+        def post(self, *_args, **_kwargs):
+            raise AssertionError("POST executed")
+
+    class FakeStore:
+        def __init__(self, _path):
+            calls.append(("store",))
+
+        def initialize(self):
+            calls.append(("store_initialize",))
+
+        def close(self):
+            calls.append(("store_close",))
+
+    class FakeReader:
+        bound_account_steam_id = STEAM_ID
+
+        def __init__(self, *_args, **_kwargs):
+            calls.append(("reader",))
+
+    monkeypatch.setattr(
+        host_integration,
+        "get_steam_credentials",
+        lambda: {
+            "steam_id": STEAM_ID,
+            "cookies": COOKIE,
+            "identity_secret": "not-base64",
+        },
+    )
+    monkeypatch.setattr(host_integration.requests, "Session", FakeSession)
+    monkeypatch.setattr(host_integration, "AutoOfferStore", FakeStore)
+    monkeypatch.setattr(host_integration, "SteamTradeOfferHttpReader", FakeReader)
+    monkeypatch.setattr(host_integration, "SteamCompletedTradeHttpReader", FakeReader)
+
+    with pytest.raises(
+        host_integration.HostAutoOfferIntegrationError,
+        match="auto_offer_bridge_build_failed",
+    ) as exc_info:
+        host_integration._build_active_host_auto_offer_bridge(
+            buff_client=object(),
+            account_id=ACCOUNT_ID,
+            account_steam_id=STEAM_ID,
+            store_path=tmp_path / "auto_offer.db",
+        )
+    assert "not-base64" not in repr(exc_info.value)
+    assert all(call[0] not in {"get", "post"} for call in calls)
+
+
+def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     monkeypatch, tmp_path
 ):
     calls = []
@@ -538,6 +627,23 @@ def test_active_builder_wires_one_write_enabled_coordinator_without_platform_io(
         def __init__(self, *_args, **_kwargs):
             calls.append(("reader",))
 
+    class FakeConfirmationTransport:
+        bound_account_steam_id = STEAM_ID
+
+        def __init__(self, cookie, identity_secret, *, session, timeout):
+            calls.append(
+                (
+                    "confirmation_transport",
+                    cookie,
+                    identity_secret,
+                    session,
+                    timeout,
+                )
+            )
+
+        def confirm(self, *_args, **_kwargs):
+            raise AssertionError("builder performed confirmation execution")
+
     class FakeAdapter:
         def __init__(self, *_args, **_kwargs):
             calls.append(("adapter",))
@@ -545,6 +651,10 @@ def test_active_builder_wires_one_write_enabled_coordinator_without_platform_io(
     class FakeSendAdapter:
         def __init__(self, transport, **kwargs):
             calls.append(("send_adapter", transport, kwargs))
+
+    class FakeConfirmationAdapter:
+        def __init__(self, transport, **kwargs):
+            calls.append(("confirmation_adapter", transport, kwargs))
 
     class FakeCoordinator:
         def __init__(self, store, adapters, **kwargs):
@@ -562,10 +672,20 @@ def test_active_builder_wires_one_write_enabled_coordinator_without_platform_io(
     monkeypatch.setattr(host_integration, "AutoOfferStore", FakeStore)
     monkeypatch.setattr(host_integration, "SteamTradeOfferHttpReader", FakeReader)
     monkeypatch.setattr(host_integration, "SteamCompletedTradeHttpReader", FakeReader)
+    monkeypatch.setattr(
+        host_integration,
+        "SteamTradeOfferConfirmationTransport",
+        FakeConfirmationTransport,
+    )
     monkeypatch.setattr(host_integration, "BuffReadOnlyAdapter", FakeAdapter)
     monkeypatch.setattr(host_integration, "SteamTradeOfferReadOnlyAdapter", FakeAdapter)
     monkeypatch.setattr(host_integration, "SteamCompletedTradeReadOnlyAdapter", FakeAdapter)
     monkeypatch.setattr(host_integration, "BuffBuyerSendOfferAdapter", FakeSendAdapter)
+    monkeypatch.setattr(
+        host_integration,
+        "SteamTradeOfferConfirmationAdapter",
+        FakeConfirmationAdapter,
+    )
     monkeypatch.setattr(host_integration, "DeliveryCoordinator", FakeCoordinator)
 
     client = FakeClient()
@@ -586,9 +706,27 @@ def test_active_builder_wires_one_write_enabled_coordinator_without_platform_io(
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
         PlatformCapability.SEND_OFFER,
+        PlatformCapability.CONFIRM_OFFER,
     }
     assert kwargs["allow_writes"] is True
+    assert kwargs["allow_confirmation_writes"] is True
+
     send_calls = [call for call in calls if call[0] == "send_adapter"]
     assert len(send_calls) == 1
     assert isinstance(send_calls[0][1], host_integration._BuffClientBuyerSendTransport)
+
+    transport_calls = [call for call in calls if call[0] == "confirmation_transport"]
+    assert len(transport_calls) == 1
+    assert transport_calls[0][1] == COOKIE
+    assert transport_calls[0][2] == IDENTITY_SECRET
+    assert transport_calls[0][4] == (
+        host_integration._TIMEOUT_SECONDS,
+        host_integration._TIMEOUT_SECONDS,
+    )
+    confirmation_calls = [call for call in calls if call[0] == "confirmation_adapter"]
+    assert len(confirmation_calls) == 1
+    assert confirmation_calls[0][2] == {
+        "account_id": ACCOUNT_ID,
+        "recipient_steam_id": STEAM_ID,
+    }
     bridge.close()

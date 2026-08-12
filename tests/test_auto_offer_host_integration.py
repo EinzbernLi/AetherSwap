@@ -8,6 +8,7 @@ import pytest
 
 import app.auto_offer.host_integration as host_integration
 import app.pipeline as pipeline
+from app.auto_offer.adapters import PlatformResultStatus
 from app.auto_offer.contracts import (
     AutoOfferResult,
     DeliveryMode,
@@ -157,6 +158,56 @@ class RecoveryBridge(FakeBridge):
             after=after,
             persisted=after != delivery,
             decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
+
+class ConfirmationBridge(FakeBridge):
+    def __init__(self, initial: StoredDelivery, status: PlatformResultStatus):
+        super().__init__((initial,))
+        self.confirmation_status = status
+
+    def step(self, delivery):
+        order_id = delivery.snapshot.buff_order_id
+        status = delivery.snapshot.delivery_status
+        self.steps.append((order_id, status))
+        if status is not DeliveryStatus.OFFER_CONFIRMATION_REQUIRED:
+            return SimpleNamespace(
+                after=delivery,
+                persisted=False,
+                decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+            )
+
+        attempted = StoredDelivery(
+            replace(
+                delivery.snapshot,
+                delivery_status=DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+            ),
+            delivery.revision + 1,
+        )
+        if self.confirmation_status is PlatformResultStatus.SUCCESS:
+            after = StoredDelivery(
+                replace(
+                    attempted.snapshot,
+                    delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+                ),
+                attempted.revision + 1,
+            )
+        elif self.confirmation_status is PlatformResultStatus.RESULT_UNKNOWN:
+            after = StoredDelivery(
+                replace(
+                    attempted.snapshot,
+                    delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+                    delivery_error="write_result_unknown",
+                ),
+                attempted.revision + 1,
+            )
+        else:
+            after = attempted
+        self.current[order_id] = after
+        return SimpleNamespace(
+            attempted=attempted,
+            platform_result=SimpleNamespace(status=self.confirmation_status),
+            after=after,
         )
 
 
@@ -417,6 +468,66 @@ def test_persisted_no_progress_read_stops_after_one_step(monkeypatch):
 
     assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.WAITING
     assert bridge.steps == [("order-1", DeliveryStatus.AWAITING_OFFER)]
+
+
+def test_persisted_confirmation_success_stops_current_gate_at_confirmed(monkeypatch):
+    _patch_identity(monkeypatch)
+    required = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = ConfirmationBridge(required, PlatformResultStatus.SUCCESS)
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.WAITING
+    assert bridge.steps == [("order-1", DeliveryStatus.OFFER_CONFIRMATION_REQUIRED)]
+    assert bridge.current["order-1"].snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+
+
+def test_persisted_confirmation_unknown_never_reconfirms_and_later_uses_read_path(monkeypatch):
+    _patch_identity(monkeypatch)
+    required = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = ConfirmationBridge(required, PlatformResultStatus.RESULT_UNKNOWN)
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.RESULT_UNKNOWN
+    assert bridge.steps == [("order-1", DeliveryStatus.OFFER_CONFIRMATION_REQUIRED)]
+    assert bridge.current["order-1"].snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+
+    assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.WAITING
+    assert bridge.steps == [
+        ("order-1", DeliveryStatus.OFFER_CONFIRMATION_REQUIRED),
+        ("order-1", DeliveryStatus.RESULT_UNKNOWN),
+    ]
+
+
+def test_persisted_confirmation_known_failure_is_not_retried(monkeypatch):
+    _patch_identity(monkeypatch)
+    required = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = ConfirmationBridge(required, PlatformResultStatus.FAILURE)
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.BLOCKED
+    assert bridge.steps == [("order-1", DeliveryStatus.OFFER_CONFIRMATION_REQUIRED)]
+    assert bridge.current["order-1"].snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
+
+    assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.WAITING
+    assert bridge.steps == [
+        ("order-1", DeliveryStatus.OFFER_CONFIRMATION_REQUIRED),
+        ("order-1", DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED),
+    ]
 
 
 def test_bounded_adjacent_reads_reach_received_then_write_exact_host_receipt(monkeypatch):
@@ -820,7 +931,7 @@ def test_enabled_receive_worker_skips_legacy_transaction(monkeypatch):
     assert sleep_calls == [30, 30]
 
 
-def test_task032_runtime_markers_remain_confined_to_existing_host_seam():
+def test_task034_runtime_markers_remain_confined_to_existing_host_seam():
     untouched_host_files = [
         Path("app/config_schema.py"),
         Path("app/services/workers.py"),
@@ -828,6 +939,7 @@ def test_task032_runtime_markers_remain_confined_to_existing_host_seam():
     forbidden = (
         "buyer_send_offer",
         "SEND_OFFER",
+        "CONFIRM_OFFER",
         "ACCEPT_OFFER",
         ".step(",
         "accept_steam_trade_offer",
@@ -838,13 +950,15 @@ def test_task032_runtime_markers_remain_confined_to_existing_host_seam():
             assert marker not in source, f"{marker} found in {path}"
 
     host_source = Path("app/auto_offer/host_integration.py").read_text(encoding="utf-8")
+    assert "SteamTradeOfferConfirmationAdapter" in host_source
+    assert "SteamTradeOfferConfirmationTransport" in host_source
     for marker in (
         "DeliveryExecutor",
         "threading.Thread",
         "time.sleep(",
-        "platform_confirmation",
-        "steam_confirmation_transport",
         "accept_all",
+        "multiajaxop",
+        "app.steam_confirm",
         "_make_request(",
         ".execute(",
     ):
