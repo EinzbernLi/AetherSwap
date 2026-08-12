@@ -37,4 +37,4 @@ jobs:
           python .github/scripts/check_pytest_baseline.py \
             --junit pytest.xml \
             --pytest-status "$test_status" \
-            --minimum-tests 447
+            --minimum-tests 1438
