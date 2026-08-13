@@ -16,7 +16,12 @@ from app.config_loader import (
     update_app_config_validated,
 )
 from app.config_schema import DEFAULTS, _validate_ranges, merge, validate_and_fill
-from app.auto_offer.contracts import result_blocks_next_purchase
+from app.auto_offer.canary_authority import (
+    CanaryAuthorityError,
+    canary_metadata_present,
+    external_write_guard,
+)
+from app.auto_offer.contracts import AutoOfferResult, result_blocks_next_purchase
 from app.auto_offer.host_integration import (
     HostAutoOfferIntegration,
     build_host_auto_offer_integration,
@@ -183,6 +188,14 @@ def _process_deals_for_target_impl(
         if auto_offer_integration is not None:
             host_purchases = ctx.state.get_purchases()
             result = auto_offer_integration.next_purchase_result(host_purchases)
+            if getattr(auto_offer_integration, "is_canary", False) and result is AutoOfferResult.COMPLETE:
+                ctx.log(
+                    "Auto Offer live-canary target complete; pipeline stopped before any next purchase",
+                    "info",
+                    category="buff",
+                )
+                ctx.set_status("stopped", "AUTO_OFFER_CANARY_COMPLETE")
+                return acc, bought, True
             if result_blocks_next_purchase(result):
                 ctx.log(
                     f"Auto Offer gate blocked next purchase: {result.value}",
@@ -224,15 +237,24 @@ def _process_deals_for_target_impl(
             }
             if is_time_allowed is not None:
                 checkout_kwargs["is_time_allowed"] = time_window_is_open
-            paid = lock_and_confirm_payment(
-                buyer, chosen, purchase_cfg, target, acc,
-                ctx.state.set_pending_payment,
-                ctx.state.wait_payment_confirm,
-                ctx.state.confirm_payment,
-                ctx.state.is_stop_requested,
-                append_purchase,
-                **checkout_kwargs,
+            with external_write_guard("buff_purchase"):
+                paid = lock_and_confirm_payment(
+                    buyer, chosen, purchase_cfg, target, acc,
+                    ctx.state.set_pending_payment,
+                    ctx.state.wait_payment_confirm,
+                    ctx.state.confirm_payment,
+                    ctx.state.is_stop_requested,
+                    append_purchase,
+                    **checkout_kwargs,
+                )
+        except CanaryAuthorityError:
+            ctx.log(
+                "Canary authority fenced BUFF purchase before payment call",
+                "error",
+                category="buff",
             )
+            ctx.set_status("error", "CANARY_WRITE_FENCED")
+            return acc, bought, True
         except Exception as exc:
             committed_amount = float(
                 getattr(exc, "committed_amount", 0.0) or 0.0
@@ -275,7 +297,6 @@ def _process_deals_for_target_impl(
         if paid is TIME_WINDOW_CLOSED:
             ctx.log("发送购买请求前时间窗已关闭，本件未下单", "info", category="pipeline")
             return acc, bought, TIME_WINDOW_CLOSED
-
         if paid is TARGET_REACHED:
             ctx.log("累计已达/超过目标，结束购买", "info", category="buff")
             acc = target
@@ -769,6 +790,17 @@ def get_pipeline_start_blocker() -> dict:
         return {
             "code": "PIPELINE_MAINTENANCE_ACTIVE",
             "message": "配置或数据维护正在进行，暂不能启动流水线",
+        }
+    try:
+        if canary_metadata_present():
+            return {
+                "code": "CANARY_AUTHORITY_ACTIVE",
+                "message": "单订单 canary authority 已激活或待人工清理，普通流水线禁止启动",
+            }
+    except CanaryAuthorityError:
+        return {
+            "code": "CANARY_AUTHORITY_FENCED",
+            "message": "无法安全证明 canary authority 已解除，普通流水线禁止启动",
         }
     from app.services.buff_auth import get_buff_auth_lock
 

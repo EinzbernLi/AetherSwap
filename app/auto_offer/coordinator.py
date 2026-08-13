@@ -28,6 +28,7 @@ from .adapters import (
     PlatformResultStatus,
     SendOfferEvidence,
 )
+from .canary_authority import CanaryAuthorityError
 from .contracts import (
     DeliveryContractError,
     DeliveryMode,
@@ -435,6 +436,7 @@ class DeliveryCoordinator:
         timeout_seconds: float,
         allow_writes: bool = False,
         allow_confirmation_writes: bool = False,
+        write_guard=None,
         clock=None,
     ) -> None:
         _validate_store(store)
@@ -445,6 +447,8 @@ class DeliveryCoordinator:
             raise ReadOnlyCoordinatorError("invalid_allow_confirmation_writes")
         if allow_confirmation_writes and not allow_writes:
             raise ReadOnlyCoordinatorError("confirmation_writes_require_allow_writes")
+        if write_guard is not None and not callable(write_guard):
+            raise ReadOnlyCoordinatorError("invalid_write_guard")
         actual_clock = time.time if clock is None else clock
         _validate_clock(actual_clock)
         if not isinstance(adapters, Mapping):
@@ -477,6 +481,7 @@ class DeliveryCoordinator:
         self._timeout_seconds = timeout_seconds
         self._allow_writes = allow_writes
         self._allow_confirmation_writes = allow_confirmation_writes
+        self._write_guard = write_guard
         self._clock = actual_clock
 
     def _read_current(self, delivery: StoredDelivery) -> None:
@@ -526,6 +531,21 @@ class DeliveryCoordinator:
         adapter: object,
         request: PlatformRequest,
     ) -> PlatformResult:
+        if request.capability in _WRITE_CAPABILITIES and self._write_guard is not None:
+            try:
+                guard = self._write_guard(request)
+                with guard:
+                    try:
+                        raw_result = adapter.execute(request)
+                    except Exception as exc:
+                        return _exception_result(request, exc)
+            except CanaryAuthorityError as exc:
+                raise ReadOnlyCoordinatorBlockedError("canary_write_blocked") from exc
+            except ReadOnlyCoordinatorError:
+                raise
+            except Exception as exc:
+                raise ReadOnlyCoordinatorBlockedError("write_guard_failed") from exc
+            return _normalize_result(request, raw_result)
         try:
             raw_result = adapter.execute(request)
         except Exception as exc:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.accounts import get_current_account
+from app.auto_offer.canary_authority import CanaryAuthorityError, external_write_guard
 from app.config_loader import get_steam_credentials, load_app_config_validated
 from app.config_schema import DEFAULTS, merge
 from app.inventory_cs2 import scan_cs2_inventory
@@ -510,13 +511,14 @@ def _submit_listings(
         ctx.log(f"[出售] 上架请求 {name} assetid={aid} 价格={list_price:.2f} ({reason})", "info", category="steam")
 
         def _do_list():
-            return list_item(
-                session, session_id_effective,
-                int(it.get("appid", 730)),
-                str(it.get("contextid") or "2"),
-                str(it.get("assetid", "")),
-                price_cents,
-            )
+            with external_write_guard("sell_listing"):
+                return list_item(
+                    session, session_id_effective,
+                    int(it.get("appid", 730)),
+                    str(it.get("contextid") or "2"),
+                    str(it.get("assetid", "")),
+                    price_cents,
+                )
 
         try:
             out = _do_list()
@@ -564,6 +566,13 @@ def _submit_listings(
                 else type(out).__name__
             )
             ctx.log(f"[出售] 上架失败 assetid={aid} {name}: {msg or response_preview}", "warn", category="steam")
+        except CanaryAuthorityError:
+            ctx.log(
+                "[出售] Canary authority 已激活，上架写入被阻止",
+                "warn",
+                category="steam",
+            )
+            return listed
         except Exception as ex:
             error_detail = _listing_response_body_preview(ex)
             ctx.log(f"[出售] 上架时发生未捕获异常 assetid={aid} {name}: {type(ex).__name__} - {error_detail}", "error", category="steam")

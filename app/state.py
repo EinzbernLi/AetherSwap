@@ -4,6 +4,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque, List, Optional
+from app.auto_offer.canary_authority import external_write_guard
 from app.database import (
     db_append_purchase,
     db_append_sale,
@@ -60,38 +61,54 @@ class State:
         self._next_progress_item = ""
 
     def append_purchase(self, p: dict) -> None:
-        db_append_purchase(p)
+        with external_write_guard("host_transaction_mutation"):
+            db_append_purchase(p)
     def get_purchases(self) -> list:
         return db_get_purchases()
     def append_sale(self, s: dict) -> None:
-        db_append_sale(s)
+        with external_write_guard("host_transaction_mutation"):
+            db_append_sale(s)
     def get_sales(self) -> list:
         return db_get_sales()
     def clear_transactions(self) -> None:
-        db_clear_transactions()
+        with external_write_guard("host_transaction_mutation"):
+            db_clear_transactions()
     def reload_transactions(self) -> None:
         pass  # Replaced by direct SQLite queries
     def replace_transactions(self, purchases: List[dict], sales: List[dict]) -> None:
-        db_replace_transactions(purchases, sales)
+        with external_write_guard("host_transaction_mutation"):
+            db_replace_transactions(purchases, sales)
     def delete_purchase(self, idx: int) -> bool:
-        return db_delete_purchase(idx)
+        with external_write_guard("host_transaction_mutation"):
+            return db_delete_purchase(idx)
     def delete_sale(self, idx: int) -> bool:
-        return db_delete_sale(idx)
+        with external_write_guard("host_transaction_mutation"):
+            return db_delete_sale(idx)
     def update_purchase(self, idx: int, data: dict) -> bool:
-        return db_update_purchase(idx, data)
+        with external_write_guard("host_transaction_mutation"):
+            return db_update_purchase(idx, data)
     def update_purchase_by_id(self, db_id: int, data: dict) -> bool:
-        return db_update_purchase_by_id(db_id, data)
+        with external_write_guard("host_transaction_mutation"):
+            return db_update_purchase_by_id(db_id, data)
     def complete_purchase_receipt_by_id(
         self,
         db_id: int,
         buff_order_id: str,
         assetid: str,
     ) -> bool:
-        return db_complete_purchase_receipt_by_id(db_id, buff_order_id, assetid)
+        with external_write_guard(
+            "host_receipt",
+            buff_order_id=buff_order_id,
+            host_db_id=db_id,
+            assetid=assetid,
+        ):
+            return db_complete_purchase_receipt_by_id(db_id, buff_order_id, assetid)
     def delete_purchase_by_id(self, db_id: int) -> bool:
-        return db_delete_purchase_by_id(db_id)
+        with external_write_guard("host_transaction_mutation"):
+            return db_delete_purchase_by_id(db_id)
     def update_sale(self, idx: int, data: dict) -> bool:
-        return db_update_sale(idx, data)
+        with external_write_guard("host_transaction_mutation"):
+            return db_update_sale(idx, data)
     def set_status(self, s: str, step: str = "", progress_total: int = 0, progress_done: int = 0, progress_item: str = "", next_progress_item: str = "") -> None:
         with self._lock:
             self._status = s

@@ -3,18 +3,26 @@ import html
 import json
 import re
 import time
+
 import requests
 import urllib3
 from bs4 import BeautifulSoup
+
+from app.auto_offer.canary_authority import CanaryWriteBlockedError, external_write_guard
 from steam.session import parse_cookies
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
 def _build_cookies(cookies_raw: str) -> dict:
     """从完整 cookie 字符串构建 cookies dict，并确保必要字段存在。"""
     cookies = parse_cookies(cookies_raw)
     cookies.setdefault("birthtime", "283993201")
     cookies.setdefault("wants_mature_content", "1")
     return cookies
+
+
 def get_friend_list(cookies_raw: str, my_steamid: str) -> list:
     url = f"https://steamcommunity.com/profiles/{my_steamid}/friends/"
     cookies = _build_cookies(cookies_raw)
@@ -62,52 +70,22 @@ def get_friend_list(cookies_raw: str, my_steamid: str) -> list:
         avatar = avatar_tag["src"] if avatar_tag else ""
         friends.append({"steamid": fid, "name": name, "avatar": avatar})
     return friends
+
+
 _CURRENCY_MAP = {
-    1:  ("USD", "$"),
-    2:  ("GBP", "£"),
-    3:  ("EUR", "€"),
-    5:  ("RUB", "₽"),
-    6:  ("PLN", "zł"),
-    7:  ("BRL", "R$"),
-    8:  ("JPY", "¥"),
-    9:  ("NOK", "kr"),
-    10: ("IDR", "Rp"),
-    11: ("MYR", "RM"),
-    12: ("PHP", "₱"),
-    13: ("SGD", "S$"),
-    14: ("THB", "฿"),
-    15: ("VND", "₫"),
-    16: ("KRW", "₩"),
-    17: ("TRY", "₺"),
-    18: ("UAH", "₴"),
-    19: ("MXN", "Mex$"),
-    20: ("CAD", "C$"),
-    21: ("AUD", "A$"),
-    22: ("NZD", "NZ$"),
-    23: ("CNY", "¥"),    
-    24: ("INR", "₹"),
-    25: ("CLP", "CLP$"),
-    26: ("PEN", "S/."),
-    27: ("COP", "COL$"),
-    28: ("ZAR", "R"),
-    29: ("HKD", "HK$"),
-    30: ("TWD", "NT$"),
-    31: ("SAR", "SR"),
-    32: ("AED", "AED"),
-    34: ("ARS", "ARS$"),
-    35: ("ILS", "₪"),
-    37: ("KZT", "₸"),
-    38: ("KWD", "KD"),
-    39: ("QAR", "QR"),
+    1: ("USD", "$"), 2: ("GBP", "£"), 3: ("EUR", "€"), 5: ("RUB", "₽"),
+    6: ("PLN", "zł"), 7: ("BRL", "R$"), 8: ("JPY", "¥"), 9: ("NOK", "kr"),
+    10: ("IDR", "Rp"), 11: ("MYR", "RM"), 12: ("PHP", "₱"), 13: ("SGD", "S$"),
+    14: ("THB", "฿"), 15: ("VND", "₫"), 16: ("KRW", "₩"), 17: ("TRY", "₺"),
+    18: ("UAH", "₴"), 19: ("MXN", "Mex$"), 20: ("CAD", "C$"), 21: ("AUD", "A$"),
+    22: ("NZD", "NZ$"), 23: ("CNY", "¥"), 24: ("INR", "₹"), 25: ("CLP", "CLP$"),
+    26: ("PEN", "S/."), 27: ("COP", "COL$"), 28: ("ZAR", "R"), 29: ("HKD", "HK$"),
+    30: ("TWD", "NT$"), 31: ("SAR", "SR"), 32: ("AED", "AED"), 34: ("ARS", "ARS$"),
+    35: ("ILS", "₪"), 37: ("KZT", "₸"), 38: ("KWD", "KD"), 39: ("QAR", "QR"),
 }
 _NO_DIVIDE_CURRENCIES = {8, 16, 15}
-
 _COUNTRY_CODE_KEYS = (
-    "country_code",
-    "country",
-    "store_country_code",
-    "wallet_country",
-    "user_country",
+    "country_code", "country", "store_country_code", "wallet_country", "user_country",
 )
 
 
@@ -156,7 +134,6 @@ def _extract_country_code(page_text: str, config_data: dict = None) -> str:
     code = _find_country_code(config_data or {})
     if code:
         return code
-
     for source in (page_text or "", html.unescape(page_text or "")):
         for key in _COUNTRY_CODE_KEYS:
             match = re.search(rf'"{re.escape(key)}"\s*:\s*"([A-Za-z]{{2}})"', source)
@@ -188,6 +165,8 @@ def get_base_auth_status(cookies_raw: str, *, require_country: bool = False):
         return jwt_token, country_code, config_data
     except Exception as e:
         raise RuntimeError(f"获取底层鉴权失败: {e}") from e
+
+
 def get_wallet_balance(cookies_raw: str) -> dict:
     cookies = _build_cookies(cookies_raw)
     from utils.proxy_manager import get_proxy_manager
@@ -207,10 +186,10 @@ def get_wallet_balance(cookies_raw: str) -> dict:
         if m:
             wallet = json.loads(m.group(1))
             if wallet.get("success") == 1 or "wallet_balance" in wallet:
-                balance_raw  = int(wallet.get("wallet_balance", 0))
-                delayed_raw  = int(wallet.get("wallet_delayed_balance", 0))
-                total_raw    = balance_raw + delayed_raw
-                currency_id  = int(wallet.get("wallet_currency", 0))
+                balance_raw = int(wallet.get("wallet_balance", 0))
+                delayed_raw = int(wallet.get("wallet_delayed_balance", 0))
+                total_raw = balance_raw + delayed_raw
+                currency_id = int(wallet.get("wallet_currency", 0))
                 wallet_country = _normalize_country_code(wallet.get("wallet_country"))
                 currency_info = _CURRENCY_MAP.get(currency_id)
                 if not currency_info:
@@ -244,20 +223,17 @@ def get_wallet_balance(cookies_raw: str) -> dict:
             resp = requests.get(api_url, headers=_HEADERS, proxies=proxies, verify=False, timeout=15)
             if resp.status_code == 200:
                 data = resp.json().get("response", {})
-                balance_raw  = int(data.get("balance", 0))
-                delayed_raw  = int(data.get("delayed_balance", 0))
-                total_raw    = balance_raw + delayed_raw
-                currency_id  = int(data.get("currency", 0))
+                balance_raw = int(data.get("balance", 0))
+                delayed_raw = int(data.get("delayed_balance", 0))
+                total_raw = balance_raw + delayed_raw
+                currency_id = int(data.get("currency", 0))
                 wallet_country = _normalize_country_code(
-                    data.get("country")
-                    or data.get("wallet_country")
-                    or data.get("country_code")
+                    data.get("country") or data.get("wallet_country") or data.get("country_code")
                 )
                 if currency_id > 0:
                     currency_info = _CURRENCY_MAP.get(currency_id)
                     if not currency_info:
-                        if currency_id > 0:
-                            unknown_currency_id = currency_id
+                        unknown_currency_id = currency_id
                         raise RuntimeError(f"未知 Steam 钱包币种 ID: {currency_id}")
                     code, symbol = currency_info
                     display = (
@@ -279,9 +255,13 @@ def get_wallet_balance(cookies_raw: str) -> dict:
     if unknown_currency_id is not None:
         raise RuntimeError(f"未知 Steam 钱包币种 ID: {unknown_currency_id}")
     raise RuntimeError("无法获取 Steam 钱包余额，请确认 Cookie 有效且账户已设置钱包")
+
+
 def extract_appid_from_url(url: str) -> str:
     m = re.search(r'/app/(\d+)', url)
     return m.group(1) if m else ""
+
+
 def get_all_available_editions(app_id: str, cookies_raw: str) -> list:
     url = f"https://store.steampowered.com/app/{app_id}/"
     headers = {**_HEADERS, "Accept-Language": "en-US,en;q=0.9"}
@@ -355,6 +335,8 @@ def get_all_available_editions(app_id: str, cookies_raw: str) -> list:
         return editions, game_title, og_image
     except Exception as e:
         raise RuntimeError(f"获取商品版本失败: {e}") from e
+
+
 def _encode_varint(n):
     res = bytearray()
     while n > 127:
@@ -362,6 +344,8 @@ def _encode_varint(n):
         n >>= 7
     res.append(n)
     return res
+
+
 def _build_addcart_payload(item_id: int, item_type: str) -> str:
     if item_type == "subid":
         item_msg = bytearray([0x08]) + _encode_varint(item_id)
@@ -371,6 +355,8 @@ def _build_addcart_payload(item_id: int, item_type: str) -> str:
         tail_b64 = "GjoKFnN0b3JlLnN0ZWFtcG93ZXJlZC5jb20SC2FwcGxpY2F0aW9uGgNhcHAiACoAMAA6AklOSABSAFgB"
     payload = bytearray([0x0A, 0x02, 0x49, 0x4E]) + bytearray([0x12]) + _encode_varint(len(item_msg)) + item_msg + base64.b64decode(tail_b64)
     return base64.b64encode(payload).decode('utf-8')
+
+
 def _build_modify_payload(line_item_id: int, friend_steamid64: str, country_code: str) -> str:
     account_id = int(friend_steamid64) - 76561197960265728
     payload = bytearray([0x08]) + _encode_varint(line_item_id)
@@ -380,9 +366,13 @@ def _build_modify_payload(line_item_id: int, friend_steamid64: str, country_code
     payload += bytearray([0x52]) + _encode_varint(len(friend_msg)) + friend_msg
     payload += bytearray([0x5A, 0x04, 0x08, 0x01, 0x10, 0x00])
     return base64.b64encode(payload).decode('utf-8')
+
+
 def _build_remove_payload(line_item_id: int) -> str:
     payload = bytearray([0x08]) + _encode_varint(line_item_id)
     return base64.b64encode(payload).decode('utf-8')
+
+
 def _grpc_request(jwt_token: str, endpoint: str, payload_b64: str) -> bool:
     url = f"https://api.steampowered.com/IAccountCartService/{endpoint}?access_token={jwt_token}"
     headers = {
@@ -400,7 +390,19 @@ def _grpc_request(jwt_token: str, endpoint: str, payload_b64: str) -> bool:
                 f"[gift_engine] gRPC {endpoint} attempt={attempt} proxy={'使用: ' + proxies.get('http') if proxies else '本机'}",
                 "debug", category="proxy"
             )
-            resp = requests.post(url, headers=headers, proxies=proxies, files={"input_protobuf_encoded": (None, payload_b64)}, verify=False, timeout=15)
+            try:
+                with external_write_guard("steam_gift_cart"):
+                    resp = requests.post(
+                        url,
+                        headers=headers,
+                        proxies=proxies,
+                        files={"input_protobuf_encoded": (None, payload_b64)},
+                        verify=False,
+                        timeout=15,
+                    )
+            except CanaryWriteBlockedError:
+                _log("[gift_engine] gRPC blocked by canary write fence", "warn", category="gift")
+                return False
             result = resp.headers.get('X-Eresult') == '1'
             _log(f"gRPC {endpoint} → X-Eresult={resp.headers.get('X-Eresult')} ok={result}", "debug", category="proxy")
             return result
@@ -413,6 +415,8 @@ def _grpc_request(jwt_token: str, endpoint: str, payload_b64: str) -> bool:
             if attempt == 0:
                 continue
     return False
+
+
 def _get_cart_items(jwt_token: str) -> list:
     url = f"https://api.steampowered.com/IAccountCartService/GetCart/v1?access_token={jwt_token}"
     from utils.proxy_manager import get_proxy_manager
@@ -440,29 +444,58 @@ def _get_cart_items(jwt_token: str) -> list:
             if attempt == 0:
                 continue
     return []
+
+
 def _steamid64_to_accountid(steamid64: str) -> int:
-    """将 SteamID64 转换为 AccountID（用于结账礼物参数）。"""
     try:
         return int(steamid64) - 76561197960265728
     except (ValueError, TypeError):
         return 0
+
+
 def run_gift_flow(
     cookies_raw: str,
     friend_steamid: str,
     item_id: str,
     item_type: str,
 ):
-    """
-    生成器函数，逐步执行赠礼流程，yield dict:
-      {"step": int, "total": 5, "msg": str, "ok": bool, "done": bool}
-    """
+    """Run one gift mutation sequence under one normal writer slot."""
+
+    try:
+        with external_write_guard("steam_gift_checkout"):
+            yield from _run_gift_flow_unfenced(
+                cookies_raw,
+                friend_steamid,
+                item_id,
+                item_type,
+            )
+    except CanaryWriteBlockedError:
+        yield {
+            "step": 0,
+            "total": 5,
+            "msg": "canary_write_fenced",
+            "ok": False,
+            "done": True,
+        }
+
+
+def _run_gift_flow_unfenced(
+    cookies_raw: str,
+    friend_steamid: str,
+    item_id: str,
+    item_type: str,
+):
     total = 5
+
     def _step(n, msg):
         return {"step": n, "total": total, "msg": msg, "ok": True, "done": False}
+
     def _fail(n, msg):
         return {"step": n, "total": total, "msg": msg, "ok": False, "done": True}
+
     def _success(msg):
         return {"step": total, "total": total, "msg": msg, "ok": True, "done": True}
+
     yield _step(0, "Init Auth Token...")
     try:
         jwt_token, country_code, _ = get_base_auth_status(cookies_raw)
@@ -516,6 +549,8 @@ def run_gift_flow(
         yield _success("Success: Gift sent.")
     else:
         yield _fail(5, "结账失败，可能余额不足或被风控拦截")
+
+
 def _do_checkout(cookies_raw: str, country_code: str, giftee_account_id: int = 0) -> bool:
     cookies = _build_cookies(cookies_raw)
     session_id = cookies.get("sessionid", "")
@@ -545,25 +580,45 @@ def _do_checkout(cookies_raw: str, country_code: str, giftee_account_id: int = 0
                 f"[gift_engine] checkout inittransaction attempt={attempt} proxy={'使用: ' + proxies.get('http') if proxies else '本机'}",
                 "debug", category="proxy"
             )
-            init_res = requests.post(
-                "https://checkout.steampowered.com/checkout/inittransaction/",
-                data=init_payload, headers=headers, cookies=cookies, proxies=proxies, verify=False, timeout=15
-            )
+            try:
+                with external_write_guard("steam_gift_checkout"):
+                    init_res = requests.post(
+                        "https://checkout.steampowered.com/checkout/inittransaction/",
+                        data=init_payload,
+                        headers=headers,
+                        cookies=cookies,
+                        proxies=proxies,
+                        verify=False,
+                        timeout=15,
+                    )
+            except CanaryWriteBlockedError:
+                _log("[gift_engine] checkout blocked by canary write fence", "warn", category="gift")
+                return False
             init_data = init_res.json()
             _log(f"inittransaction → success={init_data.get('success')} transid={init_data.get('transid')}", "debug", category="proxy")
             if init_data.get("success") != 1:
                 if attempt == 0:
-                    continue  
+                    continue
                 return False
             transid = init_data.get("transid")
-            fin_res = requests.post(
-                "https://checkout.steampowered.com/checkout/finalizetransaction/",
-                data={
-                    "transid": transid, "CardCVV2": "",
-                    "browserInfo": '{"language":"zh-CN","javaEnabled":"false","colorDepth":24,"screenHeight":1440,"screenWidth":2560}',
-                },
-                headers=headers, cookies=cookies, proxies=proxies, verify=False, timeout=20
-            )
+            try:
+                with external_write_guard("steam_gift_checkout"):
+                    fin_res = requests.post(
+                        "https://checkout.steampowered.com/checkout/finalizetransaction/",
+                        data={
+                            "transid": transid,
+                            "CardCVV2": "",
+                            "browserInfo": '{"language":"zh-CN","javaEnabled":"false","colorDepth":24,"screenHeight":1440,"screenWidth":2560}',
+                        },
+                        headers=headers,
+                        cookies=cookies,
+                        proxies=proxies,
+                        verify=False,
+                        timeout=20,
+                    )
+            except CanaryWriteBlockedError:
+                _log("[gift_engine] finalize blocked by canary write fence", "warn", category="gift")
+                return False
             fin_data = fin_res.json()
             _log(f"finalizetransaction → success={fin_data.get('success')}", "debug", category="proxy")
             return fin_data.get("success") == 1

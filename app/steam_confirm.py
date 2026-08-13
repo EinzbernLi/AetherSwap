@@ -7,6 +7,9 @@ from typing import Dict, List, Tuple, Union
 import requests
 import urllib3
 import urllib.parse
+
+from app.auto_offer.canary_authority import CanaryAuthorityError, external_write_guard
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def _cookies_to_dict(cookie_str: str) -> dict:
     """将 Cookie 字符串转换为字典"""
@@ -93,7 +96,8 @@ class SteamConfirmer:
             multipart.append(("ck[]", (None, str(c.get("nonce")))))
         url = "https://steamcommunity.com/mobileconf/multiajaxop"
         try:
-            r = self.session.post(url, params=params, files=multipart, timeout=25)
+            with external_write_guard("legacy_bulk_confirm"):
+                r = self.session.post(url, params=params, files=multipart, timeout=25)
             try:
                 data = r.json()
             except (ValueError, TypeError):
@@ -101,6 +105,8 @@ class SteamConfirmer:
             if not data.get("success"):
                 return False, 0, str(data)
             return True, len(conf_list), ""
+        except CanaryAuthorityError:
+            return False, 0, "canary_write_fenced"
         except Exception as e:
             return False, 0, str(e)
 def auto_confirm_once(identity_secret: str, device_id: str, steam_id: str, cookies: Union[str, dict]) -> Tuple[bool, int, str]:
