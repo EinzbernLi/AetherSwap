@@ -109,16 +109,6 @@ _TRADEOFFER_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
     }
 )
 
-_SELLER_COUNTERPARTY_REQUIRED_TARGETS: Final[frozenset[DeliveryStatus]] = frozenset(
-    {
-        DeliveryStatus.OFFER_CONFIRMED,
-        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
-        DeliveryStatus.AWAITING_INVENTORY,
-        DeliveryStatus.OFFER_TERMINATED,
-        DeliveryStatus.RECEIVED,
-    }
-)
-
 _WRITE_ATTEMPT_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
     {
         DeliveryStatus.OFFER_ATTEMPTED,
@@ -145,7 +135,6 @@ class DeliverySnapshot:
     delivery_error: str | None
     pending_receipt: bool
     assetid: str | None
-    counterparty_steam_id: str | None = None
 
 
 def _require_enum(value: object, enum_type: type[Enum], field: str) -> None:
@@ -179,15 +168,6 @@ def _validate_snapshot_shape(snapshot: DeliverySnapshot) -> None:
         _require_id(getattr(snapshot, field), field)
     _require_id(snapshot.steam_tradeoffer_id, "steam_tradeoffer_id", optional=True)
     _require_id(snapshot.assetid, "assetid", optional=True)
-    _require_id(
-        snapshot.counterparty_steam_id,
-        "counterparty_steam_id",
-        optional=True,
-    )
-    if snapshot.counterparty_steam_id == snapshot.recipient_steam_id:
-        raise DeliveryContractError(
-            "counterparty_steam_id must differ from recipient_steam_id"
-        )
 
     if type(snapshot.pending_receipt) is not bool:
         raise DeliveryContractError("pending_receipt must be a bool")
@@ -249,8 +229,6 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
 
     if status in _PRE_BINDING_STATUSES and snapshot.steam_tradeoffer_id is not None:
         raise DeliveryContractError(f"{status.value} cannot have a trade offer ID")
-    if status in _PRE_BINDING_STATUSES and snapshot.counterparty_steam_id is not None:
-        raise DeliveryContractError(f"{status.value} cannot have a counterparty binding")
 
     if status is DeliveryStatus.OFFER_ATTEMPTED:
         if mode is not DeliveryMode.BUYER_SENDS_OFFER:
@@ -344,9 +322,6 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
             raise DeliveryContractError(
                 "buyer confirmation result_unknown requires bound offer timing"
             )
-        # Historical seller RESULT_UNKNOWN rows may be unbound. New seller
-        # ACCEPT ambiguities are tightened by the transition boundary, which
-        # requires OFFER_ACCEPT_ATTEMPTED and therefore a bound exact offer.
 
     if (
         snapshot.offer_attempted_at is not None
@@ -432,35 +407,6 @@ def _validate_tradeoffer_binding(
         raise DeliveryContractError("steam trade offer ID cannot be bound on this transition")
 
 
-def _validate_counterparty_binding(
-    current: DeliverySnapshot,
-    target: DeliverySnapshot,
-    mode: DeliveryMode | None,
-) -> None:
-    current_id = current.counterparty_steam_id
-    target_id = target.counterparty_steam_id
-    if current_id is not None:
-        if target_id != current_id:
-            raise DeliveryContractError("bound counterparty Steam ID cannot change")
-    elif target_id is not None:
-        if not (
-            mode is DeliveryMode.SELLER_SENDS_OFFER
-            and current.delivery_status is DeliveryStatus.OFFER_RECEIVED
-            and target.delivery_status is DeliveryStatus.OFFER_CONFIRMED
-        ):
-            raise DeliveryContractError(
-                "counterparty Steam ID cannot be bound on this transition"
-            )
-    if (
-        mode is DeliveryMode.SELLER_SENDS_OFFER
-        and target.delivery_status in _SELLER_COUNTERPARTY_REQUIRED_TARGETS
-        and target_id is None
-    ):
-        raise DeliveryContractError(
-            "seller delivery requires a bound counterparty Steam ID"
-        )
-
-
 def _transition_statuses(
     current: DeliveryStatus,
     target: DeliveryStatus,
@@ -472,7 +418,6 @@ def _transition_statuses(
         raise DeliveryContractError("terminal delivery status cannot transition")
     if current is target:
         raise DeliveryContractError("delivery transition must change status")
-
     if target is DeliveryStatus.RESULT_UNKNOWN:
         return
     if target in {
@@ -492,8 +437,6 @@ def _transition_statuses(
         if mode is None:
             raise DeliveryContractError("result_unknown recovery requires a delivery mode")
         _require_enum(mode, DeliveryMode, "delivery_mode")
-        if target is DeliveryStatus.OFFER_TERMINATED:
-            return
         path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
         if target not in path or target in {
             DeliveryStatus.PENDING_DIRECTION,
@@ -601,7 +544,6 @@ def validate_delivery_transition(
             raise DeliveryContractError("snapshot transitions must derive delivery mode")
         delivery_mode = target.delivery_mode or current.delivery_mode
         _validate_tradeoffer_binding(current, target, delivery_mode)
-        _validate_counterparty_binding(current, target, delivery_mode)
         _validate_snapshot_unknown_transition(current, target)
         current = current.delivery_status
         target = target.delivery_status
