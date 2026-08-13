@@ -28,9 +28,13 @@ This guarantee does **not** include another host/VM/container/OS user, an old or
 - deterministic `purchase_id = buff:<order_id>`;
 - Auto Offer account ID;
 - recipient SteamID;
+- expected Steam counterparty SteamID;
+- expected exact Trade Offer direction (`is_our_offer`);
 - expected one-element Host pending set;
 - expected Store existence/revision/status/Trade Offer binding;
 - creation time.
+
+TASK-039 raises durable authority metadata to version 3 so the exact expected counterparty and direction survive crash-stale recovery/re-arm with the rest of the immutable permit identity. Missing, malformed, self-counterparty, or non-boolean direction metadata fails closed.
 
 Permit data, generation data, durable metadata, the public authority singleton, and exact target tuples are **not execution capabilities**.
 
@@ -101,10 +105,46 @@ It fails closed unless:
 - no unrelated recoverable/nonterminal Auto Offer row exists;
 - target Host/Store identities match exactly;
 - expected Store absence or exact revision/status/binding matches;
+- exact expected Steam counterparty and expected direction are explicitly supplied and valid;
 - `unresolved_checkout is None`;
 - no pre-existing Trade Offer ambiguity exists for a first SEND.
 
 The normal Host gate is not a preflight API.
+
+## TASK-039 exact Trade Offer identity gate
+
+An exact full Steam Trade Offer ID is necessary but not sufficient to authorize mobile confirmation.
+
+For a canary Coordinator, the permit's expected counterparty and direction are passed as immutable expectations. Every successful `READ_STEAM_TRADE_OFFER` result is checked **before reconciliation planning and before any Store CAS**. The result must prove all of the following simultaneously:
+
+- requested full Trade Offer ID equals the bound Store ID;
+- authenticated Steam account equals the permit recipient/our SteamID;
+- returned `counterparty_steam_id` equals the frozen permit counterparty exactly;
+- returned `is_our_offer` equals the frozen expected direction exactly;
+- the frozen direction agrees with the persisted delivery direction;
+- historical no-outgoing-items buyer safety remains satisfied by reconciliation.
+
+A mismatch is normalized to fixed `identity_mismatch` failure evidence. Reconciliation therefore returns BLOCKED with no target and no confirmation-eligible CAS. No fuzzy/latest/creator-only/counterparty-only lookup is introduced.
+
+### Persisted confirmation-required recovery
+
+A crash may leave an exact Store row already at `OFFER_CONFIRMATION_REQUIRED`. That durable status alone is **not confirmation authority**.
+
+Before the canary Host may attempt confirmation, it must call the Coordinator's narrow `read_confirmation_state(...)`. This operation is exact-read-only and requires the same expected counterparty/direction contract.
+
+The Coordinator mints an in-process, single-use confirmation identity proof only when the fresh exact read is:
+
+- SUCCESS;
+- exact full ID/account/counterparty/direction match;
+- `CREATED_NEEDS_CONFIRMATION`;
+- zero outgoing items;
+- reconciliation result remains WAITING without a Store write.
+
+The proof is bound to purchase ID, BUFF order ID, Store revision, and full Trade Offer ID. A canary-configured direct `step()` confirmation without that proof fails before the attempted-state CAS and before the CONFIRM adapter. The proof is consumed before the confirmation attempt and is cleared by unrelated steps or failed/recovered reads. It is never serialized or persisted, so process restart always requires a new exact read.
+
+If the fresh exact read reports `ACTIVE` or `ACCEPTED`, reconciliation performs the historical read-only recovery to `OFFER_CONFIRMED` and no confirmation write occurs. Wrong/malformed identity, wrong direction, outgoing items, timeout/unknown/unproven evidence, or any other failure cannot mint the proof and therefore cannot reach CONFIRM.
+
+This mechanism adds no Store column, Host schema, durable proof state, retry loop, worker, poller, scheduler, resend, or reconfirm framework.
 
 ## Final Host TOCTOU barrier
 
@@ -138,7 +178,7 @@ Normal gift flow still holds one normal-writer slot across cart-clear/add/modify
 `DeliveryCoordinator` remains the only active Auto Offer platform-step/state-transition authority.
 
 - `AWAITING_OFFER -> OFFER_ATTEMPTED` is persisted before SEND guard/adapter;
-- `OFFER_CONFIRMATION_REQUIRED -> OFFER_CONFIRMATION_ATTEMPTED` is persisted before CONFIRM guard/adapter;
+- `OFFER_CONFIRMATION_REQUIRED -> OFFER_CONFIRMATION_ATTEMPTED` is persisted before CONFIRM guard/adapter, but canary-configured Coordinator confirmation additionally requires the single-use fresh identity proof described above;
 - persisted attempted/`RESULT_UNKNOWN` states never resend or reconfirm;
 - later recovery is exact Steam Trade Offer read only.
 
@@ -166,17 +206,23 @@ Verification is fake/injected/local-only. Required gates include:
 - exact session SEND/CONFIRM still hold Host SQLite final barrier;
 - receipt nested refinement is exact and single-use;
 - generation replay/crash-stale/atomic rotation proofs;
+- wrong exact-ID Trade Offer counterparty -> no confirmation-eligible CAS and CONFIRM **0**;
+- wrong exact direction -> no confirmation-eligible CAS and CONFIRM **0**;
+- correct identity but outgoing items -> historical safety block remains;
+- persisted `OFFER_CONFIRMATION_REQUIRED` direct confirm without fresh proof -> attempted CAS **0**, CONFIRM **0**;
+- exact `CREATED_NEEDS_CONFIRMATION` fresh read -> one proof -> one historical attempted-before-CONFIRM path;
+- exact `ACTIVE`/`ACCEPTED` fresh read -> read-only recovery and CONFIRM **0**;
+- process restart/persisted confirmation-required -> fresh exact read required again;
 - historical TASK-028/031/032/034 recovery/write regressions;
 - BUFF/receive/sell/delist/gift regressions;
 - full Auto Offer and full repository pytest;
 - baseline minimum 1438;
-- network-interdicted full suite;
+- network-interdicted full suite where feasible;
 - `pip check` and `git diff --check`;
-- fresh Luna High Max Windows exact-tree verification;
-- fresh Terra High Max adversarial review of the exact repaired canonical.
+- fresh Luna High Max Windows exact-tree verification.
 
-Only Terra `PASS_TO_PR` may unlock TASK-036 PR creation.
+TASK-039 does not itself require a separate Terra code review. After TASK-038 and TASK-039 are merged, TASK-037's full live-canary operating contract must be amended and re-reviewed by Terra High Max before any real-account preflight is even considered.
 
-The pre-existing normal-mode gift token-bearing logging LOW from Terra comment `5267532563` is explicitly outside this repair and must not be mixed into the canary authority change.
+The pre-existing normal-mode gift token-bearing logging LOW from Terra comment `5267532563` remains outside these canary isolation repairs and must not be mixed into TASK-039.
 
 **REAL-WRITE GATE remains CLOSED.**

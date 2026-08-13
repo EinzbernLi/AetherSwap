@@ -19,7 +19,7 @@ from typing import Iterator
 _AUTHORITY_DIR_NAME = ".aetherswap"
 _LOCK_FILE_NAME = "live-canary.lock"
 _METADATA_FILE_NAME = "live-canary.json"
-_METADATA_VERSION = 2
+_METADATA_VERSION = 3
 _MAX_USED_PERMIT_IDS = 128
 _PRODUCTION_HOST_DB_PATH = Path(__file__).resolve().parents[2] / "config" / "app.db"
 _ACTIVE_PHASES = frozenset({"armed", "completed"})
@@ -61,6 +61,16 @@ def _exact_text(value: object, *, field: str) -> str:
     return value
 
 
+def _exact_steam_id(value: object, *, field: str) -> str:
+    text = _exact_text(value, field=field)
+    if not text.isascii() or not text.isdecimal() or text[0] == "0":
+        raise CanaryAuthorityError(f"invalid_{field}")
+    number = int(text)
+    if number <= 0 or str(number) != text:
+        raise CanaryAuthorityError(f"invalid_{field}")
+    return text
+
+
 def _exact_positive_int(value: object, *, field: str) -> int:
     if type(value) is not int or value <= 0:
         raise CanaryAuthorityError(f"invalid_{field}")
@@ -94,6 +104,8 @@ class CanaryPermit:
     purchase_id: str
     account_id: str
     recipient_steam_id: str
+    expected_counterparty_steam_id: str
+    expected_is_our_offer: bool
     expected_host_order_ids: tuple[str, ...]
     expected_store_present: bool
     expected_store_revision: int | None
@@ -109,7 +121,15 @@ class CanaryPermit:
         if self.purchase_id != f"buff:{order_id}":
             raise CanaryAuthorityError("invalid_purchase_id")
         _exact_text(self.account_id, field="account_id")
-        _exact_text(self.recipient_steam_id, field="recipient_steam_id")
+        recipient = _exact_text(self.recipient_steam_id, field="recipient_steam_id")
+        counterparty = _exact_steam_id(
+            self.expected_counterparty_steam_id,
+            field="expected_counterparty_steam_id",
+        )
+        if counterparty == recipient:
+            raise CanaryAuthorityError("invalid_expected_counterparty_steam_id")
+        if type(self.expected_is_our_offer) is not bool:
+            raise CanaryAuthorityError("invalid_expected_is_our_offer")
         if type(self.expected_host_order_ids) is not tuple or self.expected_host_order_ids != (order_id,):
             raise CanaryAuthorityError("invalid_expected_host_order_ids")
         if type(self.expected_store_present) is not bool:
@@ -136,6 +156,8 @@ class CanaryPermit:
             "purchase_id": self.purchase_id,
             "account_id": self.account_id,
             "recipient_steam_id": self.recipient_steam_id,
+            "expected_counterparty_steam_id": self.expected_counterparty_steam_id,
+            "expected_is_our_offer": self.expected_is_our_offer,
             "expected_host_order_ids": list(self.expected_host_order_ids),
             "expected_store_present": self.expected_store_present,
             "expected_store_revision": self.expected_store_revision,
@@ -247,6 +269,8 @@ def _permit_from_record(data: dict[str, object]) -> CanaryPermit:
             purchase_id=data.get("purchase_id"),
             account_id=data.get("account_id"),
             recipient_steam_id=data.get("recipient_steam_id"),
+            expected_counterparty_steam_id=data.get("expected_counterparty_steam_id"),
+            expected_is_our_offer=data.get("expected_is_our_offer"),
             expected_host_order_ids=tuple(host_ids),
             expected_store_present=data.get("expected_store_present"),
             expected_store_revision=data.get("expected_store_revision"),

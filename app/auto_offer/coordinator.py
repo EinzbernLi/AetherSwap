@@ -27,9 +27,12 @@ from .adapters import (
     PlatformResult,
     PlatformResultStatus,
     SendOfferEvidence,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
 )
 from .canary_authority import CanaryAuthorityError
 from .contracts import (
+    AutoOfferResult,
     DeliveryContractError,
     DeliveryMode,
     DeliveryStatus,
@@ -118,6 +121,24 @@ def _validate_delivery(delivery: object) -> None:
         validate_delivery_snapshot(delivery.snapshot)
     except DeliveryContractError as exc:
         raise ReadOnlyCoordinatorError("invalid_delivery") from exc
+
+
+def _validate_trade_offer_expectations(
+    counterparty_steam_id: object,
+    is_our_offer: object,
+) -> tuple[str | None, bool | None]:
+    if counterparty_steam_id is None and is_our_offer is None:
+        return None, None
+    if (
+        type(counterparty_steam_id) is not str
+        or not counterparty_steam_id
+        or counterparty_steam_id.strip() != counterparty_steam_id
+        or any(ord(character) < 32 for character in counterparty_steam_id)
+    ):
+        raise ReadOnlyCoordinatorError("invalid_expected_trade_offer_counterparty")
+    if type(is_our_offer) is not bool:
+        raise ReadOnlyCoordinatorError("invalid_expected_trade_offer_direction")
+    return counterparty_steam_id, is_our_offer
 
 
 def _same_delivery_identity(left: StoredDelivery, right: StoredDelivery) -> bool:
@@ -437,6 +458,8 @@ class DeliveryCoordinator:
         allow_writes: bool = False,
         allow_confirmation_writes: bool = False,
         write_guard=None,
+        expected_trade_offer_counterparty_steam_id: str | None = None,
+        expected_trade_offer_is_our_offer: bool | None = None,
         clock=None,
     ) -> None:
         _validate_store(store)
@@ -449,6 +472,10 @@ class DeliveryCoordinator:
             raise ReadOnlyCoordinatorError("confirmation_writes_require_allow_writes")
         if write_guard is not None and not callable(write_guard):
             raise ReadOnlyCoordinatorError("invalid_write_guard")
+        expected_counterparty, expected_direction = _validate_trade_offer_expectations(
+            expected_trade_offer_counterparty_steam_id,
+            expected_trade_offer_is_our_offer,
+        )
         actual_clock = time.time if clock is None else clock
         _validate_clock(actual_clock)
         if not isinstance(adapters, Mapping):
@@ -482,6 +509,9 @@ class DeliveryCoordinator:
         self._allow_writes = allow_writes
         self._allow_confirmation_writes = allow_confirmation_writes
         self._write_guard = write_guard
+        self._expected_trade_offer_counterparty_steam_id = expected_counterparty
+        self._expected_trade_offer_is_our_offer = expected_direction
+        self._confirmation_identity_proof: tuple[str, str, int, str] | None = None
         self._clock = actual_clock
 
     def _read_current(self, delivery: StoredDelivery) -> None:
@@ -497,6 +527,18 @@ class DeliveryCoordinator:
             raise ReadOnlyCoordinatorError("store_read_failed") from exc
         if type(persisted) is not StoredDelivery or persisted != delivery:
             raise ReadOnlyCoordinatorConflictError("persisted_delivery_mismatch")
+
+    @staticmethod
+    def _confirmation_proof_key(delivery: StoredDelivery) -> tuple[str, str, int, str]:
+        tradeoffer_id = delivery.snapshot.steam_tradeoffer_id
+        if type(tradeoffer_id) is not str or not tradeoffer_id:
+            raise ReadOnlyCoordinatorBlockedError("confirmation_trade_offer_required")
+        return (
+            delivery.snapshot.purchase_id,
+            delivery.snapshot.buff_order_id,
+            delivery.revision,
+            tradeoffer_id,
+        )
 
     def _now(self) -> float:
         try:
@@ -551,6 +593,40 @@ class DeliveryCoordinator:
         except Exception as exc:
             return _exception_result(request, exc)
         return _normalize_result(request, raw_result)
+
+    def _guard_trade_offer_identity(
+        self,
+        delivery: StoredDelivery,
+        platform_result: PlatformResult,
+    ) -> PlatformResult:
+        expected_counterparty = self._expected_trade_offer_counterparty_steam_id
+        expected_direction = self._expected_trade_offer_is_our_offer
+        if (
+            expected_counterparty is None
+            or platform_result.request.capability
+            is not PlatformCapability.READ_STEAM_TRADE_OFFER
+            or platform_result.status is not PlatformResultStatus.SUCCESS
+        ):
+            return platform_result
+        evidence = platform_result.evidence
+        delivery_direction = (
+            delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        )
+        if (
+            type(evidence) is not SteamTradeOfferEvidence
+            or evidence.steam_tradeoffer_id
+            != platform_result.request.steam_tradeoffer_id
+            or evidence.account_steam_id != delivery.snapshot.recipient_steam_id
+            or evidence.counterparty_steam_id != expected_counterparty
+            or evidence.is_our_offer is not expected_direction
+            or expected_direction is not delivery_direction
+        ):
+            return PlatformResult(
+                request=platform_result.request,
+                status=PlatformResultStatus.FAILURE,
+                detail="identity_mismatch",
+            )
+        return platform_result
 
     def _plan(
         self,
@@ -635,6 +711,62 @@ class DeliveryCoordinator:
         )
         return self._advance(attempted, target)
 
+    def _step_read(self, delivery: StoredDelivery) -> ReadOnlyStepResult:
+        capability = _required_read_capability(delivery)
+        request = self._make_request(delivery, capability)
+        adapter = self._adapters.get(capability)
+        if adapter is None:
+            if (
+                capability is PlatformCapability.READ_OFFER_STATE
+                and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+                and delivery.snapshot.delivery_status in {
+                    DeliveryStatus.OFFER_ATTEMPTED,
+                    DeliveryStatus.RESULT_UNKNOWN,
+                }
+            ):
+                raise ReadOnlyCoordinatorBlockedError("read_step_not_available")
+            platform_result = PlatformResult(
+                request=request,
+                status=PlatformResultStatus.UNSUPPORTED,
+                detail="adapter_not_available",
+            )
+        else:
+            platform_result = self._execute(adapter, request)
+        platform_result = self._guard_trade_offer_identity(delivery, platform_result)
+        decision = self._plan(delivery, platform_result)
+        return self._persist_read(delivery, decision, platform_result)
+
+    def read_confirmation_state(self, delivery: StoredDelivery) -> ReadOnlyStepResult:
+        """Read and mint one process-local proof for the next exact confirmation."""
+        self._confirmation_identity_proof = None
+        _validate_delivery(delivery)
+        self._read_current(delivery)
+        if (
+            self._expected_trade_offer_counterparty_steam_id is None
+            or self._expected_trade_offer_is_our_offer is None
+        ):
+            raise ReadOnlyCoordinatorBlockedError("confirmation_identity_guard_required")
+        if (
+            delivery.snapshot.delivery_status
+            is not DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+            or delivery.snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
+        ):
+            raise ReadOnlyCoordinatorBlockedError("confirmation_read_not_available")
+        result = self._step_read(delivery)
+        evidence = result.platform_result.evidence
+        if (
+            result.persisted is False
+            and result.after == delivery
+            and result.decision.result is AutoOfferResult.WAITING
+            and result.platform_result.status is PlatformResultStatus.SUCCESS
+            and type(evidence) is SteamTradeOfferEvidence
+            and evidence.lifecycle
+            is SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION
+            and evidence.items_to_give == ()
+        ):
+            self._confirmation_identity_proof = self._confirmation_proof_key(delivery)
+        return result
+
     def _step_send_offer(self, delivery: StoredDelivery) -> SendOfferStepResult:
         if not self._allow_writes:
             raise ReadOnlyCoordinatorBlockedError("write_capability_required")
@@ -693,6 +825,11 @@ class DeliveryCoordinator:
     def _step_confirm_offer(self, delivery: StoredDelivery) -> ConfirmOfferStepResult:
         if not self._allow_writes or not self._allow_confirmation_writes:
             raise ReadOnlyCoordinatorBlockedError("confirmation_write_capability_required")
+        if self._expected_trade_offer_counterparty_steam_id is not None:
+            proof = self._confirmation_identity_proof
+            self._confirmation_identity_proof = None
+            if proof != self._confirmation_proof_key(delivery):
+                raise ReadOnlyCoordinatorBlockedError("confirmation_identity_proof_required")
         adapter = self._adapters.get(PlatformCapability.CONFIRM_OFFER)
         if adapter is None:
             raise ReadOnlyCoordinatorBlockedError("confirm_offer_adapter_required")
@@ -736,6 +873,7 @@ class DeliveryCoordinator:
             delivery.snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
             and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         ):
+            self._confirmation_identity_proof = None
             return self._step_send_offer(delivery)
         if (
             self._allow_confirmation_writes
@@ -744,29 +882,8 @@ class DeliveryCoordinator:
             and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         ):
             return self._step_confirm_offer(delivery)
-
-        capability = _required_read_capability(delivery)
-        request = self._make_request(delivery, capability)
-        adapter = self._adapters.get(capability)
-        if adapter is None:
-            if (
-                capability is PlatformCapability.READ_OFFER_STATE
-                and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
-                and delivery.snapshot.delivery_status in {
-                    DeliveryStatus.OFFER_ATTEMPTED,
-                    DeliveryStatus.RESULT_UNKNOWN,
-                }
-            ):
-                raise ReadOnlyCoordinatorBlockedError("read_step_not_available")
-            platform_result = PlatformResult(
-                request=request,
-                status=PlatformResultStatus.UNSUPPORTED,
-                detail="adapter_not_available",
-            )
-        else:
-            platform_result = self._execute(adapter, request)
-        decision = self._plan(delivery, platform_result)
-        return self._persist_read(delivery, decision, platform_result)
+        self._confirmation_identity_proof = None
+        return self._step_read(delivery)
 
 
 ReadOnlyDeliveryCoordinator = DeliveryCoordinator

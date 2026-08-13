@@ -18,6 +18,7 @@ from app.auto_offer.store import StoredDelivery
 
 ACCOUNT_ID = "account-1"
 STEAM_ID = "76561198000000007"
+COUNTERPARTY_STEAM_ID = "76561198000000008"
 ORDER_ID = "buff-order-7"
 PURCHASE_ID = f"buff:{ORDER_ID}"
 
@@ -31,6 +32,8 @@ def _permit(*, permit_id="permit-1", owner_nonce="owner-1", created_at=1.0):
         purchase_id=PURCHASE_ID,
         account_id=ACCOUNT_ID,
         recipient_steam_id=STEAM_ID,
+        expected_counterparty_steam_id=COUNTERPARTY_STEAM_ID,
+        expected_is_our_offer=True,
         expected_host_order_ids=(ORDER_ID,),
         expected_store_present=False,
         expected_store_revision=None,
