@@ -31,10 +31,21 @@ def test_disabled_without_active_ownership_is_off():
     )
 
 
-def test_enabled_request_is_on_when_no_transition_block_exists():
+def test_enabled_request_is_enabling_until_preflight_is_positive():
+    state = resolve_runtime_mode(
+        requested_enabled=True,
+        active_delivery_count=0,
+    )
+    assert state.mode is AutoOfferRuntimeMode.ENABLING
+    assert state.requested_enabled is True
+    assert state.reason is None
+
+
+def test_enabled_request_is_on_only_after_preflight_passes():
     state = resolve_runtime_mode(
         requested_enabled=True,
         active_delivery_count=3,
+        enable_preflight_passed=True,
     )
     assert state.mode is AutoOfferRuntimeMode.ON
     assert state.requested_enabled is True
@@ -70,6 +81,11 @@ def test_transition_block_reason_is_explicit_and_does_not_change_request():
         {"requested_enabled": 1, "active_delivery_count": 0},
         {"requested_enabled": False, "active_delivery_count": -1},
         {"requested_enabled": False, "active_delivery_count": True},
+        {
+            "requested_enabled": True,
+            "active_delivery_count": 0,
+            "enable_preflight_passed": 1,
+        },
         {
             "requested_enabled": False,
             "active_delivery_count": 0,
