@@ -504,11 +504,16 @@ def validate_delivery_transition(
 
 
 def result_blocks_next_purchase(result: AutoOfferResult) -> bool:
-    """Return whether an Auto Offer result must stop the next purchase."""
+    """Return whether Auto Offer must globally stop a later purchase.
+
+    Ordinary delivery waiting is asynchronous Host work and is therefore safe
+    to coexist with later committed purchases.  Only an irreversible-write
+    ambiguity or an explicit invariant failure is a global purchase fence.
+    Canary serialization is enforced separately by the canary host gate.
+    """
     if type(result) is not AutoOfferResult:
         raise DeliveryContractError("result must be an AutoOfferResult")
     return result in {
-        AutoOfferResult.WAITING,
         AutoOfferResult.RESULT_UNKNOWN,
         AutoOfferResult.BLOCKED,
     }
