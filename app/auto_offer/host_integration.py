@@ -17,7 +17,14 @@ from pathlib import Path
 import requests
 
 from app.accounts import get_account, get_current_id
-from app.auto_offer.adapters import PlatformCapability, PlatformRequest, PlatformResultStatus
+from app.auto_offer.adapters import (
+    PlatformCapability,
+    PlatformRequest,
+    PlatformResult,
+    PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+)
 from app.auto_offer.canary_authority import (
     CanaryAuthority,
     CanaryAuthorityError,
@@ -298,15 +305,17 @@ def preflight_canary_permit(
     target_buff_order_id: str,
     account_id: str,
     recipient_steam_id: str,
+    expected_counterparty_steam_id: str,
+    expected_is_our_offer: bool,
     permit_id: str,
     owner_nonce: str,
     created_at: float,
 ) -> CanaryPermit:
     """Build one permit from supplied local snapshots without performing a write.
 
-    This function deliberately receives snapshots instead of a Store/session/client.
-    It cannot dispatch, CAS, purchase, confirm, receive, list, or write back a
-    receipt.  The caller must obtain the snapshots through read-only APIs.
+    This function deliberately receives detached values instead of a Store,
+    session, or platform client. It cannot dispatch, CAS, purchase, confirm,
+    receive, list, or write back a receipt.
     """
 
     if unresolved_checkout is not None:
@@ -318,6 +327,11 @@ def preflight_canary_permit(
     if type(account_id) is not str or not account_id or account_id.strip() != account_id:
         raise HostAutoOfferIntegrationError("canary_account_invalid")
     recipient = _canonical_steam_id(recipient_steam_id)
+    counterparty = _canonical_steam_id(expected_counterparty_steam_id)
+    if counterparty == recipient:
+        raise HostAutoOfferIntegrationError("canary_counterparty_invalid")
+    if type(expected_is_our_offer) is not bool:
+        raise HostAutoOfferIntegrationError("canary_direction_invalid")
 
     pending = _preflight_host_pending_by_order(host_purchases)
     if set(pending) != {order_id} or pending[order_id].get("_db_id") != db_id:
@@ -372,6 +386,8 @@ def preflight_canary_permit(
             purchase_id=f"buff:{order_id}",
             account_id=account_id,
             recipient_steam_id=recipient,
+            expected_counterparty_steam_id=counterparty,
+            expected_is_our_offer=expected_is_our_offer,
             expected_host_order_ids=(order_id,),
             expected_store_present=expected_present,
             expected_store_revision=expected_revision,
@@ -515,6 +531,13 @@ class _ActiveHostAutoOfferBridge:
         except Exception:
             raise HostAutoOfferIntegrationError("auto_offer_step_failed") from None
 
+    def read_confirmation_state(self, delivery: StoredDelivery):
+        self._require_open()
+        try:
+            return self._coordinator.read_confirmation_state(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError("confirmation_read_failed") from None
+
     def close(self) -> None:
         if self._closed:
             return
@@ -556,6 +579,7 @@ def _build_active_host_auto_offer_bridge(
     store_path: str | Path = _STORE_PATH,
     canary_authority: CanaryAuthority | None = None,
     canary_owner_session: object | None = None,
+    canary_permit: CanaryPermit | None = None,
 ) -> _ActiveHostAutoOfferBridge:
     """Build the one active read+SEND+confirmation Coordinator without I/O."""
 
@@ -566,6 +590,14 @@ def _build_active_host_auto_offer_bridge(
     authority = canary_authority or get_canary_authority()
     if type(authority) is not CanaryAuthority:
         raise HostAutoOfferIntegrationError("canary_authority_invalid")
+    if canary_permit is not None:
+        if type(canary_permit) is not CanaryPermit:
+            raise HostAutoOfferIntegrationError("canary_permit_invalid")
+        if (
+            canary_permit.account_id != account
+            or canary_permit.recipient_steam_id != recipient
+        ):
+            raise HostAutoOfferIntegrationError("canary_runtime_identity_mismatch")
     cookie_string, identity_secret = _steam_confirmation_credentials_for_expected(
         recipient
     )
@@ -644,6 +676,14 @@ def _build_active_host_auto_offer_bridge(
                 authority,
                 canary_owner_session,
                 request,
+            ),
+            expected_trade_offer_counterparty_steam_id=(
+                None
+                if canary_permit is None
+                else canary_permit.expected_counterparty_steam_id
+            ),
+            expected_trade_offer_is_our_offer=(
+                None if canary_permit is None else canary_permit.expected_is_our_offer
             ),
         )
     except HostAutoOfferIntegrationError:
@@ -1021,6 +1061,60 @@ class HostAutoOfferIntegration:
             self._write_back_received(host_pending[order_id], stored)
             del host_pending[order_id]
 
+    def _verify_canary_confirmation_identity(
+        self,
+        current: StoredDelivery,
+    ) -> tuple[AutoOfferResult, StoredDelivery, bool]:
+        permit = self._canary_permit
+        if permit is None:
+            raise HostAutoOfferIntegrationError("canary_permit_required")
+        step_result = self._bridge.read_confirmation_state(current)
+        after = getattr(step_result, "after", None)
+        persisted = getattr(step_result, "persisted", None)
+        decision = getattr(step_result, "decision", None)
+        decision_result = getattr(decision, "result", None)
+        platform_result = getattr(step_result, "platform_result", None)
+        if (
+            type(after) is not StoredDelivery
+            or type(persisted) is not bool
+            or type(decision_result) is not AutoOfferResult
+            or type(platform_result) is not PlatformResult
+        ):
+            raise HostAutoOfferIntegrationError("confirmation_read_invalid")
+        if decision_result is AutoOfferResult.BLOCKED:
+            return AutoOfferResult.BLOCKED, current, False
+        if persisted:
+            if (
+                after.revision != current.revision + 1
+                or after.snapshot == current.snapshot
+                or after.snapshot.delivery_status is not DeliveryStatus.OFFER_CONFIRMED
+                or after.snapshot.steam_tradeoffer_id
+                != current.snapshot.steam_tradeoffer_id
+            ):
+                raise HostAutoOfferIntegrationError("confirmation_read_invalid")
+            return AutoOfferResult.WAITING, after, False
+        if after != current:
+            raise HostAutoOfferIntegrationError("confirmation_read_invalid")
+        if decision_result is not AutoOfferResult.WAITING:
+            return AutoOfferResult.BLOCKED, current, False
+        evidence = platform_result.evidence
+        if platform_result.status is not PlatformResultStatus.SUCCESS:
+            return AutoOfferResult.WAITING, current, False
+        if (
+            type(evidence) is not SteamTradeOfferEvidence
+            or evidence.steam_tradeoffer_id != current.snapshot.steam_tradeoffer_id
+            or evidence.account_steam_id != permit.recipient_steam_id
+            or evidence.counterparty_steam_id
+            != permit.expected_counterparty_steam_id
+            or evidence.is_our_offer is not permit.expected_is_our_offer
+            or permit.expected_is_our_offer is not True
+            or evidence.items_to_give != ()
+            or evidence.lifecycle
+            is not SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION
+        ):
+            return AutoOfferResult.BLOCKED, current, False
+        return AutoOfferResult.WAITING, current, True
+
     def _recover_persisted_delivery(
         self,
         delivery: StoredDelivery,
@@ -1031,6 +1125,12 @@ class HostAutoOfferIntegration:
             if policy == "wait":
                 return AutoOfferResult.WAITING, current
             if policy == "confirm":
+                if self.is_canary:
+                    read_result, read_after, may_confirm = (
+                        self._verify_canary_confirmation_identity(current)
+                    )
+                    if not may_confirm:
+                        return read_result, read_after
                 before = current
                 step_result = self._bridge.step(current)
                 attempted = getattr(step_result, "attempted", None)
@@ -1298,6 +1398,7 @@ def build_host_auto_offer_integration(
             store_path=_STORE_PATH,
             canary_authority=authority,
             canary_owner_session=owner_session,
+            canary_permit=canary_permit,
         )
     except Exception as exc:
         if owner_session is not None:

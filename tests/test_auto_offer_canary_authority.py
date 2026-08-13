@@ -27,6 +27,7 @@ from app.auto_offer.store import StoredDelivery
 
 ACCOUNT_ID = "account-1"
 STEAM_ID = "76561198000000007"
+COUNTERPARTY_STEAM_ID = "76561198000000008"
 ORDER_ID = "buff-order-7"
 PURCHASE_ID = f"buff:{ORDER_ID}"
 
@@ -35,6 +36,8 @@ def _permit(
     *,
     permit_id: str = "permit-1",
     owner_nonce: str = "owner-1",
+    expected_counterparty_steam_id: str = COUNTERPARTY_STEAM_ID,
+    expected_is_our_offer: bool = True,
     expected_store_present: bool = False,
     expected_store_revision: int | None = None,
     expected_store_status: str | None = None,
@@ -49,6 +52,8 @@ def _permit(
         purchase_id=PURCHASE_ID,
         account_id=ACCOUNT_ID,
         recipient_steam_id=STEAM_ID,
+        expected_counterparty_steam_id=expected_counterparty_steam_id,
+        expected_is_our_offer=expected_is_our_offer,
         expected_host_order_ids=(ORDER_ID,),
         expected_store_present=expected_store_present,
         expected_store_revision=expected_store_revision,
@@ -140,6 +145,9 @@ def _stored(
 def test_permit_metadata_repr_and_errors_are_secret_free():
     permit = _permit()
     metadata = permit.metadata(phase="armed")
+    assert metadata["version"] == 3
+    assert metadata["expected_counterparty_steam_id"] == COUNTERPARTY_STEAM_ID
+    assert metadata["expected_is_our_offer"] is True
     forbidden_fields = {
         "cookie",
         "steamloginsecure",
@@ -170,6 +178,21 @@ def test_permit_metadata_repr_and_errors_are_secret_free():
     assert sentinel not in str(error.value)
     assert sentinel not in repr(error.value)
     assert sentinel not in repr(permit)
+
+
+@pytest.mark.parametrize(
+    "counterparty",
+    ["", " ", "not-a-steam-id", "076561198000000008", STEAM_ID],
+)
+def test_permit_rejects_missing_malformed_or_self_counterparty(counterparty):
+    with pytest.raises(CanaryAuthorityError):
+        _permit(expected_counterparty_steam_id=counterparty)
+
+
+@pytest.mark.parametrize("direction", [None, 1, "true"])
+def test_permit_rejects_non_boolean_expected_direction(direction):
+    with pytest.raises(CanaryAuthorityError, match="invalid_expected_is_our_offer"):
+        _permit(expected_is_our_offer=direction)
 
 
 def test_production_root_is_not_selected_by_home_environment(monkeypatch, tmp_path):
@@ -218,6 +241,8 @@ def test_atomic_recovery_rotates_generation_and_prevents_permit_replay(tmp_path)
         new_permit=second_permit,
     )
     assert recovery._read_record()["generation"] == 2
+    assert recovery._read_record()["expected_counterparty_steam_id"] == COUNTERPARTY_STEAM_ID
+    assert recovery._read_record()["expected_is_our_offer"] is True
     recovery_session.release_keep_fence()
 
     replay = CanaryAuthority(_root=tmp_path)
@@ -306,6 +331,7 @@ permit = CanaryPermit(
     permit_id="child-permit", owner_nonce="child-owner", host_db_id=7,
     buff_order_id="buff-order-7", purchase_id="buff:buff-order-7",
     account_id="account-1", recipient_steam_id="76561198000000007",
+    expected_counterparty_steam_id="76561198000000008", expected_is_our_offer=True,
     expected_host_order_ids=("buff-order-7",), expected_store_present=False,
     expected_store_revision=None, expected_store_status=None,
     expected_store_tradeoffer_id=None, created_at=123.0,
