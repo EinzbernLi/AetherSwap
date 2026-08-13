@@ -278,6 +278,8 @@ def _preflight_validate_stored(
         or snapshot.recipient_steam_id != recipient_steam_id
     ):
         raise HostAutoOfferIntegrationError("canary_store_target_invalid")
+    if snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+        raise HostAutoOfferIntegrationError("canary_result_unknown_ineligible")
     if snapshot.delivery_status is DeliveryStatus.RECEIVED:
         if snapshot.pending_receipt is not False or _exact_assetid(snapshot.assetid) is None:
             raise HostAutoOfferIntegrationError("canary_store_target_invalid")
@@ -857,6 +859,8 @@ class HostAutoOfferIntegration:
                 raise HostAutoOfferIntegrationError("send_step_invalid")
 
             if current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+                if self.is_canary:
+                    return deferred_order_ids
                 recovery_step = self._bridge.step(current)
                 current = getattr(recovery_step, "after", None)
                 if type(current) is not StoredDelivery:
@@ -1120,6 +1124,11 @@ class HostAutoOfferIntegration:
         delivery: StoredDelivery,
     ) -> tuple[AutoOfferResult, StoredDelivery]:
         current = delivery
+        if (
+            self.is_canary
+            and current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+        ):
+            return AutoOfferResult.RESULT_UNKNOWN, current
         for _step_index in range(_MAX_RECOVERY_STEPS_PER_DELIVERY):
             policy = _persisted_recovery_policy(current)
             if policy == "wait":
@@ -1224,6 +1233,13 @@ class HostAutoOfferIntegration:
         host_pending = self._host_pending_by_order(host_purchases)
         recoverable = self._recoverable_by_order()
         recoverable = self._prepare_canary_before_dispatch(host_pending, recoverable)
+        target = self._canary_target_order()
+        if (
+            recoverable
+            and recoverable[target].snapshot.delivery_status
+            is DeliveryStatus.RESULT_UNKNOWN
+        ):
+            return AutoOfferResult.RESULT_UNKNOWN
         if not recoverable:
             self._sync_terminal_received(host_pending, recoverable)
             if not host_pending:
@@ -1248,6 +1264,8 @@ class HostAutoOfferIntegration:
                 return AutoOfferResult.COMPLETE
             return AutoOfferResult.BLOCKED
         self._validate_canary_current_sets(host_pending, recoverable)
+        if recoverable[target].snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+            return AutoOfferResult.RESULT_UNKNOWN
         self._sync_terminal_received(host_pending, recoverable)
         if not host_pending:
             if self._canary_owner_session is None:
@@ -1258,7 +1276,6 @@ class HostAutoOfferIntegration:
         if set(host_pending) != set(recoverable):
             return AutoOfferResult.BLOCKED
 
-        target = self._canary_target_order()
         stored = recoverable[target]
         if target not in deferred_fresh:
             result, current = self._recover_persisted_delivery(stored)
