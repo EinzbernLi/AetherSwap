@@ -38,8 +38,8 @@ class DeliveryStatus(str, Enum):
     OFFER_CONFIRMATION_REQUIRED = "offer_confirmation_required"
     OFFER_CONFIRMATION_ATTEMPTED = "offer_confirmation_attempted"
     OFFER_RECEIVED = "offer_received"
-    OFFER_ACCEPT_ATTEMPTED = "offer_accept_attempted"
     OFFER_CONFIRMED = "offer_confirmed"
+    OFFER_ACCEPT_ATTEMPTED = "offer_accept_attempted"
     AWAITING_INVENTORY = "awaiting_inventory"
     OFFER_TERMINATED = "offer_terminated"
     RECEIVED = "received"
@@ -79,8 +79,8 @@ NORMAL_DIRECTION_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset
         DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
-        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.OFFER_TERMINATED,
         DeliveryStatus.RECEIVED,
@@ -101,8 +101,8 @@ _TRADEOFFER_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
         DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
-        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.OFFER_TERMINATED,
         DeliveryStatus.RECEIVED,
@@ -322,13 +322,9 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
             raise DeliveryContractError(
                 "buyer confirmation result_unknown requires bound offer timing"
             )
-        if (
-            mode is DeliveryMode.SELLER_SENDS_OFFER
-            and snapshot.steam_tradeoffer_id is None
-        ):
-            raise DeliveryContractError(
-                "seller accept result_unknown requires a bound trade offer"
-            )
+        # Historical seller RESULT_UNKNOWN rows may be unbound. New seller
+        # ACCEPT ambiguities are tightened by the transition boundary, which
+        # requires OFFER_ACCEPT_ATTEMPTED and therefore a bound exact offer.
 
     if (
         snapshot.offer_attempted_at is not None
@@ -365,8 +361,8 @@ _SELLER_PATH: Final[tuple[DeliveryStatus, ...]] = (
     DeliveryStatus.PENDING_DIRECTION,
     DeliveryStatus.AWAITING_OFFER,
     DeliveryStatus.OFFER_RECEIVED,
-    DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
     DeliveryStatus.OFFER_CONFIRMED,
+    DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
     DeliveryStatus.AWAITING_INVENTORY,
     DeliveryStatus.RECEIVED,
 )
@@ -473,6 +469,17 @@ def _transition_statuses(
     ):
         return
 
+    # A seller offer may be accepted manually outside Auto Offer after exact
+    # OFFER_CONFIRMED proof. Exact Steam evidence may therefore skip the module
+    # ACCEPT attempt and advance directly to inventory waiting. The automatic
+    # path remains OFFER_CONFIRMED -> OFFER_ACCEPT_ATTEMPTED -> AWAITING_INVENTORY.
+    if (
+        mode is DeliveryMode.SELLER_SENDS_OFFER
+        and current is DeliveryStatus.OFFER_CONFIRMED
+        and target is DeliveryStatus.AWAITING_INVENTORY
+    ):
+        return
+
     path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
     try:
         current_index = path.index(current)
@@ -495,17 +502,29 @@ def _validate_snapshot_unknown_transition(
         return
     if current.delivery_status is not DeliveryStatus.RESULT_UNKNOWN:
         return
-    if current.steam_tradeoffer_id is not None:
+    if current.steam_tradeoffer_id is None:
+        # Historical unbound RESULT_UNKNOWN rows retain the original
+        # mode-specific later-evidence recovery contract.
+        return
+    if current.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER:
         if target.delivery_status not in {
             DeliveryStatus.OFFER_CONFIRMED,
             DeliveryStatus.OFFER_TERMINATED,
         }:
             raise DeliveryContractError(
-                "bound result_unknown recovery requires exact later offer evidence"
+                "confirmation result_unknown recovery requires exact offer evidence"
             )
         return
-    # Historical unbound RESULT_UNKNOWN rows retain the original mode-specific
-    # later-evidence recovery contract; new writes cannot create that form.
+    if current.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER:
+        if target.delivery_status not in {
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryStatus.OFFER_TERMINATED,
+        }:
+            raise DeliveryContractError(
+                "accept result_unknown recovery requires exact offer evidence"
+            )
+        return
+    raise DeliveryContractError("bound result_unknown recovery requires a delivery mode")
 
 
 def validate_delivery_transition(
