@@ -20,7 +20,6 @@ class AutoOfferResult(str, Enum):
     DISABLED = "disabled"
     COMPLETE = "complete"
     WAITING = "waiting"
-    QUARANTINED = "quarantined"
     RESULT_UNKNOWN = "result_unknown"
     BLOCKED = "blocked"
 
@@ -556,7 +555,7 @@ def validate_delivery_transition(
 def result_blocks_next_purchase(result: AutoOfferResult) -> bool:
     """Return whether Auto Offer must globally stop a later purchase.
 
-    WAITING and QUARANTINED are per-delivery asynchronous outcomes. Only an
+    Ordinary WAITING is a per-delivery asynchronous outcome. Only an
     irreversible-write ambiguity or explicit global invariant failure stops
     later purchase admission. Canary serialization is enforced separately.
     """
