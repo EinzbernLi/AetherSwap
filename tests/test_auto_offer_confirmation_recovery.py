@@ -461,7 +461,7 @@ def test_offer_sent_active_or_accepted_keeps_historical_direct_path(lifecycle):
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
     ],
 )
-def test_confirmation_state9_remains_waiting_and_blocks_next_purchase(status):
+def test_confirmation_state9_remains_safe_wait_without_global_purchase_block(status):
     before = delivery(status)
 
     decision = plan_read_evidence_transition(
@@ -473,7 +473,7 @@ def test_confirmation_state9_remains_waiting_and_blocks_next_purchase(status):
     assert decision.result is AutoOfferResult.WAITING
     assert decision.retryable is True
     assert decision.detail == "trade_offer_confirmation_still_required"
-    assert result_blocks_next_purchase(decision.result) is True
+    assert result_blocks_next_purchase(decision.result) is False
 
 
 @pytest.mark.parametrize(
