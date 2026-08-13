@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+from app.auto_offer.canary_authority import CanaryAuthorityError, external_write_guard
 from buff import BuffAuthExpired, BuffRequestBlocked
 from utils.delay import jittered_sleep
 try:
@@ -108,7 +109,8 @@ def accept_steam_trade_offer(
 
     ``None`` means the POST may have reached Steam but no definitive response
     was received.  Callers must reconcile inventory instead of resending the
-    non-idempotent POST immediately.
+    non-idempotent POST immediately.  A canary fence rejection returns False
+    because the guard proves the POST was never entered.
     """
     from utils.proxy_manager import get_proxy_manager
     try:
@@ -130,15 +132,16 @@ def accept_steam_trade_offer(
             "captcha": "",
         }
         proxies = pm.get_proxies_for_request(failed=False)
-        r = requests.post(
-            url,
-            headers=headers,
-            cookies=steam_cookies,
-            proxies=proxies,
-            data=data,
-            verify=False,
-            timeout=15,
-        )
+        with external_write_guard("legacy_receive"):
+            r = requests.post(
+                url,
+                headers=headers,
+                cookies=steam_cookies,
+                proxies=proxies,
+                data=data,
+                verify=False,
+                timeout=15,
+            )
         if r.status_code != 200:
             return None
         raw_text = (r.text or "").strip()
@@ -157,6 +160,8 @@ def accept_steam_trade_offer(
         if "tradeid" in body or body.get("success") == 1:
             return True
         return None
+    except CanaryAuthorityError:
+        return False
     except Exception:
         return None
 def _match_purchase_for_item(
@@ -184,7 +189,7 @@ def _match_purchase_for_item(
         db_id = p.get("_db_id")
         if not db_id or db_id in assigned_db_ids:
             continue
-        if p.get("assetid"):  
+        if p.get("assetid"):
             continue
         try:
             purchase_goods_id = (

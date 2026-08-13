@@ -2,15 +2,20 @@ import json
 import re
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
+
 import requests
+
+from app.auto_offer.canary_authority import CanaryWriteBlockedError, external_write_guard
 from config import get_steam
 from steam.session import create_market_session
 from utils.delay import jittered_sleep
+
 try:
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except Exception:
     pass
+
 MYLISTINGS_API_URL = "https://steamcommunity.com/market/mylistings/"
 REMOVE_LISTING_URL = "https://steamcommunity.com/market/removelisting/"
 MARKET_URL = "https://steamcommunity.com/market/"
@@ -19,6 +24,8 @@ REMOVELISTING_PATTERN = re.compile(
 )
 SESSIONID_PATTERN = re.compile(r'g_sessionID\s*=\s*"([^"]+)"')
 TIMEOUT = 25
+
+
 def _cookies_to_dict(cookies) -> dict:
     if isinstance(cookies, dict):
         return dict(cookies)
@@ -29,6 +36,8 @@ def _cookies_to_dict(cookies) -> dict:
             k, _, v = s.partition("=")
             out[k.strip()] = v.strip()
     return out
+
+
 def _get_mylistings_api(session) -> Optional[Dict[str, Dict[str, Any]]]:
     params = {"norender": "1", "start": "0", "count": "100"}
     try:
@@ -44,6 +53,7 @@ def _get_mylistings_api(session) -> Optional[Dict[str, Dict[str, Any]]]:
     if not data.get("success"):
         return None
     asset_info: Dict[str, Dict[str, Any]] = {}
+
     def extract_items(container):
         if container is None:
             return []
@@ -52,6 +62,7 @@ def _get_mylistings_api(session) -> Optional[Dict[str, Dict[str, Any]]]:
         if isinstance(container, list):
             return container
         return []
+
     outer_assets = data.get("assets") or {}
     all_listings = extract_items(data.get("listings"))
     all_listings.extend(extract_items(data.get("listings_to_confirm")))
@@ -87,6 +98,8 @@ def _get_mylistings_api(session) -> Optional[Dict[str, Dict[str, Any]]]:
                 "contextid": contextid,
             }
     return asset_info
+
+
 def _extract_js_var(html: str, var_name: str) -> str:
     prefix = f"var {var_name} = "
     i = html.find(prefix)
@@ -120,6 +133,8 @@ def _extract_js_var(html: str, var_name: str) -> str:
         else:
             j += 1
     return ""
+
+
 def _get_asset_class_instance_from_market_page(html: str, assetid: str) -> Optional[Tuple[str, str]]:
     inv_js = _extract_js_var(html, "g_rgInventory")
     if not inv_js:
@@ -141,6 +156,8 @@ def _get_asset_class_instance_from_market_page(html: str, assetid: str) -> Optio
                 if cid:
                     return (str(cid), str(iid))
     return None
+
+
 def _get_assetids_by_class_instance(
     session, steam_id: str, appid: str, contextid: str, classid: str, instanceid: str
 ) -> Optional[set]:
@@ -180,6 +197,8 @@ def _get_assetids_by_class_instance(
     except Exception:
         return None
     return result
+
+
 def delist_item(assetid: str, name: str, log_fn: Optional[Callable[[str, str], None]] = None) -> Tuple[bool, Optional[str], Optional[str]]:
     try:
         cred = get_steam()
@@ -230,15 +249,15 @@ def delist_item(assetid: str, name: str, log_fn: Optional[Callable[[str, str], N
             if not sessionid:
                 return False, None, "未能在 Cookie 或市场页找到 sessionid"
         if not listing_id:
-                r = session.get(MARKET_URL, timeout=TIMEOUT)
-                if r.status_code != 200:
-                    return False, None, f"获取市场页失败 HTTP {r.status_code}"
-                html = r.text or ""
-                matches = REMOVELISTING_PATTERN.findall(html)
-                aid_to_lid = {str(aid): str(lid) for lid, aid in matches}
-                if assetid not in aid_to_lid:
-                    return False, None, f"未找到 assetid {assetid} 对应的上架记录，请确认该物品在「我的上架」中"
-                listing_id = aid_to_lid[assetid]
+            r = session.get(MARKET_URL, timeout=TIMEOUT)
+            if r.status_code != 200:
+                return False, None, f"获取市场页失败 HTTP {r.status_code}"
+            html = r.text or ""
+            matches = REMOVELISTING_PATTERN.findall(html)
+            aid_to_lid = {str(aid): str(lid) for lid, aid in matches}
+            if assetid not in aid_to_lid:
+                return False, None, f"未找到 assetid {assetid} 对应的上架记录，请确认该物品在「我的上架」中"
+            listing_id = aid_to_lid[assetid]
         if not classid or not instanceid:
             if asset_info and assetid in asset_info:
                 info = asset_info[assetid]
@@ -295,7 +314,16 @@ def delist_item(assetid: str, name: str, log_fn: Optional[Callable[[str, str], N
             "X-Requested-With": "XMLHttpRequest",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         }
-        resp = session.post(remove_url, data={"sessionid": sessionid}, headers=post_headers, timeout=TIMEOUT)
+        try:
+            with external_write_guard("steam_delist"):
+                resp = session.post(
+                    remove_url,
+                    data={"sessionid": sessionid},
+                    headers=post_headers,
+                    timeout=TIMEOUT,
+                )
+        except CanaryWriteBlockedError:
+            return False, None, "canary_write_fenced"
         if resp.status_code != 200:
             return False, None, f"下架请求失败 HTTP {resp.status_code}"
         response_text = (resp.text or "").strip()
@@ -313,8 +341,7 @@ def delist_item(assetid: str, name: str, log_fn: Optional[Callable[[str, str], N
             elif response_data in (False, 0, "0", "false", "failure", "failed"):
                 return False, None, "Steam 返回下架失败"
             elif "<html" in response_text.lower() and (
-                "login" in response_text.lower()
-                or "sign in" in response_text.lower()
+                "login" in response_text.lower() or "sign in" in response_text.lower()
             ):
                 return False, None, "Steam 返回登录页面，Cookie 可能已失效，请重新登录"
             elif response_text.lower() in {"false", "failure", "failed", "error"}:
