@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Optional
 from app.state import (
+    get_state,
     get_status,
     get_purchases,
     get_sales,
@@ -24,15 +25,19 @@ from app.config_loader import (
     get_steam_credentials,
     load_app_config_validated,
 )
-from app.auto_offer.host_integration import is_auto_offer_enabled
+from app.auto_offer.contracts import AutoOfferResult
+from app.auto_offer.host_integration import (
+    build_host_auto_offer_integration,
+    is_auto_offer_enabled,
+)
 from app.notify import send_pushplus, build_holdings_report_content, compute_holdings_stats
 from app.inventory_cs2 import scan_cs2_inventory
 from app.accounts import get_current_account, update_account
 _HOLDINGS_REPORT_LAST_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "holdings_report_last.json"
 _HOLDINGS_REPORT_WAIT_INTERVAL = 60
 _HOLDINGS_REPORT_WAIT_MAX = 30 * 60
-_worker_alert_last: dict = {}  
-_WORKER_ALERT_COOLDOWN = 3600  
+_worker_alert_last: dict = {}
+_WORKER_ALERT_COOLDOWN = 3600
 def _worker_alert(worker_name: str, error: Exception) -> None:
     """发送 PushPlus 告警，每个 worker 每小时至多发一次。"""
     now = time.time()
@@ -129,7 +134,7 @@ def run_holdings_report_once(force: bool = False) -> bool:
             return False
         if pl_pct is None:
             return False
-        drop = last_pl_pct - pl_pct  
+        drop = last_pl_pct - pl_pct
         if drop < drop_threshold_pct:
             return False
     content = build_holdings_report_content(holdings_enriched, resell_ratio)
@@ -168,7 +173,7 @@ def _fetch_exchange_rates(base: str = "CNY", targets: Optional[list] = None) -> 
         import requests
         from utils.proxy_manager import get_proxy_manager
         pm = get_proxy_manager()
-        proxies = pm.get_proxies_for_request()  
+        proxies = pm.get_proxies_for_request()
         url = f"https://open.er-api.com/v6/latest/{base}"
         from app.state import log
         if proxies:
@@ -179,7 +184,7 @@ def _fetch_exchange_rates(base: str = "CNY", targets: Optional[list] = None) -> 
             return None
         all_rates = data.get("rates") or {}
         if not targets:
-            return {}  
+            return {}
         out = {}
         for code in targets:
             if code not in all_rates:
@@ -259,6 +264,29 @@ def _buff_background_request_is_safe() -> bool:
     )
 
 
+def _run_auto_offer_receive_once(cfg: dict, buff_client, purchases: list) -> AutoOfferResult:
+    """Advance enabled Auto Offer delivery through the existing Host worker.
+
+    This helper deliberately creates no worker, scheduler or retry loop.  The
+    caller already owns the Host receive cadence and BUFF activity exclusion.
+    """
+
+    integration = build_host_auto_offer_integration(
+        config=cfg,
+        buff_client=buff_client,
+        complete_purchase_receipt_by_id=get_state().complete_purchase_receipt_by_id,
+    )
+    if integration is None:
+        raise RuntimeError("auto_offer_enabled_without_integration")
+    try:
+        result = integration.next_purchase_result(purchases)
+        if type(result) is not AutoOfferResult:
+            raise RuntimeError("auto_offer_receive_result_invalid")
+        return result
+    finally:
+        integration.close()
+
+
 def receive_worker() -> None:
     from app.receive_flow import try_receive_once
     from app.services.buff_auth import get_buff_auth_lock
@@ -277,13 +305,10 @@ def receive_worker() -> None:
             cfg = load_app_config_validated()
             interval = max(10, int(cfg.get("pipeline", {}).get("receive_poll_interval_seconds", 30) or 30))
             time.sleep(interval)
-            if is_auto_offer_enabled(cfg):
-                continue
             if not is_steam_background_allowed() or not _buff_background_request_is_safe():
                 continue
-            # Hold the complete receive transaction (BUFF task lookup, Steam
-            # offer acceptance and DB update) outside pipeline start/import/
-            # data reset.  The inner BuffClient calls are re-entrant.
+            # The Host receive worker remains the sole delivery scheduler.  It
+            # routes to either legacy receive or Auto Offer, never both.
             with get_buff_auth_lock():
                 with buff_activity_guard():
                     if (
@@ -305,6 +330,21 @@ def receive_worker() -> None:
                             credentials,
                             cfg,
                         )
+                    if is_auto_offer_enabled(cfg):
+                        result = _run_auto_offer_receive_once(cfg, buff_client, purchases)
+                        if result is AutoOfferResult.RESULT_UNKNOWN:
+                            log(
+                                "receive_worker: Auto Offer 不可逆写结果未知，已停止新的交付写动作",
+                                "error",
+                                category="receive",
+                            )
+                        elif result is AutoOfferResult.BLOCKED:
+                            log(
+                                "receive_worker: Auto Offer 状态不一致或安全门阻止本轮推进",
+                                "error",
+                                category="receive",
+                            )
+                        continue
                     n = try_receive_once(
                         get_purchases,
                         update_purchase,
@@ -504,7 +544,7 @@ def sync_account_region_worker() -> None:
             category="account",
         )
         _sync_account_profile_and_region(acc)
-        
+
         from app.services.account_region import refresh_account_region_currency
         result = refresh_account_region_currency(acc.get("id"), skip_unconfigured=True)
         if not result.get("ok"):
