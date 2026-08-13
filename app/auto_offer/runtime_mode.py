@@ -45,20 +45,24 @@ def resolve_runtime_mode(
     *,
     requested_enabled: bool,
     active_delivery_count: int,
+    enable_preflight_passed: bool = False,
     transition_block_reason: str | None = None,
 ) -> AutoOfferRuntimeState:
     """Resolve effective ownership without changing any external state.
 
-    A disable request with active Auto Offer ownership enters DRAINING rather
-    than immediately returning legacy authority.  A transition blocker is
-    represented explicitly instead of being collapsed into the persisted
-    boolean.
+    An enable request remains ENABLING until the caller positively proves the
+    transition preflight.  A disable request with active Auto Offer ownership
+    enters DRAINING rather than immediately returning legacy authority.  A
+    transition blocker is explicit instead of being collapsed into the
+    persisted boolean.
     """
 
     if type(requested_enabled) is not bool:
         raise TypeError("requested_enabled must be bool")
     if type(active_delivery_count) is not int or active_delivery_count < 0:
         raise ValueError("active_delivery_count must be a non-negative integer")
+    if type(enable_preflight_passed) is not bool:
+        raise TypeError("enable_preflight_passed must be bool")
     if transition_block_reason is not None and (
         type(transition_block_reason) is not str
         or not transition_block_reason
@@ -77,7 +81,11 @@ def resolve_runtime_mode(
         return AutoOfferRuntimeState(
             requested_enabled=True,
             active_delivery_count=active_delivery_count,
-            mode=AutoOfferRuntimeMode.ON,
+            mode=(
+                AutoOfferRuntimeMode.ON
+                if enable_preflight_passed
+                else AutoOfferRuntimeMode.ENABLING
+            ),
         )
     if active_delivery_count:
         return AutoOfferRuntimeState(
