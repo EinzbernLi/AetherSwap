@@ -1,4 +1,6 @@
-from dataclasses import FrozenInstanceError
+import copy
+import pickle
+from dataclasses import FrozenInstanceError, replace
 from math import inf, nan
 
 import pytest
@@ -711,7 +713,7 @@ def test_buyer_path_blocks_before_adapter_and_advance():
         {PlatformCapability.READ_OFFER_STATE: adapter},
         timeout_seconds=1.0,
     )
-    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="write_capability_required"):
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="normal_send_authority_required"):
         coordinator.step(item)
     assert adapter.calls == []
     assert store.advance_calls == []
@@ -1143,12 +1145,68 @@ class RecordingSendAdapter:
         return self.result_factory(request)
 
 
+class RecordingDirectionAdapter:
+    capabilities = frozenset({PlatformCapability.READ_DELIVERY_DIRECTION})
+
+    def __init__(self, *, events=None, result_factory=None):
+        self.events = [] if events is None else events
+        self.calls = []
+        self.result_factory = result_factory or success_factory(
+            DeliveryDirectionEvidence("buyer_sends_offer")
+        )
+
+    def execute(self, request):
+        self.calls.append(request)
+        self.events.append(("authority_read", request.revision, request.buff_order_id))
+        return self.result_factory(request)
+
+
 def buyer_awaiting(revision=1):
+    snapshot = make_snapshot(
+        DeliveryStatus.AWAITING_OFFER,
+        DeliveryMode.BUYER_SENDS_OFFER,
+    )
+    snapshot = replace(snapshot, recipient_steam_id="76561198000000001")
     return make_delivery(
-        make_snapshot(
-            DeliveryStatus.AWAITING_OFFER,
-            DeliveryMode.BUYER_SENDS_OFFER,
-        ),
+        snapshot,
+        revision=revision,
+    )
+
+
+def normal_send_coordinator(
+    store,
+    send_adapter=None,
+    *,
+    direction_adapter=None,
+    timeout=1.0,
+    clock=None,
+):
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    direction_adapter = direction_adapter or RecordingDirectionAdapter()
+    adapters = {
+        PlatformCapability.READ_DELIVERY_DIRECTION: direction_adapter,
+    }
+    if send_adapter is not None:
+        adapters[PlatformCapability.SEND_OFFER] = send_adapter
+    return DeliveryCoordinator(
+        store,
+        adapters,
+        timeout_seconds=timeout,
+        allow_writes=True,
+        clock=clock or sequence_clock(10.0),
+    ), direction_adapter
+
+
+def buyer_result_unknown(revision=3):
+    snapshot = make_snapshot(
+        DeliveryStatus.RESULT_UNKNOWN,
+        DeliveryMode.BUYER_SENDS_OFFER,
+        offer_attempted_at=10.0,
+        delivery_error="write_result_unknown",
+    )
+    return make_delivery(
+        replace(snapshot, recipient_steam_id="76561198000000001"),
         revision=revision,
     )
 
@@ -1206,7 +1264,7 @@ def test_send_adapter_must_declare_only_send_offer():
         )
 
 
-def test_send_offer_persists_attempt_before_single_adapter_call_and_then_sent():
+def test_normal_send_persists_attempt_before_single_call_and_result_unknown():
     from app.auto_offer.adapters import SendOfferEvidence
     from app.auto_offer.coordinator import DeliveryCoordinator, SendOfferStepResult
 
@@ -1221,24 +1279,34 @@ def test_send_offer_persists_attempt_before_single_adapter_call_and_then_sent():
         ),
         events=events,
     )
-    result = DeliveryCoordinator(
+    coordinator, direction_adapter = normal_send_coordinator(
         store,
-        {PlatformCapability.SEND_OFFER: adapter},
-        timeout_seconds=7.0,
-        allow_writes=True,
-        clock=sequence_clock(10.0, 11.0),
-    ).step(item)
+        adapter,
+        direction_adapter=RecordingDirectionAdapter(events=events),
+        timeout=7.0,
+        clock=sequence_clock(10.0),
+    )
+    proof = coordinator.read_send_authority(item)
+    result = coordinator.send_offer_with_authority(item, proof)
 
     assert isinstance(result, SendOfferStepResult)
-    assert [event[0] for event in events] == ["get", "advance", "adapter", "advance"]
-    assert events[1][1:3] == (
+    assert [event[0] for event in events] == [
+        "get",
+        "authority_read",
+        "get",
+        "advance",
+        "adapter",
+        "advance",
+    ]
+    assert events[3][1:3] == (
         DeliveryStatus.AWAITING_OFFER,
         DeliveryStatus.OFFER_ATTEMPTED,
     )
-    assert events[3][1:3] == (
+    assert events[5][1:3] == (
         DeliveryStatus.OFFER_ATTEMPTED,
-        DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.RESULT_UNKNOWN,
     )
+    assert len(direction_adapter.calls) == 1
     assert len(adapter.calls) == 1
     request = adapter.calls[0]
     assert request.revision == 5
@@ -1249,10 +1317,169 @@ def test_send_offer_persists_attempt_before_single_adapter_call_and_then_sent():
     assert request.account_id == item.snapshot.account_id
     assert request.recipient_steam_id == item.snapshot.recipient_steam_id
     assert result.attempted.snapshot.offer_attempted_at == 10.0
-    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
-    assert result.after.snapshot.steam_tradeoffer_id == "offer-42"
-    assert result.after.snapshot.offer_sent_at == 11.0
+    assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+    assert result.after.snapshot.delivery_error == "write_result_unknown"
+    assert result.after.snapshot.steam_tradeoffer_id is None
+    assert result.after.snapshot.counterparty_steam_id is None
+    assert result.after.snapshot.offer_sent_at is None
     assert result.after.revision == 6
+
+
+def test_normal_send_proof_is_exact_opaque_single_use_and_process_local():
+    item = buyer_awaiting(revision=7)
+    store = RecordingStore(item)
+    adapter = RecordingSendAdapter(
+        lambda request: PlatformResult(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "offer_created_unproven",
+        )
+    )
+    coordinator, direction_adapter = normal_send_coordinator(store, adapter)
+
+    proof = coordinator.read_send_authority(item)
+    assert repr(proof) == "<opaque normal send proof>"
+    assert (
+        proof.purchase_id,
+        proof.buff_order_id,
+        proof.account_id,
+        proof.recipient_steam_id,
+        proof.revision,
+    ) == (
+        item.snapshot.purchase_id,
+        item.snapshot.buff_order_id,
+        item.snapshot.account_id,
+        item.snapshot.recipient_steam_id,
+        item.revision,
+    )
+    with pytest.raises(TypeError, match="normal_send_proof_not_serializable"):
+        pickle.dumps(proof)
+    with pytest.raises(TypeError, match="normal_send_proof_not_serializable"):
+        copy.copy(proof)
+
+    result = coordinator.send_offer_with_authority(item, proof)
+    assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+    assert len(direction_adapter.calls) == 1
+    assert len(adapter.calls) == 1
+
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="send_authority_proof_required"):
+        coordinator.send_offer_with_authority(item, proof)
+    restarted, _ = normal_send_coordinator(store, adapter)
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="send_authority_proof_required"):
+        restarted.send_offer_with_authority(item, proof)
+    assert len(adapter.calls) == 1
+
+
+def test_normal_send_proof_stale_store_revision_blocks_before_send():
+    item = buyer_awaiting(revision=2)
+    store = RecordingStore(item)
+    adapter = RecordingSendAdapter()
+    coordinator, _ = normal_send_coordinator(store, adapter)
+    proof = coordinator.read_send_authority(item)
+    store.current = StoredDelivery(item.snapshot, item.revision + 1)
+
+    with pytest.raises(ReadOnlyCoordinatorConflictError, match="persisted_delivery_mismatch"):
+        coordinator.send_offer_with_authority(item, proof)
+    assert adapter.calls == []
+    assert store.advance_count == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"purchase_id": "purchase-other"},
+        {"buff_order_id": "buff-order-other"},
+        {"account_id": "account-other"},
+        {"recipient_steam_id": "76561198000000003"},
+    ],
+)
+def test_normal_send_proof_rejects_every_bound_identity_mismatch(changes):
+    item = buyer_awaiting(revision=2)
+    store = RecordingStore(item)
+    adapter = RecordingSendAdapter()
+    coordinator, _ = normal_send_coordinator(store, adapter)
+    proof = coordinator.read_send_authority(item)
+    changed = StoredDelivery(replace(item.snapshot, **changes), item.revision)
+    store.current = changed
+
+    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="send_authority_proof_mismatch"):
+        coordinator.send_offer_with_authority(changed, proof)
+    assert adapter.calls == []
+    assert store.advance_count == 0
+
+
+def test_result_unknown_recovery_is_exact_read_only_and_binds_offer_and_seller():
+    item = buyer_result_unknown(revision=4)
+    store = RecordingStore(item)
+    read_adapter = SpyAdapter(
+        {PlatformCapability.READ_OFFER_STATE},
+        success_factory(
+            OfferStateEvidence("offer-exact", "76561198000000002")
+        ),
+    )
+    send_adapter = RecordingSendAdapter(
+        error=AssertionError("read-only recovery must not invoke SEND")
+    )
+    coordinator = ReadOnlyDeliveryCoordinator(
+        store,
+        {
+            PlatformCapability.READ_OFFER_STATE: read_adapter,
+            PlatformCapability.SEND_OFFER: send_adapter,
+        },
+        timeout_seconds=1.0,
+        allow_writes=True,
+        clock=sequence_clock(12.0),
+    )
+
+    result = coordinator.recover_result_unknown_readonly(item)
+
+    assert len(read_adapter.calls) == 1
+    assert send_adapter.calls == []
+    assert result.persisted is True
+    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+    assert result.after.snapshot.steam_tradeoffer_id == "offer-exact"
+    assert result.after.snapshot.counterparty_steam_id == "76561198000000002"
+    assert result.after.snapshot.offer_sent_at == 12.0
+    assert result.after.snapshot.delivery_error is None
+
+
+@pytest.mark.parametrize(
+    "status,expected_result",
+    [
+        (PlatformResultStatus.RESULT_UNKNOWN, AutoOfferResult.WAITING),
+        (PlatformResultStatus.MALFORMED, AutoOfferResult.BLOCKED),
+    ],
+)
+def test_result_unknown_readonly_recovery_missing_or_malformed_never_writes(
+    status,
+    expected_result,
+):
+    item = buyer_result_unknown()
+    store = RecordingStore(item)
+    read_adapter = SpyAdapter(
+        {PlatformCapability.READ_OFFER_STATE},
+        lambda request: PlatformResult(request, status, "order_not_proven"),
+    )
+    send_adapter = RecordingSendAdapter(
+        error=AssertionError("read-only recovery must not invoke SEND")
+    )
+    coordinator = ReadOnlyDeliveryCoordinator(
+        store,
+        {
+            PlatformCapability.READ_OFFER_STATE: read_adapter,
+            PlatformCapability.SEND_OFFER: send_adapter,
+        },
+        timeout_seconds=1.0,
+        allow_writes=True,
+    )
+
+    result = coordinator.recover_result_unknown_readonly(item)
+
+    assert result.after == item
+    assert result.persisted is False
+    assert result.decision.result is expected_result
+    assert len(read_adapter.calls) == 1
+    assert send_adapter.calls == []
 
 
 def _forged_send_success(request, evidence):
@@ -1295,14 +1522,15 @@ def test_every_unproven_invoked_send_outcome_becomes_result_unknown_without_retr
             )
         )
 
-    result = DeliveryCoordinator(
+    coordinator, direction_adapter = normal_send_coordinator(
         store,
-        {PlatformCapability.SEND_OFFER: adapter},
-        timeout_seconds=1.0,
-        allow_writes=True,
+        adapter,
         clock=sequence_clock(10.0),
-    ).step(item)
+    )
+    proof = coordinator.read_send_authority(item)
+    result = coordinator.send_offer_with_authority(item, proof)
 
+    assert len(direction_adapter.calls) == 1
     assert len(adapter.calls) == 1
     assert result.attempted.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
     assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
@@ -1326,28 +1554,22 @@ def test_missing_send_adapter_and_invalid_preflight_clock_never_record_attempt()
 
     item = buyer_awaiting()
     store = RecordingStore(item)
-    coordinator = DeliveryCoordinator(
-        store,
-        {},
-        timeout_seconds=1.0,
-        allow_writes=True,
-        clock=sequence_clock(10.0),
-    )
+    coordinator, _ = normal_send_coordinator(store, clock=sequence_clock(10.0))
+    proof = coordinator.read_send_authority(item)
     with pytest.raises(ReadOnlyCoordinatorBlockedError, match="send_offer_adapter_required"):
-        coordinator.step(item)
+        coordinator.send_offer_with_authority(item, proof)
     assert store.advance_count == 0
 
     adapter = RecordingSendAdapter()
     store = RecordingStore(item)
-    coordinator = DeliveryCoordinator(
+    coordinator, _ = normal_send_coordinator(
         store,
-        {PlatformCapability.SEND_OFFER: adapter},
-        timeout_seconds=1.0,
-        allow_writes=True,
+        adapter,
         clock=sequence_clock(nan),
     )
+    proof = coordinator.read_send_authority(item)
     with pytest.raises(ReadOnlyCoordinatorError, match="invalid_clock_value"):
-        coordinator.step(item)
+        coordinator.send_offer_with_authority(item, proof)
     assert store.advance_count == 0
     assert adapter.calls == []
 
@@ -1378,15 +1600,14 @@ def test_attempt_persistence_failure_happens_before_and_prevents_external_call()
     item = buyer_awaiting()
     store = RecordingStore(item, fail_on_advance=1)
     adapter = RecordingSendAdapter()
-    coordinator = DeliveryCoordinator(
+    coordinator, _ = normal_send_coordinator(
         store,
-        {PlatformCapability.SEND_OFFER: adapter},
-        timeout_seconds=1.0,
-        allow_writes=True,
+        adapter,
         clock=sequence_clock(10.0),
     )
+    proof = coordinator.read_send_authority(item)
     with pytest.raises(ReadOnlyCoordinatorError, match="store_advance_failed"):
-        coordinator.step(item)
+        coordinator.send_offer_with_authority(item, proof)
     assert adapter.calls == []
     assert store.current == item
 
@@ -1404,15 +1625,14 @@ def test_success_persistence_failure_leaves_durable_attempt_and_never_resends():
             evidence=SendOfferEvidence("offer-1"),
         )
     )
-    coordinator = DeliveryCoordinator(
+    coordinator, _ = normal_send_coordinator(
         store,
-        {PlatformCapability.SEND_OFFER: adapter},
-        timeout_seconds=1.0,
-        allow_writes=True,
-        clock=sequence_clock(10.0, 11.0),
+        adapter,
+        clock=sequence_clock(10.0),
     )
+    proof = coordinator.read_send_authority(item)
     with pytest.raises(ReadOnlyCoordinatorError, match="store_advance_failed"):
-        coordinator.step(item)
+        coordinator.send_offer_with_authority(item, proof)
     assert len(adapter.calls) == 1
     assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
     assert store.current.snapshot.offer_attempted_at == 10.0
@@ -1434,15 +1654,14 @@ def test_result_unknown_persistence_failure_leaves_durable_attempt_and_never_res
     item = buyer_awaiting()
     store = RecordingStore(item, fail_on_advance=2)
     adapter = RecordingSendAdapter(error=PlatformAdapterTimeoutError("secret"))
-    coordinator = DeliveryCoordinator(
+    coordinator, _ = normal_send_coordinator(
         store,
-        {PlatformCapability.SEND_OFFER: adapter},
-        timeout_seconds=1.0,
-        allow_writes=True,
+        adapter,
         clock=sequence_clock(10.0),
     )
+    proof = coordinator.read_send_authority(item)
     with pytest.raises(ReadOnlyCoordinatorError, match="store_advance_failed"):
-        coordinator.step(item)
+        coordinator.send_offer_with_authority(item, proof)
     assert len(adapter.calls) == 1
     assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
 
@@ -1457,7 +1676,7 @@ def test_result_unknown_persistence_failure_leaves_durable_attempt_and_never_res
     assert len(adapter.calls) == 1
 
 
-def test_post_call_clock_failure_or_regression_becomes_result_unknown():
+def test_canary_post_call_clock_failure_or_regression_becomes_result_unknown():
     from app.auto_offer.adapters import SendOfferEvidence
     from app.auto_offer.coordinator import DeliveryCoordinator
 
@@ -1477,6 +1696,8 @@ def test_post_call_clock_failure_or_regression_becomes_result_unknown():
             timeout_seconds=1.0,
             allow_writes=True,
             clock=clock,
+            expected_trade_offer_counterparty_steam_id="76561198000000002",
+            expected_trade_offer_is_our_offer=True,
         ).step(item)
         assert len(adapter.calls) == 1
         assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN

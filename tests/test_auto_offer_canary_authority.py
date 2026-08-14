@@ -525,6 +525,147 @@ def test_completed_session_disables_writes_and_completion_requires_no_pending_ho
         authority.release_keep_fence()
     session.release_keep_fence()
 
+
+def test_normal_send_barrier_requires_runtime_guard_and_allows_unrelated_pending_rows(
+    tmp_path,
+):
+    db_path = _host_db(
+        tmp_path / "host.db",
+        rows=((7, ORDER_ID, 1, None), (8, "unrelated-order", 1, None)),
+    )
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    outer = _target("auto_offer_send", db_id=7)
+    calls = []
+
+    with pytest.raises(CanaryWriteBlockedError, match="normal_runtime_guard_required"):
+        with authority.normal_delivery_write_guard(outer):
+            calls.append("outside")
+
+    with authority.runtime_guard():
+        with authority.normal_delivery_write_guard(outer):
+            calls.append("inside")
+            writer_outcome = []
+
+            def try_competing_write():
+                connection = sqlite3.connect(db_path, timeout=0.0, isolation_level=None)
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    writer_outcome.append("wrote")
+                except sqlite3.OperationalError:
+                    writer_outcome.append("locked")
+                finally:
+                    connection.close()
+
+            thread = threading.Thread(target=try_competing_write)
+            thread.start()
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+            assert writer_outcome == ["locked"]
+
+    assert calls == ["inside"]
+
+
+@pytest.mark.parametrize(
+    "rows,db_id,reason",
+    [
+        ((), 7, "normal_host_target_missing"),
+        (((7, "wrong-order", 1, None),), 7, "normal_host_target_mismatch"),
+        (((7, ORDER_ID, 0, None),), 7, "normal_host_target_mismatch"),
+        (((7, ORDER_ID, 1, "asset-present"),), 7, "normal_host_target_mismatch"),
+        (((7, ORDER_ID, 1, None),), 8, "normal_host_target_missing"),
+    ],
+)
+def test_normal_send_barrier_rejects_missing_or_changed_exact_host_target(
+    tmp_path,
+    rows,
+    db_id,
+    reason,
+):
+    db_path = _host_db(tmp_path / "host.db", rows=rows)
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    calls = []
+    with authority.runtime_guard():
+        with pytest.raises(CanaryWriteBlockedError, match=reason):
+            with authority.normal_delivery_write_guard(
+                _target("auto_offer_send", db_id=db_id)
+            ):
+                calls.append("send")
+    assert calls == []
+
+
+def test_normal_send_nested_refinement_is_exact_send_only_and_single_use(tmp_path):
+    db_path = _host_db(tmp_path / "host.db")
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    outer = _target("auto_offer_send", db_id=7)
+    exact_inner = _target("auto_offer_send")
+    calls = []
+
+    with authority.runtime_guard():
+        with authority.normal_delivery_write_guard(outer):
+            for mismatch in (
+                _target("auto_offer_send", order_id="other-order"),
+                dataclasses.replace(exact_inner, purchase_id="buff:other-order"),
+                dataclasses.replace(exact_inner, account_id="other-account"),
+                dataclasses.replace(
+                    exact_inner,
+                    recipient_steam_id="76561198000000009",
+                ),
+                _target("auto_offer_confirm"),
+                _target("host_receipt", db_id=7, assetid="asset-7"),
+                CanaryWriteTarget(action="buff_purchase"),
+            ):
+                with pytest.raises(
+                    CanaryWriteBlockedError,
+                    match="normal_write_refinement_mismatch",
+                ):
+                    with authority.external_write_guard(mismatch):
+                        calls.append("mismatch")
+
+            with authority.external_write_guard(exact_inner):
+                calls.append("send")
+            with pytest.raises(CanaryWriteBlockedError, match="normal_send_already_consumed"):
+                with authority.external_write_guard(exact_inner):
+                    calls.append("duplicate")
+
+            with pytest.raises(CanaryAuthorityError, match="invalid_write_action"):
+                with authority.external_write_guard(
+                    CanaryWriteTarget(action="auto_offer_accept")
+                ):
+                    calls.append("accept")
+
+    assert calls == ["send"]
+
+
+def test_active_and_stale_canary_authority_block_normal_send_barrier(tmp_path):
+    db_path = _host_db(tmp_path / "host.db")
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    session = authority._arm_owner_session(_permit())
+    target = _target("auto_offer_send", db_id=7)
+
+    with pytest.raises(CanaryAuthorityBusyError, match="canary_authority_active"):
+        with authority.runtime_guard():
+            with authority.normal_delivery_write_guard(target):
+                pass
+
+    session.release_keep_fence()
+    with pytest.raises(CanaryAuthorityStaleError, match="canary_authority_fenced"):
+        with authority.runtime_guard():
+            with authority.normal_delivery_write_guard(target):
+                pass
+
+
 def test_normal_runtime_nested_guards_remain_compatible(tmp_path):
     authority = CanaryAuthority(_root=tmp_path)
     with authority.runtime_guard():
@@ -575,6 +716,8 @@ def test_coordinator_persists_send_attempt_before_fenced_adapter_call():
         allow_writes=True,
         write_guard=blocked,
         clock=lambda: 10.0,
+        expected_trade_offer_counterparty_steam_id="76561198000000002",
+        expected_trade_offer_is_our_offer=True,
     )
     with pytest.raises(ReadOnlyCoordinatorBlockedError, match="canary_write_blocked"):
         coordinator.step(item)

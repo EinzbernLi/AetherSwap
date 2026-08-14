@@ -167,6 +167,22 @@ def _canonical_raw_identifier(value: object) -> str | None:
     return normalized
 
 
+def _canonical_positive_decimal_text(value: object) -> str | None:
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or not value.isascii()
+        or not value.isdecimal()
+        or value[0] == "0"
+    ):
+        return None
+    number = int(value)
+    if number <= 0 or str(number) != value:
+        return None
+    return value
+
+
 def _require_identifier(value: object, field: str) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise PlatformAdapterProtocolError(f"{field} must be a non-whitespace string")
@@ -247,8 +263,8 @@ def _exact_wait_send_order_matches(
         value = record.get("id")
         if isinstance(value, bool) or type(value) not in (str, int):
             return None
-        normalized = str(value).strip()
-        if not normalized:
+        normalized = str(value)
+        if not normalized or normalized.strip() != normalized:
             return None
         if normalized == order_id:
             matches.append(record)
@@ -459,7 +475,7 @@ class BuffReadOnlyAdapter:
             return _result(
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
-        buyer_steam_id = _normalize_identifier(record["buyer_steamid"])
+        buyer_steam_id = _canonical_positive_decimal_text(record["buyer_steamid"])
         if buyer_steam_id is None:
             return _result(request, PlatformResultStatus.MALFORMED, "malformed_payload")
         if buyer_steam_id != request.recipient_steam_id:

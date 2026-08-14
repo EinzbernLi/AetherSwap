@@ -212,6 +212,14 @@ class FreshUnknownBridge:
             )
         raise AssertionError(f"unexpected step from {status}")
 
+    def recover_result_unknown_readonly(self, delivery):
+        self.events.append("recovery_read")
+        return SimpleNamespace(
+            after=delivery,
+            persisted=False,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
     def close(self):
         pass
 
@@ -372,7 +380,7 @@ def test_canary_confirmation_result_unknown_stops_all_later_active_progression(
     owner_session.release_keep_fence()
 
 
-def test_normal_result_unknown_never_reauthorizes_send_or_recovery(
+def test_normal_result_unknown_uses_only_read_recovery_and_never_resends(
     monkeypatch,
 ):
     bridge = FreshUnknownBridge()
@@ -403,7 +411,7 @@ def test_normal_result_unknown_never_reauthorizes_send_or_recovery(
 
     assert first.result is AutoOfferResult.RESULT_UNKNOWN
     assert second.result is AutoOfferResult.RESULT_UNKNOWN
-    assert first.visited_order_ids == second.visited_order_ids == ()
+    assert first.visited_order_ids == second.visited_order_ids == (ORDER_ID,)
     assert integration._fresh_deliveries == []
-    assert bridge.events == []
+    assert bridge.events == ["recovery_read", "recovery_read"]
     assert bridge.current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN

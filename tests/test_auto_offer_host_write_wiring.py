@@ -137,6 +137,20 @@ class ScriptedBridge:
             decision=SimpleNamespace(result=AutoOfferResult.WAITING),
         )
 
+    def recover_result_unknown_readonly(self, delivery):
+        self.events.append(
+            (
+                "recover_result_unknown_readonly",
+                delivery.snapshot.buff_order_id,
+                delivery.snapshot.delivery_status,
+            )
+        )
+        return SimpleNamespace(
+            after=delivery,
+            persisted=False,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
     def list_recoverable(self):
         return tuple(
             delivery
@@ -433,8 +447,14 @@ def test_result_unknown_globally_stops_normal_runtime_progression(monkeypatch):
     outcome = integration.run_delivery_tick(rows)
 
     assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
-    assert outcome.visited_order_ids == ()
-    assert bridge.events == []
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.events == [
+        (
+            "recover_result_unknown_readonly",
+            "order-1",
+            DeliveryStatus.RESULT_UNKNOWN,
+        )
+    ]
 
 
 def test_unresolved_checkout_defers_all_fresh_platform_steps_and_close_does_not_write(monkeypatch):

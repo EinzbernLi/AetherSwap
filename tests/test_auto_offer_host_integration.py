@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +9,12 @@ import pytest
 
 import app.auto_offer.host_integration as host_integration
 import app.pipeline as pipeline
+from app.auto_offer.adapters import (
+    PlatformCapability,
+    PlatformRequest,
+    PlatformResult,
+    PlatformResultStatus,
+)
 from app.auto_offer.contracts import (
     AutoOfferResult,
     DeliveryMode,
@@ -105,6 +113,27 @@ def _host_row(order_id: str, *, db_id: int = 1) -> dict:
     }
 
 
+def _local_host_db(path: Path, rows) -> Path:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE purchase ("
+            "id INTEGER PRIMARY KEY, "
+            "buff_order_id TEXT, "
+            "pending_receipt INTEGER, "
+            "assetid TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO purchase(id,buff_order_id,pending_receipt,assetid) "
+            "VALUES(?,?,?,?)",
+            rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return path
+
+
 class FakeBridge:
     def __init__(self, recoverable=(), terminal=()):
         self.account_id = ACCOUNT_ID
@@ -115,6 +144,7 @@ class FakeBridge:
         }
         self.registered = []
         self.steps = []
+        self.recoveries = []
         self.closed = False
 
     def register_committed_purchase(self, record):
@@ -136,6 +166,16 @@ class FakeBridge:
 
     def step(self, delivery):
         self.steps.append((delivery.snapshot.buff_order_id, delivery.snapshot.delivery_status))
+        return SimpleNamespace(
+            after=delivery,
+            persisted=False,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
+    def recover_result_unknown_readonly(self, delivery):
+        self.recoveries.append(
+            (delivery.snapshot.buff_order_id, delivery.snapshot.delivery_status)
+        )
         return SimpleNamespace(
             after=delivery,
             persisted=False,
@@ -178,6 +218,103 @@ class MultiRecoveryBridge(FakeBridge):
         return SimpleNamespace(
             after=after,
             persisted=after != delivery,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
+class NormalSendBridge(FakeBridge):
+    def __init__(self, deliveries, db_path):
+        super().__init__(deliveries)
+        self.db_path = db_path
+        self.send_events = []
+        self.proof = object()
+
+    def get_by_purchase_id(self, purchase_id):
+        delivery = super().get_by_purchase_id(purchase_id)
+        self.send_events.append(("get", purchase_id, delivery.revision))
+        return delivery
+
+    def read_send_authority(self, delivery):
+        self.send_events.append(("read_send_authority", delivery.revision))
+        competing = sqlite3.connect(self.db_path, timeout=0.0, isolation_level=None)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                competing.execute("BEGIN IMMEDIATE")
+        finally:
+            competing.close()
+        return self.proof
+
+    def send_offer_with_authority(self, delivery, proof):
+        assert proof is self.proof
+        self.proof = None
+        attempted = StoredDelivery(
+            replace(
+                delivery.snapshot,
+                delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+                offer_attempted_at=10.0,
+            ),
+            delivery.revision + 1,
+        )
+        request = PlatformRequest(
+            purchase_id=attempted.snapshot.purchase_id,
+            buff_order_id=attempted.snapshot.buff_order_id,
+            account_id=attempted.snapshot.account_id,
+            recipient_steam_id=attempted.snapshot.recipient_steam_id,
+            revision=attempted.revision,
+            capability=PlatformCapability.SEND_OFFER,
+            timeout_seconds=5.0,
+        )
+        platform_result = PlatformResult(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "offer_created_unproven",
+        )
+        after = StoredDelivery(
+            replace(
+                attempted.snapshot,
+                delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+                delivery_error="write_result_unknown",
+            ),
+            attempted.revision + 1,
+        )
+        self.current[delivery.snapshot.buff_order_id] = after
+        self.send_events.append(("send", attempted.revision))
+        return SimpleNamespace(
+            before=delivery,
+            attempted=attempted,
+            platform_result=platform_result,
+            after=after,
+        )
+
+
+class ExactRecoveryBridge(FakeBridge):
+    def __init__(self, deliveries, *, malformed=False):
+        super().__init__(deliveries)
+        self.malformed = malformed
+
+    def recover_result_unknown_readonly(self, delivery):
+        order_id = delivery.snapshot.buff_order_id
+        self.recoveries.append((order_id, delivery.snapshot.delivery_status))
+        if self.malformed:
+            return SimpleNamespace(
+                after=delivery,
+                persisted=False,
+                decision=SimpleNamespace(result=AutoOfferResult.BLOCKED),
+            )
+        after = StoredDelivery(
+            replace(
+                delivery.snapshot,
+                delivery_status=DeliveryStatus.OFFER_SENT,
+                steam_tradeoffer_id=f"offer-{order_id}",
+                counterparty_steam_id="76561198000000002",
+                offer_sent_at=12.0,
+                delivery_error=None,
+            ),
+            delivery.revision + 1,
+        )
+        self.current[order_id] = after
+        return SimpleNamespace(
+            after=after,
+            persisted=True,
             decision=SimpleNamespace(result=AutoOfferResult.WAITING),
         )
 
@@ -552,18 +689,11 @@ def test_adjacent_readable_transitions_require_separate_ticks_and_receipt_tick(m
     assert writes == [(41, "order-1", "asset-exact")]
 
 
-@pytest.mark.parametrize(
-    "status",
-    [
-        DeliveryStatus.AWAITING_OFFER,
-        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
-    ],
-)
-def test_slice_b_buyer_write_required_states_are_safe_waits(monkeypatch, status):
+def test_normal_buyer_confirmation_required_remains_safe_wait(monkeypatch):
     _patch_identity(monkeypatch)
     stored = _stored(
         "order-1",
-        status=status,
+        status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
         mode=DeliveryMode.BUYER_SENDS_OFFER,
         revision=5,
     )
@@ -574,6 +704,184 @@ def test_slice_b_buyer_write_required_states_are_safe_waits(monkeypatch, status)
 
     assert outcome.result is AutoOfferResult.WAITING
     assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.steps == []
+
+
+def test_normal_send_is_one_host_barrier_action_and_stops_at_result_unknown(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+    db_path = _local_host_db(
+        tmp_path / "host.db",
+        ((41, "order-1", 1, None), (42, "order-2", 1, None)),
+    )
+    authority = host_integration.CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    awaiting = _stored(
+        "order-1",
+        status=DeliveryStatus.AWAITING_OFFER,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = NormalSendBridge((awaiting, _stored("order-2")), db_path)
+    receipt_writes = []
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge,
+        complete_purchase_receipt_by_id=(
+            lambda *args: receipt_writes.append(args) or True
+        ),
+    )
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=41), _host_row("order-2", db_id=42)]
+    )
+
+    assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.send_events == [
+        ("get", "buff:order-1", 5),
+        ("read_send_authority", 5),
+        ("send", 6),
+    ]
+    assert bridge.steps == []
+    assert bridge.proof is None
+    after = bridge.current["order-1"].snapshot
+    assert after.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+    assert after.delivery_error == "write_result_unknown"
+    assert after.steam_tradeoffer_id is None
+    assert after.counterparty_steam_id is None
+    assert receipt_writes == []
+
+
+def test_exact_result_unknown_recovery_ends_tick_before_normal_progression(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = ExactRecoveryBridge((unknown, _stored("order-2")))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=1), _host_row("order-2", db_id=2)]
+    )
+
+    assert outcome.result is AutoOfferResult.WAITING
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.recoveries == [("order-1", DeliveryStatus.RESULT_UNKNOWN)]
+    assert bridge.steps == []
+    recovered = bridge.current["order-1"].snapshot
+    assert recovered.delivery_status is DeliveryStatus.OFFER_SENT
+    assert recovered.steam_tradeoffer_id == "offer-order-1"
+    assert recovered.counterparty_steam_id == "76561198000000002"
+
+
+def test_malformed_result_unknown_recovery_blocks_without_other_progression(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = ExactRecoveryBridge((unknown, _stored("order-2")), malformed=True)
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=1), _host_row("order-2", db_id=2)]
+    )
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.recoveries == [("order-1", DeliveryStatus.RESULT_UNKNOWN)]
+    assert bridge.steps == []
+    assert bridge.current["order-1"] == unknown
+
+
+def test_recovery_only_tick_is_bounded_and_cursor_fair(monkeypatch, tmp_path):
+    _patch_identity(monkeypatch)
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    orders = tuple(f"order-{index:02d}" for index in range(10))
+    unknowns = tuple(
+        _stored(
+            order,
+            status=DeliveryStatus.RESULT_UNKNOWN,
+            mode=DeliveryMode.BUYER_SENDS_OFFER,
+            revision=3,
+        )
+        for order in orders
+    )
+    bridge = FakeBridge(unknowns)
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+    rows = [_host_row(order, db_id=index + 1) for index, order in enumerate(orders)]
+
+    first = integration.run_delivery_tick(rows)
+    second = integration.run_delivery_tick(rows, cursor=first.next_cursor)
+
+    assert first.result is second.result is AutoOfferResult.RESULT_UNKNOWN
+    assert first.visited_order_ids == orders[:8]
+    assert first.next_cursor == "order-07"
+    assert second.visited_order_ids == (
+        "order-08",
+        "order-09",
+        "order-00",
+        "order-01",
+        "order-02",
+        "order-03",
+        "order-04",
+        "order-05",
+    )
+    assert bridge.steps == []
+    assert len(bridge.recoveries) == 16
+
+
+def test_bound_confirmation_result_unknown_is_not_c2a_auto_recovered(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=6,
+    )
+    bound = StoredDelivery(
+        replace(
+            unknown.snapshot,
+            steam_tradeoffer_id="offer-1",
+            counterparty_steam_id="76561198000000002",
+            offer_sent_at=10.0,
+        ),
+        unknown.revision,
+    )
+    bridge = FakeBridge((bound,))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick([_host_row("order-1")])
+
+    assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
+    assert outcome.visited_order_ids == ()
+    assert bridge.recoveries == []
     assert bridge.steps == []
 
 
@@ -617,8 +925,9 @@ def test_delivery_tick_result_unknown_short_circuits_every_order(monkeypatch):
     )
 
     assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
-    assert outcome.visited_order_ids == ()
+    assert outcome.visited_order_ids == ("order-2",)
     assert bridge.steps == []
+    assert bridge.recoveries == [("order-2", DeliveryStatus.RESULT_UNKNOWN)]
     assert writes == []
 
 
@@ -644,7 +953,7 @@ def test_safe_wait_advances_cursor_and_allows_following_order(monkeypatch):
     _patch_identity(monkeypatch)
     waiting = _stored(
         "order-1",
-        status=DeliveryStatus.AWAITING_OFFER,
+        status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
         mode=DeliveryMode.BUYER_SENDS_OFFER,
         revision=2,
     )
