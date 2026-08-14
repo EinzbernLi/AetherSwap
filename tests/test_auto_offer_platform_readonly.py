@@ -368,6 +368,53 @@ def test_malformed_present_order_alias_is_malformed_without_buyer_fallback():
     assert client.wait_calls == []
 
 
+@pytest.mark.parametrize("field", ("buff_order_id", "bill_order_id"))
+@pytest.mark.parametrize(
+    "invalid_value",
+    (
+        "",
+        " buff-order-1",
+        "buff-order-1 ",
+        True,
+        1.0,
+        [],
+        {},
+    ),
+)
+def test_order_aliases_reject_noncanonical_raw_identifiers_without_buyer_fallback(
+    field, invalid_value
+):
+    client = BuffStub(
+        [buff_record(**{field: invalid_value})],
+        wait_payload=[wait_send_record()],
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.wait_calls == []
+
+
+def test_integer_order_alias_preserves_exact_canonical_success():
+    result = buff_adapter(
+        BuffStub([buff_record(buff_order_id=123)])
+    ).execute(
+        request(
+            buff_order_id="123",
+            capability=PlatformCapability.READ_DELIVERY_DIRECTION,
+        )
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == DeliveryDirectionEvidence(
+        counterparty_steam_id="seller-1"
+    )
+
+
 def test_conflicting_trade_offer_aliases_are_malformed_without_evidence():
     result = buff_adapter(
         BuffStub([buff_record(trade_offer_id="offer-2")])
@@ -396,6 +443,40 @@ def test_malformed_present_trade_offer_alias_is_malformed_without_evidence():
     assert result.status is PlatformResultStatus.MALFORMED
     assert result.detail == "malformed_payload"
     assert result.evidence is None
+
+
+@pytest.mark.parametrize("field", ("tradeofferid", "trade_offer_id"))
+@pytest.mark.parametrize(
+    "invalid_value",
+    (
+        "",
+        " offer-1",
+        "offer-1 ",
+        True,
+        1.0,
+        [],
+        {},
+    ),
+)
+def test_trade_offer_aliases_reject_noncanonical_raw_identifiers(
+    field, invalid_value
+):
+    result = buff_adapter(
+        BuffStub([buff_record(**{field: invalid_value})])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_integer_trade_offer_alias_preserves_exact_canonical_success():
+    result = buff_adapter(
+        BuffStub([buff_record(tradeofferid=123)])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == OfferStateEvidence("123")
 
 
 def test_absent_trade_offer_aliases_preserve_order_not_proven():

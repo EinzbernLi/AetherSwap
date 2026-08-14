@@ -158,6 +158,15 @@ def _normalize_identifier(value: object) -> str | None:
     return normalized or None
 
 
+def _canonical_raw_identifier(value: object) -> str | None:
+    if type(value) not in (str, int):
+        return None
+    normalized = str(value)
+    if not normalized or normalized.strip() != normalized:
+        return None
+    return normalized
+
+
 def _require_identifier(value: object, field: str) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise PlatformAdapterProtocolError(f"{field} must be a non-whitespace string")
@@ -197,18 +206,24 @@ def _records_from_payload(payload: object) -> list[Mapping[str, Any]] | Platform
     return payload
 
 
-def _canonical_order_values(record: Mapping[str, Any]) -> tuple[str, ...] | None:
+def _canonical_alias_values(
+    record: Mapping[str, Any], fields: tuple[str, ...]
+) -> tuple[str, ...] | None:
     values: list[str] = []
-    for field in _ORDER_FIELDS:
+    for field in fields:
         if field not in record:
             continue
-        value = _normalize_identifier(record[field])
+        value = _canonical_raw_identifier(record[field])
         if value is None:
             return None
         values.append(value)
     if len(set(values)) > 1:
         return None
     return tuple(values)
+
+
+def _canonical_order_values(record: Mapping[str, Any]) -> tuple[str, ...] | None:
+    return _canonical_alias_values(record, _ORDER_FIELDS)
 
 
 def _exact_order_matches(
@@ -375,7 +390,7 @@ class BuffReadOnlyAdapter:
                 ),
             )
 
-        offer_values = _identity_values(record, _TRADE_OFFER_FIELDS)
+        offer_values = _canonical_alias_values(record, _TRADE_OFFER_FIELDS)
         if offer_values is None:
             return _result(
                 request, PlatformResultStatus.MALFORMED, "malformed_payload"
