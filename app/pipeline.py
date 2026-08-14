@@ -28,7 +28,6 @@ from app.auto_offer.host_integration import (
     is_auto_offer_enabled,
 )
 from app.auto_offer.runtime_lifecycle import (
-    _STORE_PATH,
     get_effective_runtime_state,
     preflight_auto_offer_enable,
 )
@@ -761,30 +760,6 @@ def get_pipeline_runtime_blocker(config: dict | None = None) -> dict:
         runtime_config = (
             load_app_config_validated() if config is None else config
         )
-        try:
-            if canary_metadata_present():
-                return {
-                    "code": "CANARY_AUTHORITY_ACTIVE",
-                    "message": "单订单 canary authority 已激活或待人工清理，普通流水线禁止启动",
-                }
-        except CanaryAuthorityError:
-            return {
-                "code": "CANARY_AUTHORITY_FENCED",
-                "message": "无法安全证明 canary authority 已解除，普通流水线禁止启动",
-            }
-        if (
-            not is_auto_offer_enabled(runtime_config)
-            and not any(
-                Path(str(path)).exists()
-                for path in (
-                    _STORE_PATH,
-                    Path(f"{_STORE_PATH}-wal"),
-                    Path(f"{_STORE_PATH}-shm"),
-                    Path(f"{_STORE_PATH}-journal"),
-                )
-            )
-        ):
-            return {}
         state = get_effective_runtime_state(
             config=runtime_config,
             purchases=_lifecycle_host_purchases(),

@@ -328,9 +328,13 @@ def receive_worker() -> None:
                         or not _buff_background_request_is_safe()
                     ):
                         continue
+                    # Poll cadence may use the pre-sleep snapshot, but every
+                    # authority decision must use intent reloaded inside the
+                    # existing BUFF fences after their safety recheck.
+                    pass_cfg = load_app_config_validated()
                     purchases = get_purchases()
                     runtime_state = get_effective_runtime_state(
-                        config=cfg,
+                        config=pass_cfg,
                         purchases=purchases,
                     )
                     mode = runtime_state.mode
@@ -362,11 +366,11 @@ def receive_worker() -> None:
                     if buff_client is None:
                         buff_client = create_buff_client_from_config(
                             credentials,
-                            cfg,
+                            pass_cfg,
                         )
                     if auto_offer_active:
                         outcome = _run_auto_offer_delivery_tick(
-                            cfg,
+                            pass_cfg,
                             buff_client,
                             purchases,
                             cursor=auto_offer_cursor,

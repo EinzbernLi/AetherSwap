@@ -2446,6 +2446,74 @@ def test_draining_receive_worker_preserves_cursor_until_off_then_resets(monkeypa
     assert legacy_calls == []
 
 
+def test_receive_worker_reloads_current_intent_inside_activity_fence(monkeypatch):
+    import app.receive_flow as receive_flow
+    import app.services.buff_auth as buff_auth
+    import app.services.buff_checkout_guard as buff_checkout_guard
+    import app.services.workers as workers
+    from contextlib import nullcontext
+
+    class StopWorker(BaseException):
+        pass
+
+    on_cfg = {"auto_offer": {"enabled": True}, "pipeline": {}}
+    off_cfg = {"auto_offer": {"enabled": False}, "pipeline": {}}
+    configs = iter([on_cfg, off_cfg, off_cfg])
+    seen_runtime_configs = []
+    sleep_calls = []
+
+    def controlled_sleep(_seconds):
+        sleep_calls.append(_seconds)
+        if len(sleep_calls) == 2:
+            raise StopWorker()
+
+    monkeypatch.setattr(workers, "load_app_config_validated", lambda: next(configs))
+    monkeypatch.setattr(workers.time, "sleep", controlled_sleep)
+    monkeypatch.setattr(workers, "is_steam_background_allowed", lambda: True)
+    monkeypatch.setattr(workers, "_buff_background_request_is_safe", lambda: True)
+    monkeypatch.setattr(workers, "get_purchases", lambda: [{"pending_receipt": False, "assetid": None}])
+    monkeypatch.setattr(
+        workers,
+        "get_effective_runtime_state",
+        lambda *, config, purchases: (
+            seen_runtime_configs.append(config)
+            or AutoOfferRuntimeState(
+                requested_enabled=False,
+                active_delivery_count=0,
+                mode=AutoOfferRuntimeMode.OFF,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        workers,
+        "_run_auto_offer_delivery_tick",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale ON config entered Auto Offer")
+        ),
+    )
+    monkeypatch.setattr(
+        workers,
+        "get_buff_credentials",
+        lambda: (_ for _ in ()).throw(AssertionError("OFF pass requested BUFF credentials")),
+    )
+    monkeypatch.setattr(buff_auth, "get_buff_auth_lock", nullcontext)
+    monkeypatch.setattr(buff_checkout_guard, "buff_activity_guard", nullcontext)
+    monkeypatch.setattr(
+        receive_flow,
+        "try_receive_once",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("OFF pass entered legacy path without pending receipt")
+        ),
+    )
+
+    with pytest.raises(StopWorker):
+        workers.receive_worker()
+
+    assert sleep_calls == [30, 30]
+    assert seen_runtime_configs == [off_cfg]
+    assert seen_runtime_configs[0] is off_cfg
+
+
 def test_task034_runtime_markers_remain_confined_to_existing_host_seam():
     untouched_host_files = [
         Path("app/config_schema.py"),

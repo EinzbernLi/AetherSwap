@@ -297,6 +297,68 @@ def test_config_route_returns_stable_failure_for_blocked_toggle(monkeypatch):
     }
 
 
+def test_pipeline_runtime_blocker_always_uses_effective_runtime_facade(monkeypatch):
+    from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
+
+    config = {"auto_offer": {"enabled": False}, "pipeline": {}}
+    calls = []
+    blocked = AutoOfferRuntimeState(
+        requested_enabled=False,
+        active_delivery_count=0,
+        mode=AutoOfferRuntimeMode.BLOCKED,
+        reason="duplicate_host_identity",
+    )
+    monkeypatch.setattr(pipeline, "load_app_config_validated", lambda: config)
+    monkeypatch.setattr(pipeline, "_lifecycle_host_purchases", lambda: [])
+    monkeypatch.setattr(
+        pipeline,
+        "get_effective_runtime_state",
+        lambda *, config, purchases: calls.append((config, purchases)) or blocked,
+    )
+
+    blocker = pipeline.get_pipeline_runtime_blocker()
+
+    assert blocker["code"] == "AUTO_OFFER_RUNTIME_BLOCKED"
+    assert blocker["mode"] == AutoOfferRuntimeMode.BLOCKED.value
+    assert blocker["message"] == "duplicate_host_identity"
+    assert calls == [(config, [])]
+
+
+def test_start_pipeline_rejects_blocked_effective_runtime_without_store(monkeypatch):
+    from contextlib import nullcontext
+    from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
+    from app.services import buff_auth
+
+    blocked = AutoOfferRuntimeState(
+        requested_enabled=False,
+        active_delivery_count=0,
+        mode=AutoOfferRuntimeMode.BLOCKED,
+        reason="duplicate_host_identity",
+    )
+    state = _State()
+    monkeypatch.setattr(buff_auth, "get_buff_auth_lock", lambda: threading.RLock())
+    monkeypatch.setattr(pipeline, "buff_activity_guard", nullcontext)
+    monkeypatch.setattr(pipeline, "get_unresolved_checkout", lambda: None)
+    monkeypatch.setattr(pipeline, "get_pipeline_start_blocker", lambda: {})
+    monkeypatch.setattr(pipeline, "get_state", lambda: state)
+    monkeypatch.setattr(pipeline, "load_app_config_validated", lambda: {"auto_offer": {"enabled": False}})
+    monkeypatch.setattr(pipeline, "_lifecycle_host_purchases", lambda: [])
+    monkeypatch.setattr(pipeline, "get_effective_runtime_state", lambda **_kwargs: blocked)
+    monkeypatch.setattr(
+        pipeline,
+        "_run_pipeline_guarded",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("blocked pipeline started")),
+    )
+    monkeypatch.setattr(pipeline, "_shutdown_pending", False)
+    monkeypatch.setattr(pipeline, "_pipeline_maintenance_reason", "")
+    with pipeline._pipeline_start_lock:
+        pipeline._pipeline_thread = None
+
+    assert pipeline.start_pipeline({"pipeline": {}}) is False
+    with pipeline._pipeline_start_lock:
+        assert pipeline._pipeline_thread is None
+
+
 def test_start_and_toggle_serialize_on_same_lifecycle_lock(monkeypatch):
     from app.services import buff_auth
 
