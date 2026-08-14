@@ -20,6 +20,7 @@ from app.auto_offer.adapters import (
     PlatformResult,
     PlatformResultStatus,
     RecipientInventoryItemEvidence,
+    SellerOrderItemEvidence,
     SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
@@ -2188,3 +2189,417 @@ def test_write_authority_does_not_import_or_wire_task007_executor():
     assert "buyer_send_offer" not in text
     assert "POST" not in text
     assert "retry" not in text.lower()
+
+
+SELLER_RECIPIENT = "76561198000000001"
+SELLER_COUNTERPARTY = "76561198000000002"
+SELLER_GOODS_ID = 73001
+SELLER_ASSET_ID = "seller-asset-1"
+
+
+def seller_offer_confirmed(
+    revision=7,
+    *,
+    offer_id="offer-1",
+    counterparty=SELLER_COUNTERPARTY,
+):
+    snapshot = make_snapshot(
+        DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryMode.SELLER_SENDS_OFFER,
+        steam_tradeoffer_id=offer_id,
+        counterparty_steam_id=counterparty,
+    )
+    return make_delivery(
+        replace(snapshot, recipient_steam_id=SELLER_RECIPIENT),
+        revision=revision,
+    )
+
+
+def exact_seller_item_evidence(**changes):
+    value = SellerOrderItemEvidence(
+        buff_order_id="buff-order-1",
+        steam_tradeoffer_id="offer-1",
+        recipient_steam_id=SELLER_RECIPIENT,
+        counterparty_steam_id=SELLER_COUNTERPARTY,
+        goods_id=SELLER_GOODS_ID,
+        seller_assetid=SELLER_ASSET_ID,
+    )
+    return replace(value, **changes)
+
+
+def exact_seller_accept_steam_evidence(
+    *,
+    lifecycle=SteamTradeOfferLifecycle.ACTIVE,
+    offer_id="offer-1",
+    account_id=SELLER_RECIPIENT,
+    counterparty=SELLER_COUNTERPARTY,
+    is_our_offer=False,
+    items_to_give=(),
+    items_to_receive=None,
+):
+    if items_to_receive is None:
+        items_to_receive = (
+            TradeOfferItemEvidence(730, "2", SELLER_ASSET_ID, 1),
+        )
+    return SteamTradeOfferEvidence(
+        steam_tradeoffer_id=offer_id,
+        account_steam_id=account_id,
+        counterparty_steam_id=counterparty,
+        is_our_offer=is_our_offer,
+        lifecycle=lifecycle,
+        items_to_give=items_to_give,
+        items_to_receive=items_to_receive,
+    )
+
+
+def seller_authority_coordinator(
+    store,
+    *,
+    buff_evidence=None,
+    steam_evidence=None,
+    buff_result_factory=None,
+    steam_result_factory=None,
+    order_log=None,
+):
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    buff_evidence = buff_evidence or exact_seller_item_evidence()
+    steam_evidence = steam_evidence or exact_seller_accept_steam_evidence()
+
+    def buff_success(request):
+        if order_log is not None:
+            order_log.append("buff")
+        return PlatformResult(
+            request,
+            PlatformResultStatus.SUCCESS,
+            evidence=buff_evidence,
+        )
+
+    def steam_success(request):
+        if order_log is not None:
+            order_log.append("steam")
+        return PlatformResult(
+            request,
+            PlatformResultStatus.SUCCESS,
+            evidence=steam_evidence,
+        )
+
+    buff_adapter = SpyAdapter(
+        {PlatformCapability.READ_SELLER_OFFER_ITEM},
+        buff_result_factory or buff_success,
+    )
+    steam_adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_TRADE_OFFER},
+        steam_result_factory or steam_success,
+    )
+    coordinator = DeliveryCoordinator(
+        store,
+        {
+            PlatformCapability.READ_SELLER_OFFER_ITEM: buff_adapter,
+            PlatformCapability.READ_STEAM_TRADE_OFFER: steam_adapter,
+        },
+        timeout_seconds=1.0,
+    )
+    return coordinator, buff_adapter, steam_adapter
+
+
+def test_seller_authority_reads_fresh_buff_before_steam_and_mints_exact_proof():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    order = []
+    coordinator, buff_adapter, steam_adapter = seller_authority_coordinator(
+        store,
+        order_log=order,
+    )
+
+    result = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+    proof = result.proof
+
+    assert order == ["buff", "steam"]
+    assert len(buff_adapter.calls) == len(steam_adapter.calls) == 1
+    assert buff_adapter.calls[0].steam_tradeoffer_id == "offer-1"
+    assert buff_adapter.calls[0].counterparty_steam_id == SELLER_COUNTERPARTY
+    assert buff_adapter.calls[0].host_goods_id == SELLER_GOODS_ID
+    assert proof is coordinator._seller_accept_proof
+    assert repr(proof) == "<opaque seller accept proof>"
+    assert (
+        proof.purchase_id,
+        proof.buff_order_id,
+        proof.account_id,
+        proof.recipient_steam_id,
+        proof.revision,
+        proof.steam_tradeoffer_id,
+        proof.counterparty_steam_id,
+        proof.host_goods_id,
+        proof.seller_assetid,
+    ) == (
+        item.snapshot.purchase_id,
+        item.snapshot.buff_order_id,
+        item.snapshot.account_id,
+        SELLER_RECIPIENT,
+        item.revision,
+        "offer-1",
+        SELLER_COUNTERPARTY,
+        SELLER_GOODS_ID,
+        SELLER_ASSET_ID,
+    )
+    assert store.advance_count == 0
+
+
+def test_seller_accept_proof_is_opaque_process_local_and_single_current():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, _, _ = seller_authority_coordinator(store)
+    first = coordinator.read_seller_accept_authority(
+        item,
+        SELLER_GOODS_ID,
+    ).proof
+
+    with pytest.raises(TypeError, match="seller_accept_proof_not_serializable"):
+        pickle.dumps(first)
+    with pytest.raises(TypeError, match="seller_accept_proof_not_serializable"):
+        copy.copy(first)
+    with pytest.raises(TypeError, match="seller_accept_proof_not_serializable"):
+        copy.deepcopy(first)
+
+    second = coordinator.read_seller_accept_authority(
+        item,
+        SELLER_GOODS_ID,
+    ).proof
+    restarted, _, _ = seller_authority_coordinator(store)
+    assert second is not first
+    assert coordinator._seller_accept_proof is second
+    assert restarted._seller_accept_proof is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [PlatformResultStatus.RESULT_UNKNOWN, PlatformResultStatus.TIMEOUT],
+)
+def test_seller_authority_transient_buff_result_mints_no_proof_or_steam_read(
+    status,
+):
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, buff_adapter, steam_adapter = seller_authority_coordinator(
+        store,
+        buff_result_factory=lambda request: PlatformResult(
+            request,
+            status,
+            "order_not_proven",
+        ),
+    )
+
+    result = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+
+    assert result.proof is None
+    assert result.steam_result is None
+    assert len(buff_adapter.calls) == 1
+    assert steam_adapter.calls == []
+    assert coordinator._seller_accept_proof is None
+
+
+@pytest.mark.parametrize(
+    "steam_evidence",
+    [
+        exact_seller_accept_steam_evidence(
+            items_to_give=(
+                TradeOfferItemEvidence(730, "2", "outgoing-asset", 1),
+            )
+        ),
+        exact_seller_accept_steam_evidence(
+            items_to_receive=(
+                TradeOfferItemEvidence(730, "2", SELLER_ASSET_ID, 1),
+                TradeOfferItemEvidence(730, "2", "seller-asset-2", 1),
+            )
+        ),
+        exact_seller_accept_steam_evidence(
+            items_to_give=(
+                TradeOfferItemEvidence(730, "2", "outgoing-asset", 1),
+            ),
+            items_to_receive=(),
+        ),
+        exact_seller_accept_steam_evidence(
+            items_to_receive=(
+                TradeOfferItemEvidence(440, "2", SELLER_ASSET_ID, 1),
+            )
+        ),
+        exact_seller_accept_steam_evidence(
+            items_to_receive=(
+                TradeOfferItemEvidence(730, "2", SELLER_ASSET_ID, 2),
+            )
+        ),
+        exact_seller_accept_steam_evidence(
+            items_to_receive=(
+                TradeOfferItemEvidence(730, "2", "wrong-asset", 1),
+            )
+        ),
+        exact_seller_accept_steam_evidence(is_our_offer=True),
+        exact_seller_accept_steam_evidence(offer_id="offer-2"),
+        exact_seller_accept_steam_evidence(
+            account_id="76561198000000003"
+        ),
+        exact_seller_accept_steam_evidence(
+            counterparty="76561198000000003"
+        ),
+        exact_seller_accept_steam_evidence(
+            lifecycle=SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION
+        ),
+    ],
+)
+def test_seller_authority_steam_identity_direction_or_item_gap_mints_no_proof(
+    steam_evidence,
+):
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, _, steam_adapter = seller_authority_coordinator(
+        store,
+        steam_evidence=steam_evidence,
+    )
+
+    result = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+
+    assert len(steam_adapter.calls) == 1
+    assert result.proof is None
+    assert coordinator._seller_accept_proof is None
+
+
+def test_seller_authority_steam_timeout_mints_no_proof():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, _, steam_adapter = seller_authority_coordinator(
+        store,
+        steam_result_factory=lambda request: PlatformResult(
+            request,
+            PlatformResultStatus.TIMEOUT,
+            "read_timeout",
+        ),
+    )
+
+    result = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+
+    assert len(steam_adapter.calls) == 1
+    assert result.proof is None
+    assert coordinator._seller_accept_proof is None
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [SteamTradeOfferLifecycle.ACCEPTED, SteamTradeOfferLifecycle.IN_ESCROW],
+)
+def test_external_accepted_or_escrow_progresses_readonly_without_proof(lifecycle):
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        steam_evidence=exact_seller_accept_steam_evidence(lifecycle=lifecycle),
+    )
+
+    result = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+
+    assert result.proof is None
+    assert result.steam_result.persisted is True
+    assert (
+        result.steam_result.after.snapshot.delivery_status
+        is DeliveryStatus.AWAITING_INVENTORY
+    )
+    assert store.advance_count == 1
+
+
+def test_terminal_seller_offer_progresses_readonly_and_mints_no_proof():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        steam_evidence=exact_seller_accept_steam_evidence(
+            lifecycle=SteamTradeOfferLifecycle.DECLINED
+        ),
+    )
+
+    result = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+
+    assert result.proof is None
+    assert result.steam_result.persisted is True
+    assert (
+        result.steam_result.after.snapshot.delivery_status
+        is DeliveryStatus.OFFER_TERMINATED
+    )
+
+
+def test_store_revision_offer_or_counterparty_change_invalidates_seller_proof():
+    item = seller_offer_confirmed()
+    for changed in (
+        StoredDelivery(item.snapshot, item.revision + 1),
+        StoredDelivery(
+            replace(item.snapshot, steam_tradeoffer_id="offer-2"),
+            item.revision,
+        ),
+        StoredDelivery(
+            replace(
+                item.snapshot,
+                counterparty_steam_id="76561198000000003",
+            ),
+            item.revision,
+        ),
+    ):
+        store = RecordingStore(item)
+        coordinator, _, _ = seller_authority_coordinator(store)
+        assert coordinator.read_seller_accept_authority(
+            item,
+            SELLER_GOODS_ID,
+        ).proof is not None
+        store.current = changed
+        with pytest.raises(ReadOnlyCoordinatorConflictError):
+            coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+        assert coordinator._seller_accept_proof is None
+
+
+def test_intervening_coordinator_operation_invalidates_seller_proof():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, _, _ = seller_authority_coordinator(store)
+    assert coordinator.read_seller_accept_authority(
+        item,
+        SELLER_GOODS_ID,
+    ).proof is not None
+
+    coordinator.step(item)
+
+    assert coordinator._seller_accept_proof is None
+
+
+def test_persisted_snapshot_alone_cannot_mint_seller_proof():
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    item = seller_offer_confirmed()
+    steam_adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_TRADE_OFFER},
+        success_factory(exact_seller_accept_steam_evidence()),
+    )
+    coordinator = DeliveryCoordinator(
+        RecordingStore(item),
+        {PlatformCapability.READ_STEAM_TRADE_OFFER: steam_adapter},
+        timeout_seconds=1.0,
+    )
+
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="seller_accept_buff_adapter_required",
+    ):
+        coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID)
+
+    assert coordinator._seller_accept_proof is None
+    assert steam_adapter.calls == []
+
+
+def test_c3b1_adds_zero_accept_write_or_consumer():
+    import app.auto_offer.coordinator as coordinator_module
+
+    assert (
+        PlatformCapability.ACCEPT_OFFER
+        not in coordinator_module._WRITE_CAPABILITIES
+    )
+    assert not hasattr(
+        coordinator_module.DeliveryCoordinator,
+        "accept_offer_with_authority",
+    )

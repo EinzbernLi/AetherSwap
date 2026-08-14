@@ -24,10 +24,15 @@ from app.auto_offer.adapters import (
     PlatformResult,
     PlatformResultStatus,
     RecipientInventoryItemEvidence,
+    SellerOrderItemEvidence,
     SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
+)
+from app.auto_offer.buff_order_evidence import (
+    BuffOrderEvidenceError,
+    normalize_exact_seller_buff_item,
 )
 from app.auto_offer.counterparty_evidence import (
     CounterpartyEvidenceError,
@@ -43,6 +48,7 @@ BUFF_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_OFFER_STATE,
+        PlatformCapability.READ_SELLER_OFFER_ITEM,
     }
 )
 STEAM_INVENTORY_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
@@ -131,6 +137,7 @@ def _result(
     detail: str,
     evidence: DeliveryDirectionEvidence
     | OfferStateEvidence
+    | SellerOrderItemEvidence
     | InventoryStateEvidence
     | SteamTradeOfferEvidence
     | SteamCompletedTradeEvidence
@@ -355,6 +362,9 @@ class BuffReadOnlyAdapter:
                 return _result(request, parsed, "order_not_proven")
             return _result(request, parsed, "malformed_payload")
 
+        if request.capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
+            return self._execute_seller_offer_item(request, parsed)
+
         matches = _exact_order_matches(parsed, request.buff_order_id)
         if matches is None:
             return _result(
@@ -438,6 +448,62 @@ class BuffReadOnlyAdapter:
             PlatformResultStatus.SUCCESS,
             "offer_pending",
             OfferStateEvidence(offer_id, counterparty),
+        )
+
+    def _execute_seller_offer_item(
+        self,
+        request: PlatformRequest,
+        records: list[Mapping[str, Any]],
+    ) -> PlatformResult:
+        matches = _exact_order_matches(records, request.buff_order_id)
+        if matches is None:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "malformed_payload",
+            )
+        if not matches:
+            return _result(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_not_proven",
+            )
+        if len(matches) > 1:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "ambiguous_order",
+            )
+        try:
+            evidence = normalize_exact_seller_buff_item(
+                records,
+                buff_order_id=request.buff_order_id,
+                recipient_steam_id=request.recipient_steam_id,
+                host_goods_id=request.host_goods_id,
+            )
+        except BuffOrderEvidenceError:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "seller_item_not_proven",
+            )
+        if (
+            evidence.buff_order_id != request.buff_order_id
+            or evidence.steam_tradeoffer_id != request.steam_tradeoffer_id
+            or evidence.recipient_steam_id != request.recipient_steam_id
+            or evidence.counterparty_steam_id != request.counterparty_steam_id
+            or evidence.goods_id != request.host_goods_id
+        ):
+            return _result(
+                request,
+                PlatformResultStatus.FAILURE,
+                "identity_mismatch",
+            )
+        return _result(
+            request,
+            PlatformResultStatus.SUCCESS,
+            "seller_offer_item_proven",
+            evidence,
         )
 
     def _execute_buyer_wait_send(self, request: PlatformRequest) -> PlatformResult:

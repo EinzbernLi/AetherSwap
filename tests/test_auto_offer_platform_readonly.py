@@ -18,6 +18,7 @@ from app.auto_offer.adapters import (
     PlatformResult,
     PlatformResultStatus,
     RecipientInventoryItemEvidence,
+    SellerOrderItemEvidence,
     SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
@@ -178,6 +179,126 @@ def steam_trade_offer_payload(**changes):
     }
     value.update(changes)
     return value
+
+
+def seller_item_request(**changes):
+    value = request(
+        capability=PlatformCapability.READ_SELLER_OFFER_ITEM,
+        recipient_steam_id="76561198000000001",
+        steam_tradeoffer_id="offer-1",
+        counterparty_steam_id="76561198000000002",
+        host_goods_id=73001,
+    )
+    return replace(value, **changes)
+
+
+def seller_item_record(**changes):
+    value = {
+        "buff_order_id": "buff-order-1",
+        "tradeofferid": "offer-1",
+        "buyer_steam_id": "76561198000000001",
+        "seller_steam_id": "76561198000000002",
+        "items_to_trade": [{"assetid": "asset-1", "goods_id": 73001}],
+    }
+    value.update(changes)
+    return value
+
+
+def test_exact_buff_seller_item_read_uses_one_existing_read_and_no_fallback():
+    client = BuffStub(
+        [seller_item_record()],
+        wait_payload=[wait_send_record()],
+    )
+    item = seller_item_request()
+
+    result = buff_adapter(client).execute(item)
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.request is item
+    assert result.evidence == SellerOrderItemEvidence(
+        buff_order_id="buff-order-1",
+        steam_tradeoffer_id="offer-1",
+        recipient_steam_id="76561198000000001",
+        counterparty_steam_id="76561198000000002",
+        goods_id=73001,
+        seller_assetid="asset-1",
+    )
+    assert client.calls == 1
+    assert client.wait_calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [seller_item_record(buff_order_id="other-order")],
+        [seller_item_record(), seller_item_record(tradeofferid="offer-2")],
+        [
+            seller_item_record(),
+            seller_item_record(buff_order_id="other-order"),
+        ],
+        [
+            seller_item_record(
+                items_to_trade=[
+                    {"assetid": "asset-1", "goods_id": 73001},
+                    {"assetid": "asset-2", "goods_id": 73001},
+                ]
+            )
+        ],
+        [seller_item_record(buyer_steam_id="76561198000000003")],
+    ],
+)
+def test_seller_item_absent_ambiguous_shared_multi_or_recipient_never_succeeds(
+    payload,
+):
+    client = BuffStub(payload, wait_payload=[wait_send_record()])
+
+    result = buff_adapter(client).execute(seller_item_request())
+
+    assert result.status is not PlatformResultStatus.SUCCESS
+    assert result.evidence is None
+    assert client.calls == 1
+    assert client.wait_calls == []
+
+
+@pytest.mark.parametrize(
+    "request_changes",
+    [
+        {"steam_tradeoffer_id": "offer-2"},
+        {"counterparty_steam_id": "76561198000000003"},
+        {"host_goods_id": 73002},
+    ],
+)
+def test_seller_item_offer_counterparty_or_goods_mismatch_never_succeeds(
+    request_changes,
+):
+    result = buff_adapter(BuffStub([seller_item_record()])).execute(
+        seller_item_request(**request_changes)
+    )
+    assert result.status is not PlatformResultStatus.SUCCESS
+    assert result.evidence is None
+
+
+def test_seller_item_names_cannot_replace_goods_or_asset_identity():
+    payload = seller_item_record(
+        items_to_trade=[
+            {
+                "name": "asset-1",
+                "market_hash_name": "asset-1",
+            }
+        ],
+        goods_infos={
+            "73001": {
+                "name": "asset-1",
+                "market_hash_name": "asset-1",
+            }
+        },
+    )
+
+    result = buff_adapter(BuffStub([payload])).execute(seller_item_request())
+
+    assert result.status is not PlatformResultStatus.SUCCESS
+    assert result.evidence is None
 
 
 def steam_completed_trade_adapter(reader):

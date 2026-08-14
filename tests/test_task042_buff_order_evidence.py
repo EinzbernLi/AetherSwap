@@ -9,6 +9,8 @@ from app.auto_offer.buff_order_evidence import (
     normalize_exact_seller_buff_item,
 )
 from app.auto_offer.adapters import (
+    PlatformAdapterProtocolError,
+    SellerOrderItemEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
@@ -66,6 +68,11 @@ def test_unique_one_order_one_item_normalizes_exact_authorization_evidence():
         goods_id=73001,
         seller_assetid="asset-1",
     )
+
+
+def test_legacy_seller_item_name_is_the_one_canonical_evidence_type():
+    assert ExactSellerBuffItemEvidence is SellerOrderItemEvidence
+    assert type(normalize([record()])) is SellerOrderItemEvidence
 
 
 def test_exact_buff_and_incoming_steam_item_authorize_one_accept():
@@ -207,7 +214,7 @@ def test_display_names_and_goods_infos_never_substitute_for_exact_item_fields():
 
 
 def test_direct_seller_item_evidence_rejects_noncanonical_counterparty():
-    with pytest.raises(BuffOrderEvidenceError, match="^invalid_seller_steam_id$"):
+    with pytest.raises(PlatformAdapterProtocolError):
         ExactSellerBuffItemEvidence(
             buff_order_id="order-1",
             steam_tradeoffer_id="offer-1",

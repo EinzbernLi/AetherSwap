@@ -40,6 +40,7 @@ class PlatformCapability(str, Enum):
 
     READ_DELIVERY_DIRECTION = "read_delivery_direction"
     READ_OFFER_STATE = "read_offer_state"
+    READ_SELLER_OFFER_ITEM = "read_seller_offer_item"
     READ_INVENTORY_STATE = "read_inventory_state"
     READ_STEAM_TRADE_OFFER = "read_steam_trade_offer"
     READ_STEAM_COMPLETED_TRADE = "read_steam_completed_trade"
@@ -99,6 +100,39 @@ class OfferStateEvidence:
             raise PlatformAdapterProtocolError(
                 "counterparty_steam_id must be a canonical positive SteamID"
             ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class SellerOrderItemEvidence:
+    """Exact BUFF seller item bound to one order, offer, and recipient."""
+
+    buff_order_id: str
+    steam_tradeoffer_id: str
+    recipient_steam_id: str
+    counterparty_steam_id: str
+    goods_id: int
+    seller_assetid: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.buff_order_id, "buff_order_id")
+        _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_canonical_positive_decimal(
+            self.recipient_steam_id,
+            "recipient_steam_id",
+        )
+        _require_canonical_positive_decimal(
+            self.counterparty_steam_id,
+            "counterparty_steam_id",
+        )
+        if self.recipient_steam_id == self.counterparty_steam_id:
+            raise PlatformAdapterProtocolError(
+                "recipient and counterparty Steam IDs must differ"
+            )
+        if type(self.goods_id) is not int or self.goods_id <= 0:
+            raise PlatformAdapterProtocolError(
+                "goods_id must be a positive integer"
+            )
+        _require_id(self.seller_assetid, "seller_assetid")
 
 
 @dataclass(frozen=True)
@@ -345,6 +379,7 @@ class SteamCompletedTradeEvidence:
 PlatformEvidence: TypeAlias = (
     DeliveryDirectionEvidence
     | OfferStateEvidence
+    | SellerOrderItemEvidence
     | SendOfferEvidence
     | AcceptOfferEvidence
     | ConfirmOfferEvidence
@@ -357,6 +392,19 @@ PlatformEvidence: TypeAlias = (
 def _require_id(value: object, field: str) -> None:
     if type(value) is not str or not value or value.strip() != value:
         raise PlatformAdapterProtocolError(f"{field} must be a non-whitespace string")
+
+
+def _require_canonical_positive_decimal(value: object, field: str) -> None:
+    if (
+        type(value) is not str
+        or not value
+        or not value.isascii()
+        or not value.isdecimal()
+        or value[0] == "0"
+    ):
+        raise PlatformAdapterProtocolError(
+            f"{field} must be a canonical positive decimal string"
+        )
 
 
 def _require_timeout(value: object) -> None:
@@ -563,6 +611,34 @@ def _validate_platform_request(request: object) -> None:
         )
     _require_timeout(_request_attribute(request, "timeout_seconds"))
     steam_tradeoffer_id = _request_attribute(request, "steam_tradeoffer_id")
+    counterparty_steam_id = _request_attribute(request, "counterparty_steam_id")
+    host_goods_id = _request_attribute(request, "host_goods_id")
+    if capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
+        _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_canonical_positive_decimal(
+            _request_attribute(request, "recipient_steam_id"),
+            "recipient_steam_id",
+        )
+        _require_canonical_positive_decimal(
+            counterparty_steam_id,
+            "counterparty_steam_id",
+        )
+        if counterparty_steam_id == _request_attribute(
+            request,
+            "recipient_steam_id",
+        ):
+            raise PlatformAdapterProtocolError(
+                "recipient and counterparty Steam IDs must differ"
+            )
+        if type(host_goods_id) is not int or host_goods_id <= 0:
+            raise PlatformAdapterProtocolError(
+                "host_goods_id must be a positive integer"
+            )
+        return
+    if counterparty_steam_id is not None or host_goods_id is not None:
+        raise PlatformAdapterProtocolError(
+            "seller item fields are only valid for READ_SELLER_OFFER_ITEM"
+        )
     if capability in {
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
@@ -588,6 +664,8 @@ class PlatformRequest:
     capability: PlatformCapability
     timeout_seconds: float
     steam_tradeoffer_id: str | None = None
+    counterparty_steam_id: str | None = None
+    host_goods_id: int | None = None
 
     def __post_init__(self) -> None:
         _validate_platform_request(self)
@@ -636,6 +714,7 @@ class PlatformResult:
         expected_evidence = {
             PlatformCapability.READ_DELIVERY_DIRECTION: DeliveryDirectionEvidence,
             PlatformCapability.READ_OFFER_STATE: OfferStateEvidence,
+            PlatformCapability.READ_SELLER_OFFER_ITEM: SellerOrderItemEvidence,
             PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,
             PlatformCapability.READ_STEAM_TRADE_OFFER: SteamTradeOfferEvidence,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: SteamCompletedTradeEvidence,
@@ -670,6 +749,20 @@ class PlatformResult:
                 != self.request.steam_tradeoffer_id
                 or self.evidence.account_steam_id
                 != self.request.recipient_steam_id
+            ):
+                raise PlatformAdapterProtocolError(
+                    "success evidence identity does not match request"
+                )
+        elif self.request.capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
+            if (
+                self.evidence.buff_order_id != self.request.buff_order_id
+                or self.evidence.steam_tradeoffer_id
+                != self.request.steam_tradeoffer_id
+                or self.evidence.recipient_steam_id
+                != self.request.recipient_steam_id
+                or self.evidence.counterparty_steam_id
+                != self.request.counterparty_steam_id
+                or self.evidence.goods_id != self.request.host_goods_id
             ):
                 raise PlatformAdapterProtocolError(
                     "success evidence identity does not match request"
@@ -846,6 +939,7 @@ __all__ = [
     "PlatformResultStatus",
     "RecipientInventoryItemEvidence",
     "SendOfferEvidence",
+    "SellerOrderItemEvidence",
     "SteamCompletedTradeEvidence",
     "SteamTradeOfferEvidence",
     "SteamTradeOfferLifecycle",

@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+
+from .adapters import (
+    PlatformAdapterProtocolError,
+    SellerOrderItemEvidence,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+)
 
 from .counterparty_evidence import (
     CounterpartyEvidenceError,
     seller_counterparty_from_exact_buff_record,
 )
-from .adapters import SteamTradeOfferEvidence, SteamTradeOfferLifecycle
 
 
 class BuffOrderEvidenceError(ValueError):
@@ -46,29 +51,7 @@ def _one_alias(
     return values[0]
 
 
-@dataclass(frozen=True, slots=True)
-class ExactSellerBuffItemEvidence:
-    buff_order_id: str
-    steam_tradeoffer_id: str
-    recipient_steam_id: str
-    counterparty_steam_id: str
-    goods_id: int
-    seller_assetid: str
-
-    def __post_init__(self) -> None:
-        _identifier(self.buff_order_id, reason="invalid_buff_order_id")
-        _identifier(self.steam_tradeoffer_id, reason="invalid_tradeoffer_id")
-        _identifier(self.recipient_steam_id, reason="invalid_recipient_steam_id")
-        try:
-            seller_counterparty_from_exact_buff_record(
-                {"seller_steam_id": self.counterparty_steam_id}
-            )
-        except CounterpartyEvidenceError as exc:
-            raise BuffOrderEvidenceError("invalid_seller_steam_id") from exc
-        _positive_goods_id(self.goods_id, reason="invalid_goods_id")
-        _identifier(self.seller_assetid, reason="invalid_seller_assetid")
-        if self.recipient_steam_id == self.counterparty_steam_id:
-            raise BuffOrderEvidenceError("self_counterparty")
+ExactSellerBuffItemEvidence = SellerOrderItemEvidence
 
 
 _ORDER_FIELDS = ("buff_order_id", "bill_order_id")
@@ -150,14 +133,17 @@ def normalize_exact_seller_buff_item(
     if goods_id != exact_goods_id:
         raise BuffOrderEvidenceError("goods_id_mismatch")
     assetid = _identifier(item.get("assetid"), reason="invalid_seller_assetid")
-    return ExactSellerBuffItemEvidence(
-        buff_order_id=exact_order,
-        steam_tradeoffer_id=offer_id,
-        recipient_steam_id=recipient,
-        counterparty_steam_id=counterparty,
-        goods_id=goods_id,
-        seller_assetid=assetid,
-    )
+    try:
+        return ExactSellerBuffItemEvidence(
+            buff_order_id=exact_order,
+            steam_tradeoffer_id=offer_id,
+            recipient_steam_id=recipient,
+            counterparty_steam_id=counterparty,
+            goods_id=goods_id,
+            seller_assetid=assetid,
+        )
+    except PlatformAdapterProtocolError:
+        raise BuffOrderEvidenceError("invalid_seller_item_evidence") from None
 
 
 def authorize_exact_seller_accept(
