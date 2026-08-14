@@ -393,8 +393,9 @@ def _allows_first_tradeoffer_binding(
         return True
     if current is not DeliveryStatus.RESULT_UNKNOWN or mode is None:
         return False
-    path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
-    return target in _TRADEOFFER_REQUIRED_STATUSES and target in path
+    if mode is DeliveryMode.BUYER_SENDS_OFFER:
+        return target is DeliveryStatus.OFFER_SENT
+    return target in _TRADEOFFER_REQUIRED_STATUSES and target in _SELLER_PATH
 
 
 def _validate_tradeoffer_binding(

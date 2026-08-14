@@ -733,6 +733,71 @@ def test_buyer_first_offer_binding_requires_offer_and_counterparty_together():
         )
 
 
+@pytest.mark.parametrize(
+    ("target_status", "changes"),
+    [
+        (DeliveryStatus.OFFER_CONFIRMATION_REQUIRED, {}),
+        (DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED, {}),
+        (DeliveryStatus.OFFER_CONFIRMED, {}),
+        (DeliveryStatus.AWAITING_INVENTORY, {}),
+        (
+            DeliveryStatus.OFFER_TERMINATED,
+            {"delivery_error": "offer_terminated"},
+        ),
+        (
+            DeliveryStatus.RECEIVED,
+            {
+                "pending_receipt": False,
+                "assetid": "asset-1",
+                "received_at": 3.0,
+            },
+        ),
+    ],
+)
+def test_unbound_buyer_result_unknown_cannot_first_bind_offer_to_later_state(
+    target_status: DeliveryStatus,
+    changes: dict[str, object],
+):
+    current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    target_values: dict[str, object] = {
+        "delivery_status": target_status,
+        "steam_tradeoffer_id": "trade-1",
+        "offer_attempted_at": 1.0,
+        "offer_sent_at": 2.0,
+        "delivery_error": None,
+    }
+    target_values.update(changes)
+    target = replace(current, **target_values)
+
+    with pytest.raises(
+        DeliveryContractError,
+        match="steam trade offer ID cannot be bound on this transition",
+    ):
+        validate_delivery_transition(current, target)
+
+
+def test_bound_buyer_confirmation_result_unknown_recovers_without_counterparty_adoption():
+    current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        steam_tradeoffer_id="trade-1",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+        delivery_error="write_result_unknown",
+    )
+    target = replace(
+        current,
+        delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+        delivery_error=None,
+    )
+
+    validate_delivery_transition(current, target)
+
+
 def test_historical_unbound_counterparty_cannot_adopt_late():
     buyer_sent = snapshot(
         delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
