@@ -31,6 +31,8 @@ from app.auto_offer.host_integration import (
     build_host_auto_offer_integration,
     is_auto_offer_enabled,
 )
+from app.auto_offer.runtime_lifecycle import get_effective_runtime_state
+from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
 from app.notify import send_pushplus, build_holdings_report_content, compute_holdings_stats
 from app.inventory_cs2 import scan_cs2_inventory
 from app.accounts import get_current_account, update_account
@@ -271,6 +273,7 @@ def _run_auto_offer_delivery_tick(
     purchases: list,
     *,
     cursor: str | None = None,
+    runtime_state: AutoOfferRuntimeState | None = None,
 ) -> DeliveryTickOutcome:
     """Run one bounded Auto Offer tick through the existing Host worker.
 
@@ -282,6 +285,7 @@ def _run_auto_offer_delivery_tick(
         config=cfg,
         buff_client=buff_client,
         complete_purchase_receipt_by_id=get_state().complete_purchase_receipt_by_id,
+        runtime_state=runtime_state,
     )
     if integration is None:
         raise RuntimeError("auto_offer_enabled_without_integration")
@@ -311,9 +315,6 @@ def receive_worker() -> None:
     while True:
         try:
             cfg = load_app_config_validated()
-            auto_offer_active = is_auto_offer_enabled(cfg)
-            if not auto_offer_active:
-                auto_offer_cursor = None
             interval = max(10, int(cfg.get("pipeline", {}).get("receive_poll_interval_seconds", 30) or 30))
             time.sleep(interval)
             if not is_steam_background_allowed() or not _buff_background_request_is_safe():
@@ -328,6 +329,27 @@ def receive_worker() -> None:
                     ):
                         continue
                     purchases = get_purchases()
+                    runtime_state = get_effective_runtime_state(
+                        config=cfg,
+                        purchases=purchases,
+                    )
+                    mode = runtime_state.mode
+                    if mode in {
+                        AutoOfferRuntimeMode.BLOCKED,
+                        AutoOfferRuntimeMode.ENABLING,
+                    }:
+                        log(
+                            f"receive_worker: Auto Offer runtime blocked ({runtime_state.reason or mode.value})",
+                            "warn",
+                            category="receive",
+                        )
+                        continue
+                    auto_offer_active = mode in {
+                        AutoOfferRuntimeMode.ON,
+                        AutoOfferRuntimeMode.DRAINING,
+                    }
+                    if mode is AutoOfferRuntimeMode.OFF:
+                        auto_offer_cursor = None
                     has_pending_receipt = any(
                         p.get("pending_receipt") and not p.get("assetid")
                         for p in purchases
@@ -348,6 +370,7 @@ def receive_worker() -> None:
                             buff_client,
                             purchases,
                             cursor=auto_offer_cursor,
+                            runtime_state=runtime_state,
                         )
                         auto_offer_cursor = outcome.next_cursor
                         result = outcome.result

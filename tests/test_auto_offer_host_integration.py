@@ -28,6 +28,7 @@ from app.auto_offer.contracts import (
     DeliveryStatus,
 )
 from app.auto_offer.host_integration import HostAutoOfferIntegrationError
+from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
 from app.auto_offer.coordinator import (
     ConfirmationAuthorityReadResult,
     DeliveryCoordinator,
@@ -784,6 +785,67 @@ def test_enabled_builder_requires_receipt_writer_before_bridge_build(monkeypatch
         host_integration.build_host_auto_offer_integration(
             config={"auto_offer": {"enabled": True}},
             buff_client=object(),
+        )
+
+
+def test_draining_builder_disables_new_registration_before_store_mutation(monkeypatch):
+    _patch_identity(monkeypatch)
+    bridge = FakeBridge()
+    monkeypatch.setattr(
+        host_integration,
+        "_build_active_host_auto_offer_bridge",
+        lambda **_kwargs: bridge,
+    )
+    state = AutoOfferRuntimeState(
+        requested_enabled=False,
+        active_delivery_count=1,
+        mode=AutoOfferRuntimeMode.DRAINING,
+    )
+    integration = host_integration.build_host_auto_offer_integration(
+        config={"auto_offer": {"enabled": False}},
+        buff_client=object(),
+        complete_purchase_receipt_by_id=lambda *_args: True,
+        runtime_state=state,
+    )
+    assert integration is not None
+    with pytest.raises(
+        HostAutoOfferIntegrationError,
+        match="auto_offer_registration_disabled_during_draining",
+    ):
+        integration.register_committed_purchase(
+            {
+                "buff_order_id": "new-order",
+                "pending_receipt": True,
+                "assetid": None,
+            }
+        )
+    assert bridge.registered == []
+    integration.close()
+
+
+def test_runtime_state_config_mismatch_fails_before_bridge_build(monkeypatch):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration,
+        "_build_active_host_auto_offer_bridge",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bridge must not build")
+        ),
+    )
+    state = AutoOfferRuntimeState(
+        requested_enabled=False,
+        active_delivery_count=1,
+        mode=AutoOfferRuntimeMode.DRAINING,
+    )
+    with pytest.raises(
+        HostAutoOfferIntegrationError,
+        match="runtime_state_config_mismatch",
+    ):
+        host_integration.build_host_auto_offer_integration(
+            config={"auto_offer": {"enabled": True}},
+            buff_client=object(),
+            complete_purchase_receipt_by_id=lambda *_args: True,
+            runtime_state=state,
         )
 
 
@@ -2202,7 +2264,7 @@ def test_enabled_receive_worker_skips_legacy_transaction(monkeypatch):
     monkeypatch.setattr(
         workers,
         "get_purchases",
-        lambda: [{"pending_receipt": True, "assetid": None}],
+        lambda: [{"pending_receipt": False, "assetid": None}],
     )
     monkeypatch.setattr(
         workers,
@@ -2295,6 +2357,93 @@ def test_disabled_receive_worker_keeps_legacy_path_without_auto_offer_runtime(mo
         workers.receive_worker()
 
     assert legacy_calls == [True]
+
+
+def test_draining_receive_worker_preserves_cursor_until_off_then_resets(monkeypatch):
+    import app.receive_flow as receive_flow
+    import app.services.buff_auth as buff_auth
+    import app.services.buff_checkout_guard as buff_checkout_guard
+    import app.services.buff_client as buff_client_module
+    import app.services.workers as workers
+    from contextlib import nullcontext
+
+    class StopWorker(BaseException):
+        pass
+
+    sleep_calls = []
+    cursors = []
+    legacy_calls = []
+    states = iter(
+        [
+            AutoOfferRuntimeState(
+                requested_enabled=False,
+                active_delivery_count=1,
+                mode=AutoOfferRuntimeMode.DRAINING,
+            ),
+            AutoOfferRuntimeState(
+                requested_enabled=False,
+                active_delivery_count=1,
+                mode=AutoOfferRuntimeMode.DRAINING,
+            ),
+            AutoOfferRuntimeState(
+                requested_enabled=False,
+                active_delivery_count=0,
+                mode=AutoOfferRuntimeMode.OFF,
+            ),
+        ]
+    )
+
+    def controlled_sleep(_seconds):
+        sleep_calls.append(_seconds)
+        if len(sleep_calls) == 4:
+            raise StopWorker()
+
+    monkeypatch.setattr(
+        workers,
+        "load_app_config_validated",
+        lambda: {"auto_offer": {"enabled": False}, "pipeline": {}},
+    )
+    monkeypatch.setattr(workers.time, "sleep", controlled_sleep)
+    monkeypatch.setattr(workers, "is_steam_background_allowed", lambda: True)
+    monkeypatch.setattr(workers, "_buff_background_request_is_safe", lambda: True)
+    monkeypatch.setattr(workers, "get_purchases", lambda: [])
+    monkeypatch.setattr(
+        workers,
+        "get_effective_runtime_state",
+        lambda **_kwargs: next(states),
+    )
+    monkeypatch.setattr(
+        workers,
+        "get_buff_credentials",
+        lambda: {"cookies": {"session": "fake"}},
+    )
+    monkeypatch.setattr(buff_auth, "get_buff_auth_lock", nullcontext)
+    monkeypatch.setattr(buff_checkout_guard, "buff_activity_guard", nullcontext)
+    monkeypatch.setattr(
+        buff_client_module,
+        "create_buff_client_from_config",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(
+        workers,
+        "_run_auto_offer_delivery_tick",
+        lambda *_args, **kwargs: cursors.append(kwargs["cursor"])
+        or host_integration.DeliveryTickOutcome(
+            AutoOfferResult.WAITING,
+            "cursor-1",
+            ("order-1",),
+        ),
+    )
+    monkeypatch.setattr(
+        receive_flow,
+        "try_receive_once",
+        lambda *_args, **_kwargs: legacy_calls.append(True) or 0,
+    )
+
+    with pytest.raises(StopWorker):
+        workers.receive_worker()
+    assert cursors == [None, "cursor-1"]
+    assert legacy_calls == []
 
 
 def test_task034_runtime_markers_remain_confined_to_existing_host_seam():

@@ -136,6 +136,8 @@ class _AlivePipelineThread:
 
 
 def _install_config_state(monkeypatch, *, enabled: bool, running: bool):
+    from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
+
     state = {
         "auto_offer": {"enabled": enabled},
         "pipeline": {"max_discount": 0.8},
@@ -162,6 +164,15 @@ def _install_config_state(monkeypatch, *, enabled: bool, running: bool):
     monkeypatch.setattr(pipeline, "update_app_config_validated", update)
     monkeypatch.setattr(pipeline, "_shutdown_pending", False)
     monkeypatch.setattr(pipeline, "_pipeline_maintenance_reason", "")
+    monkeypatch.setattr(
+        pipeline,
+        "preflight_auto_offer_enable",
+        lambda **_kwargs: AutoOfferRuntimeState(
+            requested_enabled=True,
+            active_delivery_count=0,
+            mode=AutoOfferRuntimeMode.ON,
+        ),
+    )
     with pipeline._pipeline_start_lock:
         pipeline._pipeline_thread = _AlivePipelineThread() if running else None
     return state, updates

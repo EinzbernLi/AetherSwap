@@ -27,6 +27,12 @@ from app.auto_offer.host_integration import (
     build_host_auto_offer_integration,
     is_auto_offer_enabled,
 )
+from app.auto_offer.runtime_lifecycle import (
+    _STORE_PATH,
+    get_effective_runtime_state,
+    preflight_auto_offer_enable,
+)
+from app.auto_offer.runtime_mode import AutoOfferRuntimeMode
 from app.pipeline_context import PipelineContext
 from app.pipeline_steps import (
     TARGET_REACHED,
@@ -716,19 +722,109 @@ def update_auto_offer_enabled_config(patch: dict) -> dict:
         )
         requested_enabled = is_auto_offer_enabled(prospective)
         transitioning = requested_enabled is not current_enabled
-        if transitioning and _shutdown_pending:
-            raise PipelineMaintenanceBlocked(
-                "应用正在重置并等待退出，不能切换 Auto Offer 开关"
+        if not transitioning:
+            return update_app_config_validated(patch)
+
+    try:
+        maintenance = exclusive_pipeline_maintenance("auto_offer_runtime_transition")
+        with maintenance:
+            current = load_app_config_validated()
+            current_enabled = is_auto_offer_enabled(current)
+            prospective = _validate_ranges(
+                validate_and_fill(merge(DEFAULTS, merge(current, patch)))
             )
+            requested_enabled = is_auto_offer_enabled(prospective)
+            if requested_enabled is current_enabled:
+                return update_app_config_validated(patch)
+            if requested_enabled:
+                runtime_state = preflight_auto_offer_enable(
+                    config=prospective,
+                    purchases=_lifecycle_host_purchases(),
+                )
+                if runtime_state.mode is not AutoOfferRuntimeMode.ON:
+                    raise PipelineMaintenanceBlocked(
+                        f"AUTO_OFFER_RUNTIME_{runtime_state.reason or runtime_state.mode.value.upper()}"
+                    )
+            return update_app_config_validated(patch)
+    except PipelineMaintenanceBlocked:
+        raise
+    except Exception as exc:
+        raise PipelineMaintenanceBlocked(
+            "AUTO_OFFER_RUNTIME_TRANSITION_BLOCKED"
+        ) from exc
+
+
+def get_pipeline_runtime_blocker(config: dict | None = None) -> dict:
+    """Return a stable blocker when effective runtime is not pipeline-safe."""
+
+    try:
+        runtime_config = (
+            load_app_config_validated() if config is None else config
+        )
+        try:
+            if canary_metadata_present():
+                return {
+                    "code": "CANARY_AUTHORITY_ACTIVE",
+                    "message": "单订单 canary authority 已激活或待人工清理，普通流水线禁止启动",
+                }
+        except CanaryAuthorityError:
+            return {
+                "code": "CANARY_AUTHORITY_FENCED",
+                "message": "无法安全证明 canary authority 已解除，普通流水线禁止启动",
+            }
         if (
-            transitioning
-            and _pipeline_thread is not None
-            and _pipeline_thread.is_alive()
-        ):
-            raise PipelineMaintenanceBlocked(
-                "买入流水线仍在运行，不能切换 Auto Offer 开关"
+            not is_auto_offer_enabled(runtime_config)
+            and not any(
+                Path(str(path)).exists()
+                for path in (
+                    _STORE_PATH,
+                    Path(f"{_STORE_PATH}-wal"),
+                    Path(f"{_STORE_PATH}-shm"),
+                    Path(f"{_STORE_PATH}-journal"),
+                )
             )
-        return update_app_config_validated(patch)
+        ):
+            return {}
+        state = get_effective_runtime_state(
+            config=runtime_config,
+            purchases=_lifecycle_host_purchases(),
+        )
+    except Exception:
+        return {
+            "code": "AUTO_OFFER_RUNTIME_BLOCKED",
+            "message": "Auto Offer runtime authority cannot be proven safe",
+        }
+    requested = is_auto_offer_enabled(runtime_config)
+    allowed = (
+        (not requested and state.mode is AutoOfferRuntimeMode.OFF)
+        or (requested and state.mode is AutoOfferRuntimeMode.ON)
+    )
+    if allowed:
+        return {}
+    return {
+        "code": "AUTO_OFFER_RUNTIME_BLOCKED",
+        "message": state.reason or f"Auto Offer runtime mode is {state.mode.value}",
+        "mode": state.mode.value,
+    }
+
+
+def _lifecycle_host_purchases() -> list | None:
+    """Read the current Host snapshot for lifecycle admission checks."""
+
+    try:
+        state = get_state()
+        getter = getattr(state, "get_purchases", None)
+        if not callable(getter):
+            return []
+        rows = getter()
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        try:
+            rows = list(rows)
+        except Exception:
+            return None
+    return rows
 
 
 def _snapshot_pipeline_start_config(config: dict) -> dict:
@@ -884,6 +980,8 @@ def start_pipeline(
                     except BuffCheckoutGuardMismatch:
                         return False
                 if get_pipeline_start_blocker():
+                    return False
+                if get_pipeline_runtime_blocker(load_app_config_validated()):
                     return False
                 try:
                     run_config = _snapshot_pipeline_start_config(config)

@@ -42,6 +42,7 @@ from app.auto_offer.contracts import (
     DeliveryStatus,
     validate_delivery_snapshot,
 )
+from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
 from app.auto_offer.coordinator import (
     AcceptOfferStepResult,
     ConfirmationAuthorityReadResult,
@@ -863,6 +864,7 @@ class HostAutoOfferIntegration:
         canary_permit: CanaryPermit | None = None,
         canary_authority: CanaryAuthority | None = None,
         canary_owner_session: object | None = None,
+        registration_enabled: bool = True,
     ) -> None:
         if canary_authority is not None:
             raise HostAutoOfferIntegrationError("canary_authority_injection_forbidden")
@@ -880,6 +882,9 @@ class HostAutoOfferIntegration:
         self._canary_owner_session = canary_owner_session
         self._canary_preflight_consumed = False
         self._canary_completed = False
+        if type(registration_enabled) is not bool:
+            raise HostAutoOfferIntegrationError("registration_enabled_invalid")
+        self._registration_enabled = registration_enabled
         if canary_permit is not None:
             if type(canary_permit) is not CanaryPermit:
                 raise HostAutoOfferIntegrationError("canary_permit_invalid")
@@ -909,10 +914,18 @@ class HostAutoOfferIntegration:
         return self._canary_permit is not None
 
     @property
+    def registration_enabled(self) -> bool:
+        return self._registration_enabled
+
+    @property
     def canary_completed(self) -> bool:
         return self._canary_completed
 
     def register_committed_purchase(self, purchase: Mapping[str, object]) -> None:
+        if not self._registration_enabled:
+            raise HostAutoOfferIntegrationError(
+                "auto_offer_registration_disabled_during_draining"
+            )
         if self.is_canary:
             raise HostAutoOfferIntegrationError("canary_new_purchase_forbidden")
         try:
@@ -2345,9 +2358,27 @@ def build_host_auto_offer_integration(
     complete_purchase_receipt_by_id=None,
     canary_permit: CanaryPermit | None = None,
     canary_authority: CanaryAuthority | None = None,
+    runtime_state: AutoOfferRuntimeState | None = None,
 ) -> HostAutoOfferIntegration | None:
-    if not is_auto_offer_enabled(config):
-        return None
+    config_enabled = is_auto_offer_enabled(config)
+    registration_enabled = True
+    if runtime_state is None:
+        if not config_enabled:
+            return None
+    else:
+        if type(runtime_state) is not AutoOfferRuntimeState:
+            raise HostAutoOfferIntegrationError("runtime_state_invalid")
+        if runtime_state.requested_enabled is not config_enabled:
+            raise HostAutoOfferIntegrationError("runtime_state_config_mismatch")
+        if runtime_state.mode is AutoOfferRuntimeMode.ON:
+            if not runtime_state.requested_enabled:
+                raise HostAutoOfferIntegrationError("runtime_state_invalid")
+        elif runtime_state.mode is AutoOfferRuntimeMode.DRAINING:
+            if runtime_state.requested_enabled or runtime_state.active_delivery_count <= 0:
+                raise HostAutoOfferIntegrationError("runtime_state_invalid")
+            registration_enabled = False
+        else:
+            raise HostAutoOfferIntegrationError("runtime_state_mode_not_buildable")
     if canary_authority is not None:
         raise HostAutoOfferIntegrationError("canary_authority_injection_forbidden")
 
@@ -2391,6 +2422,7 @@ def build_host_auto_offer_integration(
         complete_purchase_receipt_by_id=complete_purchase_receipt_by_id,
         canary_permit=canary_permit,
         canary_owner_session=owner_session,
+        registration_enabled=registration_enabled,
     )
 
 
