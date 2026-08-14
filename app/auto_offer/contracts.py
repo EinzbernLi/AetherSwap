@@ -427,16 +427,31 @@ def _validate_counterparty_binding(
         if target_id != current_id:
             raise DeliveryContractError("bound counterparty Steam ID cannot change")
         return
+    first_buyer_offer_binding = (
+        current.delivery_status
+        in {DeliveryStatus.OFFER_ATTEMPTED, DeliveryStatus.RESULT_UNKNOWN}
+        and target.delivery_status is DeliveryStatus.OFFER_SENT
+        and mode is DeliveryMode.BUYER_SENDS_OFFER
+        and current.steam_tradeoffer_id is None
+        and target.steam_tradeoffer_id is not None
+    )
+    if first_buyer_offer_binding:
+        if target_id is None:
+            raise DeliveryContractError(
+                "buyer offer binding requires counterparty Steam ID"
+            )
+        return
     if target_id is None:
         return
-    if not (
+    if (
         current.delivery_status is DeliveryStatus.PENDING_DIRECTION
         and target.delivery_status is DeliveryStatus.AWAITING_OFFER
         and mode is DeliveryMode.SELLER_SENDS_OFFER
     ):
-        raise DeliveryContractError(
-            "counterparty Steam ID cannot be adopted after direction binding"
-        )
+        return
+    raise DeliveryContractError(
+        "counterparty Steam ID cannot be adopted after direction binding"
+    )
 
 
 def _transition_statuses(

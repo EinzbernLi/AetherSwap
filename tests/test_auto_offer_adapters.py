@@ -96,7 +96,7 @@ def test_request_and_result_are_immutable_and_preserve_exact_identity():
     result = PlatformResult(
         original,
         PlatformResultStatus.SUCCESS,
-        evidence=OfferStateEvidence("offer-1"),
+        evidence=OfferStateEvidence("offer-1", "76561198000000002"),
     )
 
     with pytest.raises(FrozenInstanceError):
@@ -188,7 +188,7 @@ def test_fake_bare_success_fails_closed_for_the_same_exact_request():
     ("capability", "evidence"),
     [
         (PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
-        (PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1")),
+        (PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1", "76561198000000002")),
         (
             PlatformCapability.READ_INVENTORY_STATE,
             InventoryStateEvidence(("asset-2", "asset-1"), 2),
@@ -226,7 +226,7 @@ def test_malformed_and_identity_mismatched_results_fail_closed():
             wrong_identity: PlatformResult(
                 item,
                 PlatformResultStatus.SUCCESS,
-                evidence=OfferStateEvidence("offer-1"),
+                evidence=OfferStateEvidence("offer-1", "76561198000000002"),
             ),
         }
     )
@@ -274,7 +274,7 @@ def test_fake_does_not_import_or_mutate_store_or_delivery_snapshot():
             item: PlatformResult(
                 item,
                 PlatformResultStatus.SUCCESS,
-                evidence=OfferStateEvidence("offer-1"),
+                evidence=OfferStateEvidence("offer-1", "76561198000000002"),
             )
         },
     ).execute(item)
@@ -289,7 +289,7 @@ def test_fake_does_not_import_or_mutate_store_or_delivery_snapshot():
     ("evidence", "capability"),
     [
         (DeliveryDirectionEvidence(), PlatformCapability.READ_OFFER_STATE),
-        (OfferStateEvidence("offer-1"), PlatformCapability.READ_INVENTORY_STATE),
+        (OfferStateEvidence("offer-1", "76561198000000002"), PlatformCapability.READ_INVENTORY_STATE),
         (InventoryStateEvidence(("asset-1",)), PlatformCapability.READ_DELIVERY_DIRECTION),
     ],
 )
@@ -303,13 +303,13 @@ def test_non_success_or_send_offer_cannot_contain_success_evidence():
         PlatformResult(
             request(),
             PlatformResultStatus.RESULT_UNKNOWN,
-            evidence=OfferStateEvidence("offer-1"),
+            evidence=OfferStateEvidence("offer-1", "76561198000000002"),
         )
     with pytest.raises(PlatformAdapterProtocolError):
         PlatformResult(
             request(capability=PlatformCapability.SEND_OFFER),
             PlatformResultStatus.SUCCESS,
-            evidence=OfferStateEvidence("offer-1"),
+            evidence=OfferStateEvidence("offer-1", "76561198000000002"),
         )
 
 
@@ -339,7 +339,13 @@ def test_evidence_values_are_immutable_validated_and_canonical():
         with pytest.raises(PlatformAdapterProtocolError):
             DeliveryDirectionEvidence(direction)
     with pytest.raises(PlatformAdapterProtocolError):
-        OfferStateEvidence(" offer-1")
+        OfferStateEvidence(" offer-1", "76561198000000002")
+
+
+@pytest.mark.parametrize("counterparty", ["seller-1", "0123", True, 76561198000000002])
+def test_offer_state_evidence_requires_canonical_seller_steam_id(counterparty):
+    with pytest.raises(PlatformAdapterProtocolError):
+        OfferStateEvidence("offer-1", counterparty)
     for assetids, total in (
         (["asset-1"], None),
         ((True,), None),
@@ -898,7 +904,7 @@ def test_send_offer_evidence_is_strict_frozen_and_capability_bound():
         PlatformResult(
             item,
             PlatformResultStatus.SUCCESS,
-            evidence=OfferStateEvidence("offer-99"),
+            evidence=OfferStateEvidence("offer-99", "76561198000000002"),
         )
     with pytest.raises(PlatformAdapterProtocolError):
         PlatformResult(

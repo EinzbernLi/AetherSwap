@@ -400,6 +400,18 @@ class BuffReadOnlyAdapter:
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
         offer_id = offer_values[0]
+        try:
+            counterparty = seller_counterparty_from_exact_buff_record(record).steam_id
+        except CounterpartyEvidenceError as exc:
+            if str(exc) == "seller_steam_id_not_proven":
+                return _result(
+                    request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+                )
+            return _result(
+                request, PlatformResultStatus.MALFORMED, "malformed_payload"
+            )
+        if counterparty == request.recipient_steam_id:
+            return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
         state = record.get("state")
         if state not in _PENDING_STATES:
             return _result(
@@ -409,7 +421,7 @@ class BuffReadOnlyAdapter:
             request,
             PlatformResultStatus.SUCCESS,
             "offer_pending",
-            OfferStateEvidence(offer_id),
+            OfferStateEvidence(offer_id, counterparty),
         )
 
     def _execute_buyer_wait_send(self, request: PlatformRequest) -> PlatformResult:

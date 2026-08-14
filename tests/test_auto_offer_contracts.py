@@ -690,8 +690,66 @@ def test_legitimate_seller_and_buyer_first_tradeoffer_bindings_are_allowed():
         delivery_status=DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id="trade-1",
         offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
     )
     validate_delivery_transition(buyer_current, buyer_target)
+
+
+def test_buyer_first_offer_binding_requires_offer_and_counterparty_together():
+    buyer_current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+        offer_attempted_at=1.0,
+    )
+    buyer_target = replace(
+        buyer_current,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="trade-1",
+        offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
+    )
+    validate_delivery_transition(buyer_current, buyer_target)
+
+    with pytest.raises(DeliveryContractError, match="requires counterparty"):
+        validate_delivery_transition(
+            buyer_current,
+            replace(buyer_target, counterparty_steam_id=None),
+        )
+
+    unknown_current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    with pytest.raises(DeliveryContractError, match="requires counterparty"):
+        validate_delivery_transition(
+            unknown_current,
+            replace(
+                buyer_target,
+                offer_attempted_at=1.0,
+                offer_sent_at=2.0,
+                counterparty_steam_id=None,
+            ),
+        )
+
+
+def test_historical_unbound_counterparty_cannot_adopt_late():
+    buyer_sent = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="trade-1",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+    )
+    with pytest.raises(DeliveryContractError, match="cannot be adopted"):
+        validate_delivery_transition(
+            buyer_sent,
+            replace(
+                buyer_sent,
+                delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+                counterparty_steam_id="76561198000000002",
+            ),
+        )
 
 
 def test_bound_tradeoffer_id_is_immutable_across_normal_paths():
@@ -810,6 +868,7 @@ def test_result_unknown_recovery_can_bind_first_tradeoffer_id_for_both_modes():
         steam_tradeoffer_id="trade-buyer",
         offer_attempted_at=1.0,
         offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
         delivery_error=None,
     )
     validate_delivery_transition(buyer_unknown, buyer_sent)

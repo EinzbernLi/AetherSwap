@@ -13,6 +13,11 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Final, Protocol, TypeAlias, runtime_checkable
 
+from .counterparty_evidence import (
+    CounterpartyEvidenceError,
+    seller_counterparty_from_exact_buff_record,
+)
+
 
 class PlatformAdapterError(RuntimeError):
     """Raised when an adapter request cannot be handled safely."""
@@ -79,12 +84,21 @@ class DeliveryDirectionEvidence:
 
 @dataclass(frozen=True)
 class OfferStateEvidence:
-    """The exact Steam offer ID proven for one canonical BUFF order."""
+    """The exact Steam offer and seller proven for one canonical BUFF order."""
 
     steam_tradeoffer_id: str
+    counterparty_steam_id: str
 
     def __post_init__(self) -> None:
         _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+        try:
+            seller_counterparty_from_exact_buff_record(
+                {"seller_steam_id": self.counterparty_steam_id}
+            )
+        except CounterpartyEvidenceError as exc:
+            raise PlatformAdapterProtocolError(
+                "counterparty_steam_id must be a canonical positive SteamID"
+            ) from exc
 
 
 @dataclass(frozen=True)

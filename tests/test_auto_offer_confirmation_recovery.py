@@ -405,6 +405,7 @@ def test_store_persists_required_to_attempted_under_current_schema(tmp_path):
                 delivery_status=DeliveryStatus.OFFER_SENT,
                 steam_tradeoffer_id=OFFER_ID,
                 offer_sent_at=2.0,
+                counterparty_steam_id=COUNTERPARTY_ID,
             ),
         )
         required = store.advance(

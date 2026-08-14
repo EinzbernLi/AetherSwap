@@ -59,7 +59,12 @@ class ExactSellerBuffItemEvidence:
         _identifier(self.buff_order_id, reason="invalid_buff_order_id")
         _identifier(self.steam_tradeoffer_id, reason="invalid_tradeoffer_id")
         _identifier(self.recipient_steam_id, reason="invalid_recipient_steam_id")
-        _identifier(self.counterparty_steam_id, reason="invalid_seller_steam_id")
+        try:
+            seller_counterparty_from_exact_buff_record(
+                {"seller_steam_id": self.counterparty_steam_id}
+            )
+        except CounterpartyEvidenceError as exc:
+            raise BuffOrderEvidenceError("invalid_seller_steam_id") from exc
         _positive_goods_id(self.goods_id, reason="invalid_goods_id")
         _identifier(self.seller_assetid, reason="invalid_seller_assetid")
         if self.recipient_steam_id == self.counterparty_steam_id:

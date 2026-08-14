@@ -189,6 +189,7 @@ def test_buyer_transition_and_optimistic_revision(tmp_path):
         delivery_status=DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id="offer-1",
         offer_sent_at=11.0,
+        counterparty_steam_id="76561198000000002",
     )
     assert store.advance(attempted_stored, sent).revision == 4
 
@@ -283,7 +284,13 @@ def test_recoverable_excludes_terminal_rows_and_is_ordered(tmp_path):
     store.advance(current, attempted)
     assert [item.snapshot.purchase_id for item in store.list_recoverable()] == ["purchase-1", "purchase-2"]
 
-    received = replace(attempted, delivery_status=DeliveryStatus.OFFER_SENT, steam_tradeoffer_id="offer-1", offer_sent_at=2.0)
+    received = replace(
+        attempted,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="offer-1",
+        offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
+    )
     confirmed = replace(received, delivery_status=DeliveryStatus.OFFER_CONFIRMED)
     awaiting = replace(confirmed, delivery_status=DeliveryStatus.AWAITING_INVENTORY)
     done = replace(awaiting, delivery_status=DeliveryStatus.RECEIVED, pending_receipt=False, received_at=3.0, assetid="asset-1")
@@ -556,8 +563,10 @@ def test_historical_result_unknown_first_binding_remains_supported_in_store(tmp_
         steam_tradeoffer_id="offer-1",
         offer_attempted_at=1.0,
         offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
         delivery_error=None,
     )
     advanced = store.advance(unknown_stored, sent)
     assert advanced.snapshot.steam_tradeoffer_id == "offer-1"
+    assert advanced.snapshot.counterparty_steam_id == "76561198000000002"
     assert advanced.revision == unknown_stored.revision + 1

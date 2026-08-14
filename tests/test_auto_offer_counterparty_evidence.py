@@ -38,8 +38,15 @@ def test_two_exact_fields_must_agree():
         {"seller": "76561198000000001"},
         {"seller_steam_id": None},
         {"seller_steam_id": ""},
+        {"seller_steam_id": "seller-1"},
+        {"seller_steam_id": "0123456789"},
         {"seller_steam_id": " 76561198000000001"},
         {"seller_steam_id": "76561198000000001 "},
+        {"seller_steam_id": True},
+        {"seller_steam_id": 76561198000000001},
+        {"seller_steam_id": 76561198000000001.0},
+        {"seller_steam_id": []},
+        {"seller_steam_id": {}},
         {
             "seller_steam_id": "76561198000000001",
             "seller_steamid": "76561198000000002",
@@ -54,3 +61,10 @@ def test_missing_malformed_or_conflicting_seller_identity_fails_closed(record):
 def test_non_mapping_record_fails_closed():
     with pytest.raises(CounterpartyEvidenceError):
         seller_counterparty_from_exact_buff_record([])  # type: ignore[arg-type]
+
+
+def test_canonical_positive_decimal_text_is_preserved_exactly():
+    value = "1"
+    assert seller_counterparty_from_exact_buff_record(
+        {"seller_steam_id": value}
+    ).steam_id == value

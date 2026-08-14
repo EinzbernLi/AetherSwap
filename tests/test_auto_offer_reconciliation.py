@@ -354,7 +354,7 @@ def test_pending_direction_wrong_capability_cannot_advance():
     item = delivery()
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1")),
+        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1", "76561198000000002")),
     )
     assert decision.result is AutoOfferResult.BLOCKED
     assert decision.target is None
@@ -365,7 +365,7 @@ def test_awaiting_seller_offer_proposes_exact_offer_received():
     item = delivery(snapshot(DeliveryStatus.AWAITING_OFFER, DeliveryMode.SELLER_SENDS_OFFER))
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-42")),
+        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-42", "76561198000000002")),
     )
     assert decision.result is AutoOfferResult.WAITING
     assert decision.retryable is True
@@ -494,7 +494,7 @@ def test_buyer_mode_never_plans_first_send_or_synthetic_fields():
     item = delivery(snapshot(DeliveryStatus.AWAITING_OFFER, DeliveryMode.BUYER_SENDS_OFFER))
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1")),
+        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1", "76561198000000002")),
     )
     assert decision.result is AutoOfferResult.BLOCKED
     assert decision.retryable is False
@@ -560,7 +560,7 @@ def test_awaiting_inventory_wrong_success_cannot_advance():
     )
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1")),
+        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1", "76561198000000002")),
     )
     assert decision.result is AutoOfferResult.BLOCKED
     assert decision.target is None
@@ -964,7 +964,7 @@ def test_trade_offer_requires_exact_snapshot_request_and_evidence_binding():
     )
     wrong_capability = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1")),
+        result_for(item, PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1", "76561198000000002")),
     )
     assert mismatched.result is AutoOfferResult.BLOCKED
     assert mismatched.target is None
@@ -972,6 +972,31 @@ def test_trade_offer_requires_exact_snapshot_request_and_evidence_binding():
     assert mismatched.detail == "identity_mismatch"
     assert wrong_capability.result is AutoOfferResult.BLOCKED
     assert wrong_capability.target is None
+
+
+def test_different_offer_state_seller_cannot_overwrite_bound_buyer_counterparty():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.OFFER_SENT,
+            DeliveryMode.BUYER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+            offer_attempted_at=1.0,
+            offer_sent_at=2.0,
+            counterparty_steam_id="76561198000000002",
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_OFFER_STATE,
+            OfferStateEvidence("offer-1", "76561198000000003"),
+        ),
+    )
+
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.detail == "evidence_not_allowed"
 
 
 @pytest.mark.parametrize(

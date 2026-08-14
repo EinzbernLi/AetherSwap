@@ -147,6 +147,7 @@ def _plan_buyer_offer_recovery(
         snapshot,
         delivery_status=DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id=evidence.steam_tradeoffer_id,
+        counterparty_steam_id=evidence.counterparty_steam_id,
         offer_sent_at=sent_at,
         delivery_error=None,
     )

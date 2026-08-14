@@ -19,8 +19,8 @@ def record(**changes):
     value = {
         "buff_order_id": "order-1",
         "tradeofferid": "offer-1",
-        "buyer_steam_id": "recipient-1",
-        "seller_steam_id": "seller-1",
+        "buyer_steam_id": "76561198000000001",
+        "seller_steam_id": "76561198000000002",
         "items_to_trade": [{"assetid": "asset-1", "goods_id": 73001}],
         "goods_infos": {
             "73001": {
@@ -36,7 +36,7 @@ def record(**changes):
 def normalize(records, **changes):
     values = {
         "buff_order_id": "order-1",
-        "recipient_steam_id": "recipient-1",
+        "recipient_steam_id": "76561198000000001",
         "host_goods_id": 73001,
     }
     values.update(changes)
@@ -46,8 +46,8 @@ def normalize(records, **changes):
 def steam_evidence(**changes):
     values = {
         "steam_tradeoffer_id": "offer-1",
-        "account_steam_id": "recipient-1",
-        "counterparty_steam_id": "seller-1",
+        "account_steam_id": "76561198000000001",
+        "counterparty_steam_id": "76561198000000002",
         "is_our_offer": False,
         "lifecycle": SteamTradeOfferLifecycle.ACTIVE,
         "items_to_give": (),
@@ -61,8 +61,8 @@ def test_unique_one_order_one_item_normalizes_exact_authorization_evidence():
     assert normalize([record()]) == ExactSellerBuffItemEvidence(
         buff_order_id="order-1",
         steam_tradeoffer_id="offer-1",
-        recipient_steam_id="recipient-1",
-        counterparty_steam_id="seller-1",
+        recipient_steam_id="76561198000000001",
+        counterparty_steam_id="76561198000000002",
         goods_id=73001,
         seller_assetid="asset-1",
     )
@@ -78,7 +78,7 @@ def test_exact_buff_and_incoming_steam_item_authorize_one_accept():
     [
         (steam_evidence(steam_tradeoffer_id="offer-2"), "tradeoffer_id_mismatch"),
         (steam_evidence(account_steam_id="recipient-2"), "recipient_steam_id_mismatch"),
-        (steam_evidence(counterparty_steam_id="seller-2"), "seller_steam_id_mismatch"),
+        (steam_evidence(counterparty_steam_id="76561198000000003"), "seller_steam_id_mismatch"),
         (steam_evidence(is_our_offer=True), "incoming_offer_required"),
         (
             steam_evidence(lifecycle=SteamTradeOfferLifecycle.DECLINED),
@@ -165,7 +165,7 @@ def test_ambiguous_order_offer_or_item_cardinality_fails_closed(records, reason)
             "recipient_steam_id_mismatch",
         ),
         (
-            [record(seller_steam_id="recipient-1")],
+            [record(seller_steam_id="76561198000000001")],
             {},
             "self_counterparty",
         ),
@@ -204,3 +204,15 @@ def test_display_names_and_goods_infos_never_substitute_for_exact_item_fields():
 
     with pytest.raises(BuffOrderEvidenceError, match="^invalid_goods_id$"):
         normalize([payload])
+
+
+def test_direct_seller_item_evidence_rejects_noncanonical_counterparty():
+    with pytest.raises(BuffOrderEvidenceError, match="^invalid_seller_steam_id$"):
+        ExactSellerBuffItemEvidence(
+            buff_order_id="order-1",
+            steam_tradeoffer_id="offer-1",
+            recipient_steam_id="76561198000000001",
+            counterparty_steam_id="seller-1",
+            goods_id=73001,
+            seller_assetid="asset-1",
+        )

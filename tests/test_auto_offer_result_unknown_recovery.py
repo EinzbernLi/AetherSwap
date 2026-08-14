@@ -95,7 +95,7 @@ def offer_result(delivery, offer_id="9001"):
         request=request,
         status=PlatformResultStatus.SUCCESS,
         detail="offer_pending",
-        evidence=OfferStateEvidence(offer_id),
+        evidence=OfferStateEvidence(offer_id, "76561198000000002"),
     )
 
 
@@ -150,7 +150,7 @@ def success_offer_adapter(offer_id="9001"):
             request=request,
             status=PlatformResultStatus.SUCCESS,
             detail="offer_pending",
-            evidence=OfferStateEvidence(offer_id),
+            evidence=OfferStateEvidence(offer_id, "76561198000000002"),
         ),
     )
 
@@ -181,6 +181,7 @@ def test_planner_recovers_offer_attempted_from_exact_offer_evidence():
     assert decision.target is not None
     assert decision.target.delivery_status is DeliveryStatus.OFFER_SENT
     assert decision.target.steam_tradeoffer_id == "9001"
+    assert decision.target.counterparty_steam_id == "76561198000000002"
     assert decision.target.offer_attempted_at == 10.0
     assert decision.target.offer_sent_at == 12.5
     assert decision.target.delivery_error is None
@@ -202,6 +203,7 @@ def test_planner_recovers_result_unknown_and_clears_only_write_error():
     assert decision.target is not None
     assert decision.target.delivery_status is DeliveryStatus.OFFER_SENT
     assert decision.target.steam_tradeoffer_id == "9002"
+    assert decision.target.counterparty_steam_id == "76561198000000002"
     assert decision.target.offer_attempted_at == before.snapshot.offer_attempted_at
     assert decision.target.offer_sent_at == 14.0
     assert decision.target.delivery_error is None
@@ -236,7 +238,7 @@ def test_planner_blocks_forged_identity_before_recovery_semantics():
         request=forged_request,
         status=PlatformResultStatus.SUCCESS,
         detail="offer_pending",
-        evidence=OfferStateEvidence("9001"),
+        evidence=OfferStateEvidence("9001", "76561198000000002"),
     )
 
     decision = plan_read_evidence_transition(before, result, observed_at=12.0)
@@ -288,6 +290,7 @@ def test_coordinator_routes_offer_attempted_to_read_and_never_resends():
     assert result.persisted is True
     assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
     assert result.after.snapshot.steam_tradeoffer_id == "9101"
+    assert result.after.snapshot.counterparty_steam_id == "76561198000000002"
     assert result.after.snapshot.offer_sent_at == 12.0
     assert len(store.advance_calls) == 1
 
@@ -317,6 +320,7 @@ def test_coordinator_routes_result_unknown_to_read_and_never_resends():
     assert send_adapter.calls == []
     assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
     assert result.after.snapshot.steam_tradeoffer_id == "9102"
+    assert result.after.snapshot.counterparty_steam_id == "76561198000000002"
     assert result.after.snapshot.delivery_error is None
 
 

@@ -19,7 +19,20 @@ class CounterpartyEvidenceError(ValueError):
 
 
 def _exact_identifier(value: object, *, field: str) -> str:
-    if type(value) is not str or not value or value.strip() != value:
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or not value.isascii()
+        or any(character < "0" or character > "9" for character in value)
+        or value.startswith("0")
+    ):
+        raise CounterpartyEvidenceError(f"invalid_{field}")
+    try:
+        numeric = int(value)
+    except ValueError:
+        raise CounterpartyEvidenceError(f"invalid_{field}") from None
+    if numeric <= 0 or str(numeric) != value:
         raise CounterpartyEvidenceError(f"invalid_{field}")
     return value
 

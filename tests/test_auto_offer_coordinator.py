@@ -452,7 +452,7 @@ def test_seller_offer_routes_and_persists_exact_tradeoffer_id_once():
     store = SpyStore(item)
     adapter = SpyAdapter(
         {PlatformCapability.READ_OFFER_STATE},
-        success_factory(OfferStateEvidence("offer-42")),
+        success_factory(OfferStateEvidence("offer-42", "76561198000000002")),
     )
     coordinator = ReadOnlyDeliveryCoordinator(
         store,
@@ -1291,7 +1291,7 @@ def test_every_unproven_invoked_send_outcome_becomes_result_unknown_without_retr
     else:
         adapter = RecordingSendAdapter(
             lambda request: _forged_send_success(
-                request, OfferStateEvidence("offer-1")
+                request, OfferStateEvidence("offer-1", "76561198000000002")
             )
         )
 
