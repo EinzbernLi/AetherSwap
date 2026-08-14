@@ -31,6 +31,10 @@ from app.auto_offer.runtime_lifecycle import (
     get_effective_runtime_state,
     preflight_auto_offer_enable,
 )
+from app.auto_offer.store_maintenance import (
+    StoreMaintenanceBlocked,
+    maintain_existing_store_for_enable,
+)
 from app.auto_offer.runtime_mode import AutoOfferRuntimeMode
 from app.pipeline_context import PipelineContext
 from app.pipeline_steps import (
@@ -736,6 +740,12 @@ def update_auto_offer_enabled_config(patch: dict) -> dict:
             if requested_enabled is current_enabled:
                 return update_app_config_validated(patch)
             if requested_enabled:
+                try:
+                    maintain_existing_store_for_enable()
+                except StoreMaintenanceBlocked as exc:
+                    raise PipelineMaintenanceBlocked(
+                        f"AUTO_OFFER_RUNTIME_{exc.reason}"
+                    ) from exc
                 runtime_state = preflight_auto_offer_enable(
                     config=prospective,
                     purchases=_lifecycle_host_purchases(),

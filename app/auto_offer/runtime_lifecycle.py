@@ -199,12 +199,18 @@ def inspect_effective_runtime(
 
         active_count = 0
         legacy_pending = False
+        blocked_delivery = False
         for purchase, decision in zip(host_rows, decisions):
             if decision.ownership in {
                 HostPurchaseOwnership.MANAGED,
                 HostPurchaseOwnership.RECEIPT_PENDING,
             }:
                 active_count += 1
+                if (
+                    decision.stored is not None
+                    and decision.stored.snapshot.delivery_status is DeliveryStatus.BLOCKED
+                ):
+                    blocked_delivery = True
             elif decision.ownership is HostPurchaseOwnership.UNSAFE:
                 return _safe_blocked(
                     requested_enabled,
@@ -255,6 +261,13 @@ def inspect_effective_runtime(
                 requested_enabled,
                 active_count,
                 "legacy_pending_unowned",
+            )
+
+        if blocked_delivery:
+            return _safe_blocked(
+                requested_enabled,
+                active_count,
+                "delivery_blocked",
             )
 
         return resolve_runtime_mode(

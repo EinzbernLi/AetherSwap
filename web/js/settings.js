@@ -3,6 +3,19 @@ let inventoryRefreshSeconds = 600;
 let inventoryTimer = null;
 let currentPriceRefreshMinutes = 10;
 let currentPriceTimer = null;
+let autoOfferIntentBaseline = null;
+let autoOfferIntentDirty = false;
+let autoOfferIntentCheckboxBound = false;
+
+function bindAutoOfferIntentTracking() {
+  const checkbox = el("cfg-auto-offer-enabled");
+  if (!checkbox || autoOfferIntentCheckboxBound) return;
+  checkbox.addEventListener("change", () => {
+    autoOfferIntentDirty = true;
+  });
+  autoOfferIntentCheckboxBound = true;
+}
+
 function detectBrowserTimezone() {
   let name = "";
   try {
@@ -50,7 +63,12 @@ async function loadConfig() {
   const gPay = el("cfg-pay_method");
   if (gPay) gPay.value = (b.pay_method || "wechat").toLowerCase();
   const gAutoOffer = el("cfg-auto-offer-enabled");
-  if (gAutoOffer) gAutoOffer.checked = ao.enabled === true;
+  if (gAutoOffer) {
+    gAutoOffer.checked = ao.enabled === true;
+    bindAutoOfferIntentTracking();
+    autoOfferIntentBaseline = gAutoOffer.checked;
+    autoOfferIntentDirty = false;
+  }
   const gTarget = el("cfg-target_balance");
   if (gTarget) gTarget.value = p.target_balance ?? "";
   const gMaxDisc = el("cfg-max_discount");
@@ -197,6 +215,11 @@ async function loadConfig() {
 
 function formToConfig() {
   const browserTimezone = detectBrowserTimezone();
+  bindAutoOfferIntentTracking();
+  const autoOfferCheckbox = el("cfg-auto-offer-enabled");
+  const autoOfferPatch = autoOfferIntentDirty && autoOfferCheckbox
+    ? { enabled: !!autoOfferCheckbox.checked }
+    : undefined;
   const readNumberInput = (id) => {
     const node = el(id);
     if (!node) return undefined;
@@ -223,9 +246,7 @@ function formToConfig() {
       game: el("cfg-buff-game") ? el("cfg-buff-game").value.trim() : undefined,
       price_tolerance: el("cfg-price_tolerance") ? parseFloat(el("cfg-price_tolerance").value) || undefined : undefined,
     },
-    auto_offer: {
-      enabled: !!el("cfg-auto-offer-enabled")?.checked,
-    },
+    auto_offer: autoOfferPatch,
     pipeline: {
       target_balance: el("cfg-target_balance") ? parseFloat(el("cfg-target_balance").value) || undefined : undefined,
       max_discount: el("cfg-max_discount") ? parseFloat(el("cfg-max_discount").value) || undefined : undefined,

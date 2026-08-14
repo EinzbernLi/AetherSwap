@@ -15,7 +15,9 @@ def test_auto_offer_settings_has_one_intent_checkbox_and_serializes_only_intent(
     assert html.count('id="cfg-auto-offer-enabled"') == 1
     assert 'gAutoOffer.checked = ao.enabled === true' in settings
     assert "auto_offer:" in settings
-    assert "enabled: !!el(\"cfg-auto-offer-enabled\")?.checked" in settings
+    assert "autoOfferIntentDirty" in settings
+    assert "autoOfferPatch" in settings
+    assert "enabled: !!autoOfferCheckbox.checked" in settings
     assert "auto_offer_runtime" not in settings
 
 

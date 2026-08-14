@@ -180,6 +180,31 @@ def test_legacy_pending_is_blocked_only_for_requested_on(monkeypatch):
     assert off.mode is AutoOfferRuntimeMode.OFF
 
 
+def test_host_correlated_store_blocked_is_effective_blocker(monkeypatch):
+    state = _runtime(
+        monkeypatch,
+        config={"auto_offer": {"enabled": False}},
+        purchases=[
+            {
+                "_db_id": 1,
+                "buff_order_id": "blocked-order",
+                "pending_receipt": True,
+                "assetid": None,
+            }
+        ],
+        store_rows=[
+            _stored(
+                "blocked-order",
+                DeliveryStatus.BLOCKED,
+                pending_receipt=True,
+            )
+        ],
+    )
+    assert state.mode is AutoOfferRuntimeMode.BLOCKED
+    assert state.reason == "delivery_blocked"
+    assert state.active_delivery_count == 1
+
+
 def test_tombstone_with_existing_host_row_is_unsafe(monkeypatch):
     state = _runtime(
         monkeypatch,

@@ -14,6 +14,10 @@ from app.auto_offer.store import (
     AutoOfferStoreStaleWriteError,
     StoredDelivery,
 )
+from app.auto_offer.store_maintenance import (
+    StoreMaintenanceBlocked,
+    maintain_existing_store_for_enable,
+)
 
 
 def snapshot(**changes):
@@ -126,6 +130,8 @@ def test_v1_migration_is_atomic_and_preserves_historical_null_counterparty(tmp_p
         )
         connection.commit()
 
+    assert AutoOfferStore.probe_existing_schema(path).migratable_v1 is True
+    assert AutoOfferStore.migrate_existing_v1_to_v2(path) is True
     store = AutoOfferStore(path)
     store.initialize()
     migrated = store.get_by_purchase_id("purchase-1")
@@ -143,6 +149,59 @@ def test_v1_migration_is_atomic_and_preserves_historical_null_counterparty(tmp_p
         assert connection.execute(
             "SELECT counterparty_steam_id FROM auto_offer_delivery"
         ).fetchone() == (None,)
+
+
+def test_existing_v1_rejection_is_zero_write_until_explicit_maintenance(tmp_path):
+    path = tmp_path / "auto_offer.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE auto_offer_delivery ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, purchase_id TEXT NOT NULL UNIQUE, "
+            "buff_order_id TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL, "
+            "recipient_steam_id TEXT NOT NULL, delivery_mode TEXT NULL, "
+            "delivery_status TEXT NOT NULL, steam_tradeoffer_id TEXT NULL, "
+            "offer_attempted_at REAL NULL, offer_sent_at REAL NULL, received_at REAL NULL, "
+            "delivery_error TEXT NULL, pending_receipt INTEGER NOT NULL, assetid TEXT NULL, "
+            "revision INTEGER NOT NULL)"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    before = path.read_bytes()
+
+    with pytest.raises(AutoOfferStoreSchemaError):
+        AutoOfferStore(path).initialize()
+
+    assert path.read_bytes() == before
+    assert AutoOfferStore.probe_existing_schema(path).migratable_v1 is True
+
+
+def test_incompatible_v1_rows_block_maintenance_without_source_change(tmp_path):
+    path = tmp_path / "auto_offer.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE auto_offer_delivery ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, purchase_id TEXT NOT NULL UNIQUE, "
+            "buff_order_id TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL, "
+            "recipient_steam_id TEXT NOT NULL, delivery_mode TEXT NULL, "
+            "delivery_status TEXT NOT NULL, steam_tradeoffer_id TEXT NULL, "
+            "offer_attempted_at REAL NULL, offer_sent_at REAL NULL, received_at REAL NULL, "
+            "delivery_error TEXT NULL, pending_receipt INTEGER NOT NULL, assetid TEXT NULL, "
+            "revision INTEGER NOT NULL)"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            "INSERT INTO auto_offer_delivery (purchase_id, buff_order_id, account_id, "
+            "recipient_steam_id, delivery_status, pending_receipt, revision) "
+            "VALUES ('purchase-1', 'buff-1', 'account-1', 'steam-1', 'invalid', 1, 1)"
+        )
+        connection.commit()
+    before = path.read_bytes()
+
+    with pytest.raises(StoreMaintenanceBlocked) as error:
+        maintain_existing_store_for_enable(path)
+
+    assert error.value.reason == "store_migration_incompatible"
+    assert path.read_bytes() == before
 
 
 def test_ensure_initial_is_exactly_idempotent(tmp_path):

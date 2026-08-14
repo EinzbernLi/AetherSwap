@@ -232,6 +232,39 @@ def test_actual_toggle_succeeds_when_pipeline_is_stopped(monkeypatch):
     assert len(updates) == 1
 
 
+def test_enable_runs_existing_store_maintenance_before_read_only_preflight(monkeypatch):
+    from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
+
+    state, updates = _install_config_state(
+        monkeypatch,
+        enabled=False,
+        running=False,
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        pipeline,
+        "maintain_existing_store_for_enable",
+        lambda: calls.append("maintenance"),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "preflight_auto_offer_enable",
+        lambda **_kwargs: calls.append("preflight")
+        or AutoOfferRuntimeState(
+            requested_enabled=True,
+            active_delivery_count=0,
+            mode=AutoOfferRuntimeMode.ON,
+        ),
+    )
+
+    pipeline.update_auto_offer_enabled_config({"auto_offer": {"enabled": True}})
+
+    assert calls == ["maintenance", "preflight"]
+    assert state["auto_offer"]["enabled"] is True
+    assert len(updates) == 1
+
+
 def test_actual_toggle_is_blocked_during_shutdown(monkeypatch):
     state, updates = _install_config_state(
         monkeypatch,

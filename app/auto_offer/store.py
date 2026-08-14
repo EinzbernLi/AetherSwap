@@ -45,6 +45,12 @@ _SELECT_COLUMNS: Final[str] = (
     "offer_attempted_at, offer_sent_at, received_at, delivery_error, "
     "pending_receipt, assetid, counterparty_steam_id, revision"
 )
+_V1_SELECT_COLUMNS: Final[str] = (
+    "id, purchase_id, buff_order_id, account_id, recipient_steam_id, "
+    "delivery_mode, delivery_status, steam_tradeoffer_id, "
+    "offer_attempted_at, offer_sent_at, received_at, delivery_error, "
+    "pending_receipt, assetid, revision"
+)
 _INSERT_COLUMNS: Final[str] = (
     "purchase_id, buff_order_id, account_id, recipient_steam_id, "
     "delivery_mode, delivery_status, steam_tradeoffer_id, "
@@ -121,6 +127,15 @@ class StoredDelivery:
 
 
 @dataclass(frozen=True)
+class StoreSchemaProbe:
+    """Read-only evidence about an existing Auto Offer Store source."""
+
+    exists: bool
+    version: int | None
+    migratable_v1: bool
+
+
+@dataclass(frozen=True)
 class _SourceFingerprint:
     exists: bool
     device: int | None
@@ -134,6 +149,7 @@ class _SourceFingerprint:
 class _DetachedSource:
     main: bytes
     wal: bytes | None
+    fingerprint: tuple[_SourceFingerprint, ...]
 
 
 class AutoOfferStore:
@@ -164,10 +180,13 @@ class AutoOfferStore:
 
         self._connection = connection
         try:
-            self._configure_connection(connection)
             version = self._user_version(connection)
             tables = self._user_tables(connection)
-            if version == 0 and not tables:
+            if version != 0 or tables:
+                self._validate_schema(connection)
+                self._configure_connection(connection)
+            else:
+                self._configure_connection(connection)
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     connection.execute(_CREATE_TABLE_SQL)
@@ -178,11 +197,6 @@ class AutoOfferStore:
                 except (sqlite3.DatabaseError, AutoOfferStoreError):
                     self._rollback(connection)
                     raise
-            else:
-                if version == 1:
-                    self._migrate_v1_to_v2(connection)
-                else:
-                    self._validate_schema(connection)
         except AutoOfferStoreError:
             self.close()
             raise
@@ -244,10 +258,107 @@ class AutoOfferStore:
             return [cls._row_to_stored(row) for row in rows]
 
     @classmethod
+    def probe_existing_schema(cls, db_path: str | Path) -> StoreSchemaProbe:
+        """Inspect an existing source without creating, migrating, or writing it."""
+
+        with cls._detached_readonly(db_path, require_v2=False) as connection:
+            if connection is None:
+                return StoreSchemaProbe(False, None, False)
+            version = cls._user_version(connection)
+            if version == 1:
+                cls._validate_v1_schema(connection)
+                cls._validate_v1_rows(connection)
+                return StoreSchemaProbe(True, 1, True)
+            if version == AUTO_OFFER_STORE_SCHEMA_VERSION:
+                cls._validate_schema(connection)
+                return StoreSchemaProbe(True, version, False)
+            raise AutoOfferStoreSchemaError("unsupported Auto Offer schema version")
+
+    @classmethod
+    def migrate_existing_v1_to_v2(cls, db_path: str | Path) -> bool:
+        """Migrate one already-existing compatible v1 source without creation.
+
+        The caller must invoke this only for an explicit persisted OFF->ON
+        transition.  The method deliberately uses SQLite ``mode=rw`` and
+        revalidates the captured source immediately before the transaction so
+        a missing or replaced source cannot be silently recreated.
+        """
+
+        source = cls._capture_source(db_path)
+        if source is None:
+            return False
+
+        with cls._detached_readonly(db_path, require_v2=False) as connection:
+            if connection is None:
+                return False
+            if cls._user_version(connection) != 1:
+                cls._validate_schema(connection)
+                return False
+            cls._validate_v1_schema(connection)
+            cls._validate_v1_rows(connection)
+
+        path = cls._resolved_source_path(db_path)
+        current = cls._capture_source(path)
+        if current != source:
+            raise AutoOfferStoreError("Auto Offer source changed before migration")
+
+        try:
+            connection = sqlite3.connect(
+                f"{path.as_uri()}?mode=rw",
+                uri=True,
+                timeout=5.0,
+                isolation_level=None,
+            )
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise AutoOfferStoreError("cannot open existing Auto Offer source") from exc
+
+        try:
+            connection.execute("PRAGMA busy_timeout = 5000")
+            if connection.execute("PRAGMA busy_timeout").fetchone()[0] != 5000:
+                raise AutoOfferStoreCorruptError("SQLite busy timeout was not enabled")
+            connection.execute("PRAGMA synchronous = FULL")
+            if connection.execute("PRAGMA synchronous").fetchone()[0] != 2:
+                raise AutoOfferStoreCorruptError("SQLite FULL synchronous mode was not enabled")
+            latest = cls._capture_source(path)
+            if latest != source:
+                raise AutoOfferStoreError("Auto Offer source changed before migration")
+            cls._begin(connection)
+            try:
+                cls._validate_v1_schema(connection)
+                cls._validate_v1_rows(connection)
+                connection.execute(
+                    f"ALTER TABLE {_TABLE_NAME} "
+                    "ADD COLUMN counterparty_steam_id TEXT NULL"
+                )
+                connection.execute(
+                    f"PRAGMA user_version = {AUTO_OFFER_STORE_SCHEMA_VERSION}"
+                )
+                connection.commit()
+            except (AutoOfferStoreError, sqlite3.DatabaseError):
+                cls._rollback(connection)
+                raise
+            cls._validate_schema(connection)
+            return True
+        except AutoOfferStoreError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            cls._rollback(connection)
+            raise AutoOfferStoreCorruptError(
+                "SQLite rejected Auto Offer schema migration"
+            ) from exc
+        finally:
+            try:
+                connection.close()
+            except sqlite3.DatabaseError as exc:
+                raise AutoOfferStoreError("cannot close Auto Offer migration connection") from exc
+
+    @classmethod
     @contextmanager
     def _detached_readonly(
         cls,
         db_path: str | Path,
+        *,
+        require_v2: bool = True,
     ) -> Iterator[sqlite3.Connection | None]:
         source = cls._capture_source(db_path)
         if source is None:
@@ -279,8 +390,9 @@ class AutoOfferStore:
             connection.execute("PRAGMA busy_timeout = 5000")
             if connection.execute("PRAGMA busy_timeout").fetchone()[0] != 5000:
                 raise AutoOfferStoreCorruptError("SQLite busy timeout was not enabled")
-            cls._validate_schema(connection)
-            if cls._user_version(connection) != AUTO_OFFER_STORE_SCHEMA_VERSION:
+            if require_v2:
+                cls._validate_schema(connection)
+            if require_v2 and cls._user_version(connection) != AUTO_OFFER_STORE_SCHEMA_VERSION:
                 raise AutoOfferStoreSchemaError("Auto Offer schema does not match v2")
             yield connection
         except AutoOfferStoreError:
@@ -298,14 +410,7 @@ class AutoOfferStore:
 
     @classmethod
     def _capture_source(cls, db_path: str | Path) -> _DetachedSource | None:
-        path = Path(db_path).expanduser()
-        try:
-            if path.is_symlink():
-                raise AutoOfferStoreError("invalid Auto Offer source file")
-            path = path.resolve(strict=False)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise AutoOfferStoreError("cannot resolve Auto Offer source path") from exc
-
+        path = cls._resolved_source_path(db_path)
         before = cls._fingerprint_source_family(path)
         main, wal, shm, journal = before
         if not main.exists:
@@ -330,7 +435,23 @@ class AutoOfferStore:
         after = cls._fingerprint_source_family(path)
         if before != after:
             raise AutoOfferStoreError("Auto Offer source changed during collection")
-        return _DetachedSource(main=main_payload, wal=wal_payload)
+        return _DetachedSource(
+            main=main_payload,
+            wal=wal_payload,
+            fingerprint=before,
+        )
+
+    @staticmethod
+    def _resolved_source_path(db_path: str | Path) -> Path:
+        path = Path(db_path).expanduser()
+        try:
+            if path.is_symlink():
+                raise AutoOfferStoreError("invalid Auto Offer source file")
+            path = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AutoOfferStoreError("cannot resolve Auto Offer source path") from exc
+
+        return path
 
     @classmethod
     def _fingerprint_source_family(
@@ -635,6 +756,17 @@ class AutoOfferStore:
         cls._validate_table_shape(connection, _V1_EXPECTED_COLUMNS, "v1")
 
     @classmethod
+    def _validate_v1_rows(cls, connection: sqlite3.Connection) -> None:
+        try:
+            rows = connection.execute(
+                f"SELECT {_V1_SELECT_COLUMNS} FROM {_TABLE_NAME} ORDER BY id ASC"
+            ).fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise AutoOfferStoreCorruptError("cannot inspect v1 Auto Offer rows") from exc
+        for row in rows:
+            cls._row_to_stored(tuple(row[:14]) + (None, row[14]))
+
+    @classmethod
     def _validate_table_shape(
         cls,
         connection: sqlite3.Connection,
@@ -653,6 +785,12 @@ class AutoOfferStore:
             indexes = connection.execute(
                 f"PRAGMA index_list({_TABLE_NAME})"
             ).fetchall()
+            unexpected_objects = connection.execute(
+                "SELECT type, name FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' "
+                "AND NOT (type = 'table' AND name = ?)",
+                (_TABLE_NAME,),
+            ).fetchall()
         except sqlite3.DatabaseError as exc:
             raise AutoOfferStoreCorruptError("cannot inspect Auto Offer schema") from exc
 
@@ -665,6 +803,14 @@ class AutoOfferStore:
             )
         if not table_sql or "AUTOINCREMENT" not in str(table_sql[0]).upper():
             raise AutoOfferStoreSchemaError("Auto Offer id must use AUTOINCREMENT")
+        if version_label == "v1" and unexpected_objects:
+            raise AutoOfferStoreSchemaError(
+                f"unexpected Auto Offer schema objects in {version_label}"
+            )
+        if len(indexes) != 2 or any(index[2] != 1 for index in indexes):
+            raise AutoOfferStoreSchemaError(
+                f"Auto Offer indexes do not match {version_label}"
+            )
 
         unique_columns: set[tuple[str, ...]] = set()
         try:
@@ -686,6 +832,7 @@ class AutoOfferStore:
     @classmethod
     def _migrate_v1_to_v2(cls, connection: sqlite3.Connection) -> None:
         cls._validate_v1_schema(connection)
+        cls._validate_v1_rows(connection)
         cls._begin(connection)
         try:
             connection.execute(
@@ -810,5 +957,6 @@ __all__ = [
     "AutoOfferStoreError",
     "AutoOfferStoreSchemaError",
     "AutoOfferStoreStaleWriteError",
+    "StoreSchemaProbe",
     "StoredDelivery",
 ]
