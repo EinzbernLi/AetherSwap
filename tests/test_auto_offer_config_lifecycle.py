@@ -265,6 +265,31 @@ def test_enable_runs_existing_store_maintenance_before_read_only_preflight(monke
     assert len(updates) == 1
 
 
+def test_enable_maintenance_failure_keeps_persisted_intent_false(monkeypatch):
+    state, updates = _install_config_state(
+        monkeypatch,
+        enabled=False,
+        running=False,
+    )
+
+    def blocked():
+        raise pipeline.StoreMaintenanceBlocked("store_migration_blocked")
+
+    monkeypatch.setattr(
+        pipeline,
+        "maintain_existing_store_for_enable",
+        blocked,
+    )
+
+    with pytest.raises(pipeline.PipelineMaintenanceBlocked):
+        pipeline.update_auto_offer_enabled_config(
+            {"auto_offer": {"enabled": True}}
+        )
+
+    assert state["auto_offer"]["enabled"] is False
+    assert updates == []
+
+
 def test_actual_toggle_is_blocked_during_shutdown(monkeypatch):
     state, updates = _install_config_state(
         monkeypatch,

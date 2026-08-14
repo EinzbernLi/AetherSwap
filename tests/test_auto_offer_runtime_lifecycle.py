@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import app.auto_offer.runtime_lifecycle as lifecycle
+import pytest
 from app.auto_offer.contracts import DeliveryMode, DeliverySnapshot, DeliveryStatus
 from app.auto_offer.runtime_mode import AutoOfferRuntimeMode
 from app.auto_offer.store import AutoOfferStoreError, StoredDelivery
@@ -180,10 +181,14 @@ def test_legacy_pending_is_blocked_only_for_requested_on(monkeypatch):
     assert off.mode is AutoOfferRuntimeMode.OFF
 
 
-def test_host_correlated_store_blocked_is_effective_blocker(monkeypatch):
+@pytest.mark.parametrize("requested_enabled", [False, True])
+def test_host_correlated_store_blocked_is_effective_blocker(
+    monkeypatch,
+    requested_enabled,
+):
     state = _runtime(
         monkeypatch,
-        config={"auto_offer": {"enabled": False}},
+        config={"auto_offer": {"enabled": requested_enabled}},
         purchases=[
             {
                 "_db_id": 1,
@@ -202,6 +207,42 @@ def test_host_correlated_store_blocked_is_effective_blocker(monkeypatch):
     )
     assert state.mode is AutoOfferRuntimeMode.BLOCKED
     assert state.reason == "delivery_blocked"
+    assert state.active_delivery_count == 1
+
+
+@pytest.mark.parametrize(
+    ("requested_enabled", "expected_mode"),
+    [
+        (False, AutoOfferRuntimeMode.DRAINING),
+        (True, AutoOfferRuntimeMode.ON),
+    ],
+)
+def test_offer_terminated_remains_d4_reconciliation_state(
+    monkeypatch,
+    requested_enabled,
+    expected_mode,
+):
+    state = _runtime(
+        monkeypatch,
+        config={"auto_offer": {"enabled": requested_enabled}},
+        purchases=[
+            {
+                "_db_id": 1,
+                "buff_order_id": "terminated-order",
+                "pending_receipt": True,
+                "assetid": None,
+            }
+        ],
+        store_rows=[
+            _stored(
+                "terminated-order",
+                DeliveryStatus.OFFER_TERMINATED,
+                pending_receipt=True,
+            )
+        ],
+    )
+    assert state.mode is expected_mode
+    assert state.reason is None
     assert state.active_delivery_count == 1
 
 

@@ -11,7 +11,8 @@ function bindAutoOfferIntentTracking() {
   const checkbox = el("cfg-auto-offer-enabled");
   if (!checkbox || autoOfferIntentCheckboxBound) return;
   checkbox.addEventListener("change", () => {
-    autoOfferIntentDirty = true;
+    autoOfferIntentDirty = typeof autoOfferIntentBaseline !== "boolean"
+      || checkbox.checked !== autoOfferIntentBaseline;
   });
   autoOfferIntentCheckboxBound = true;
 }

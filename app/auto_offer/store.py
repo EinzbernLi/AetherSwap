@@ -164,7 +164,7 @@ class AutoOfferStore:
         self._connection: sqlite3.Connection | None = None
 
     def initialize(self) -> None:
-        """Open the database, configure SQLite, and create, migrate, or verify v2."""
+        """Open the database, configure SQLite, and create or verify current v2."""
         if self._connection is not None:
             self._configure_connection(self._connection)
             self._validate_schema(self._connection)
@@ -278,10 +278,10 @@ class AutoOfferStore:
     def migrate_existing_v1_to_v2(cls, db_path: str | Path) -> bool:
         """Migrate one already-existing compatible v1 source without creation.
 
-        The caller must invoke this only for an explicit persisted OFF->ON
-        transition.  The method deliberately uses SQLite ``mode=rw`` and
-        revalidates the captured source immediately before the transaction so
-        a missing or replaced source cannot be silently recreated.
+        Detached evidence approves one exact logical v1 snapshot.  The live
+        source is then opened existing-file-only, write custody is acquired,
+        and both physical main-file identity and the ordered logical v1 rows
+        are re-proven inside that transaction before any schema mutation.
         """
 
         source = cls._capture_source(db_path)
@@ -295,49 +295,56 @@ class AutoOfferStore:
                 cls._validate_schema(connection)
                 return False
             cls._validate_v1_schema(connection)
-            cls._validate_v1_rows(connection)
+            approved_rows = cls._validate_v1_rows(connection)
+
+        approved_main = source.fingerprint[0]
+        if (
+            not approved_main.exists
+            or approved_main.device is None
+            or approved_main.inode is None
+        ):
+            raise AutoOfferStoreError(
+                "cannot prove existing Auto Offer source identity"
+            )
 
         path = cls._resolved_source_path(db_path)
         current = cls._capture_source(path)
         if current != source:
             raise AutoOfferStoreError("Auto Offer source changed before migration")
 
-        try:
-            connection = sqlite3.connect(
-                f"{path.as_uri()}?mode=rw",
-                uri=True,
-                timeout=5.0,
-                isolation_level=None,
-            )
-        except (OSError, sqlite3.DatabaseError) as exc:
-            raise AutoOfferStoreError("cannot open existing Auto Offer source") from exc
-
+        connection = cls._open_existing_rw(path)
         try:
             connection.execute("PRAGMA busy_timeout = 5000")
             if connection.execute("PRAGMA busy_timeout").fetchone()[0] != 5000:
-                raise AutoOfferStoreCorruptError("SQLite busy timeout was not enabled")
+                raise AutoOfferStoreCorruptError(
+                    "SQLite busy timeout was not enabled"
+                )
             connection.execute("PRAGMA synchronous = FULL")
             if connection.execute("PRAGMA synchronous").fetchone()[0] != 2:
-                raise AutoOfferStoreCorruptError("SQLite FULL synchronous mode was not enabled")
-            latest = cls._capture_source(path)
-            if latest != source:
-                raise AutoOfferStoreError("Auto Offer source changed before migration")
+                raise AutoOfferStoreCorruptError(
+                    "SQLite FULL synchronous mode was not enabled"
+                )
+
             cls._begin(connection)
             try:
+                cls._assert_main_source_identity(path, approved_main)
                 cls._validate_v1_schema(connection)
-                cls._validate_v1_rows(connection)
-                connection.execute(
-                    f"ALTER TABLE {_TABLE_NAME} "
-                    "ADD COLUMN counterparty_steam_id TEXT NULL"
-                )
-                connection.execute(
-                    f"PRAGMA user_version = {AUTO_OFFER_STORE_SCHEMA_VERSION}"
-                )
+                live_rows = cls._validate_v1_rows(connection)
+                if live_rows != approved_rows:
+                    raise AutoOfferStoreError(
+                        "Auto Offer logical source changed before migration"
+                    )
+
+                cls._apply_v1_to_v2_schema_change(connection)
+                cls._validate_schema(connection)
+
+                # A path replacement after write custody but before commit must
+                # still abort while ALTER/user_version remain rollback-able.
+                cls._assert_main_source_identity(path, approved_main)
                 connection.commit()
             except (AutoOfferStoreError, sqlite3.DatabaseError):
                 cls._rollback(connection)
                 raise
-            cls._validate_schema(connection)
             return True
         except AutoOfferStoreError:
             raise
@@ -756,15 +763,24 @@ class AutoOfferStore:
         cls._validate_table_shape(connection, _V1_EXPECTED_COLUMNS, "v1")
 
     @classmethod
-    def _validate_v1_rows(cls, connection: sqlite3.Connection) -> None:
+    def _validate_v1_rows(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> tuple[tuple[object, ...], ...]:
         try:
-            rows = connection.execute(
-                f"SELECT {_V1_SELECT_COLUMNS} FROM {_TABLE_NAME} ORDER BY id ASC"
-            ).fetchall()
+            rows = tuple(
+                tuple(row)
+                for row in connection.execute(
+                    f"SELECT {_V1_SELECT_COLUMNS} FROM {_TABLE_NAME} ORDER BY id ASC"
+                ).fetchall()
+            )
         except sqlite3.DatabaseError as exc:
-            raise AutoOfferStoreCorruptError("cannot inspect v1 Auto Offer rows") from exc
+            raise AutoOfferStoreCorruptError(
+                "cannot inspect v1 Auto Offer rows"
+            ) from exc
         for row in rows:
             cls._row_to_stored(tuple(row[:14]) + (None, row[14]))
+        return rows
 
     @classmethod
     def _validate_table_shape(
@@ -829,26 +845,63 @@ class AutoOfferStore:
                 "purchase_id and buff_order_id must both be unique"
             )
 
-    @classmethod
-    def _migrate_v1_to_v2(cls, connection: sqlite3.Connection) -> None:
-        cls._validate_v1_schema(connection)
-        cls._validate_v1_rows(connection)
-        cls._begin(connection)
+    @staticmethod
+    def _open_existing_rw(path: Path) -> sqlite3.Connection:
         try:
-            connection.execute(
-                f"ALTER TABLE {_TABLE_NAME} "
-                "ADD COLUMN counterparty_steam_id TEXT NULL"
+            return sqlite3.connect(
+                f"{path.as_uri()}?mode=rw",
+                uri=True,
+                timeout=5.0,
+                isolation_level=None,
             )
-            connection.execute(
-                f"PRAGMA user_version = {AUTO_OFFER_STORE_SCHEMA_VERSION}"
-            )
-            connection.commit()
-        except sqlite3.DatabaseError as exc:
-            cls._rollback(connection)
-            raise AutoOfferStoreCorruptError(
-                "SQLite rejected Auto Offer schema migration"
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise AutoOfferStoreError(
+                "cannot open existing Auto Offer source"
             ) from exc
-        cls._validate_schema(connection)
+
+    @staticmethod
+    def _assert_main_source_identity(
+        path: Path,
+        approved: _SourceFingerprint,
+    ) -> None:
+        if (
+            not approved.exists
+            or approved.device is None
+            or approved.inode is None
+        ):
+            raise AutoOfferStoreError(
+                "cannot prove existing Auto Offer source identity"
+            )
+        try:
+            if path.is_symlink() or not path.exists() or not path.is_file():
+                raise AutoOfferStoreError(
+                    "Auto Offer source identity changed before migration"
+                )
+            stat = path.stat()
+        except AutoOfferStoreError:
+            raise
+        except OSError as exc:
+            raise AutoOfferStoreError(
+                "cannot verify Auto Offer source identity"
+            ) from exc
+
+        if (
+            getattr(stat, "st_dev", None),
+            getattr(stat, "st_ino", None),
+        ) != (approved.device, approved.inode):
+            raise AutoOfferStoreError(
+                "Auto Offer source identity changed before migration"
+            )
+
+    @staticmethod
+    def _apply_v1_to_v2_schema_change(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            f"ALTER TABLE {_TABLE_NAME} "
+            "ADD COLUMN counterparty_steam_id TEXT NULL"
+        )
+        connection.execute(
+            f"PRAGMA user_version = {AUTO_OFFER_STORE_SCHEMA_VERSION}"
+        )
 
     @staticmethod
     def _begin(connection: sqlite3.Connection) -> None:

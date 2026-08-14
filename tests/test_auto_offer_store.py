@@ -1,5 +1,6 @@
 import sqlite3
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,77 @@ def make_store(tmp_path):
     store = AutoOfferStore(tmp_path / "auto_offer.db")
     store.initialize()
     return store
+
+
+def source_family(path: Path):
+    return tuple(
+        (
+            candidate.exists(),
+            candidate.read_bytes() if candidate.exists() else None,
+        )
+        for candidate in (
+            path,
+            Path(f"{path}-wal"),
+            Path(f"{path}-shm"),
+            Path(f"{path}-journal"),
+        )
+    )
+
+
+def create_v1_source(path: Path, *, purchase_id="purchase-1", buff_order_id="buff-1"):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE auto_offer_delivery ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "purchase_id TEXT NOT NULL UNIQUE, buff_order_id TEXT NOT NULL UNIQUE, "
+            "account_id TEXT NOT NULL, recipient_steam_id TEXT NOT NULL, "
+            "delivery_mode TEXT NULL, delivery_status TEXT NOT NULL, "
+            "steam_tradeoffer_id TEXT NULL, offer_attempted_at REAL NULL, "
+            "offer_sent_at REAL NULL, received_at REAL NULL, delivery_error TEXT NULL, "
+            "pending_receipt INTEGER NOT NULL, assetid TEXT NULL, revision INTEGER NOT NULL"
+            ")"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            "INSERT INTO auto_offer_delivery ("
+            "purchase_id, buff_order_id, account_id, recipient_steam_id, "
+            "delivery_mode, delivery_status, steam_tradeoffer_id, offer_attempted_at, "
+            "offer_sent_at, received_at, delivery_error, pending_receipt, assetid, revision"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                purchase_id,
+                buff_order_id,
+                "account-1",
+                "steam-1",
+                DeliveryMode.SELLER_SENDS_OFFER.value,
+                DeliveryStatus.AWAITING_OFFER.value,
+                None,
+                None,
+                None,
+                None,
+                None,
+                1,
+                None,
+                4,
+            ),
+        )
+    connection.close()
+
+
+def assert_v1_source(path: Path, *, purchase_id="purchase-1"):
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT purchase_id FROM auto_offer_delivery"
+        ).fetchone() == (purchase_id,)
+        assert [column[1] for column in connection.execute(
+            "PRAGMA table_info(auto_offer_delivery)"
+        ).fetchall()] == [
+            "id", "purchase_id", "buff_order_id", "account_id", "recipient_steam_id",
+            "delivery_mode", "delivery_status", "steam_tradeoffer_id",
+            "offer_attempted_at", "offer_sent_at", "received_at", "delivery_error",
+            "pending_receipt", "assetid", "revision",
+        ]
 
 
 def test_constructor_and_import_are_side_effect_free(tmp_path):
@@ -202,6 +274,109 @@ def test_incompatible_v1_rows_block_maintenance_without_source_change(tmp_path):
 
     assert error.value.reason == "store_migration_incompatible"
     assert path.read_bytes() == before
+
+
+def test_maintenance_missing_store_does_not_create_source_or_parent(tmp_path):
+    path = tmp_path / "missing" / "auto_offer.db"
+    result = maintain_existing_store_for_enable(path)
+    assert result.action == "missing"
+    assert result.migrated is False
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
+def test_exact_v2_maintenance_is_no_write(tmp_path):
+    store = make_store(tmp_path)
+    path = tmp_path / "auto_offer.db"
+    store.close()
+    before = source_family(path)
+
+    result = maintain_existing_store_for_enable(path)
+
+    assert result.action == "already_v2"
+    assert result.migrated is False
+    assert source_family(path) == before
+
+
+def test_detached_v1_probe_is_zero_source_write(tmp_path):
+    path = tmp_path / "auto_offer.db"
+    create_v1_source(path)
+    before = source_family(path)
+
+    probe = AutoOfferStore.probe_existing_schema(path)
+
+    assert (probe.exists, probe.version, probe.migratable_v1) == (True, 1, True)
+    assert source_family(path) == before
+
+
+def test_source_disappearance_cannot_create_replacement_db(tmp_path, monkeypatch):
+    path = tmp_path / "auto_offer.db"
+    create_v1_source(path)
+    original_open = AutoOfferStore._open_existing_rw
+
+    def disappear_then_open(candidate):
+        path.unlink()
+        return original_open(candidate)
+
+    monkeypatch.setattr(
+        AutoOfferStore,
+        "_open_existing_rw",
+        staticmethod(disappear_then_open),
+    )
+
+    with pytest.raises(AutoOfferStoreError):
+        AutoOfferStore.migrate_existing_v1_to_v2(path)
+    assert not path.exists()
+
+
+def test_source_replacement_is_rejected_under_live_write_custody(tmp_path, monkeypatch):
+    path = tmp_path / "auto_offer.db"
+    create_v1_source(path)
+    original_open = AutoOfferStore._open_existing_rw
+
+    def replace_then_open(candidate):
+        path.unlink()
+        create_v1_source(
+            path,
+            purchase_id="replacement-purchase",
+            buff_order_id="replacement-buff",
+        )
+        return original_open(candidate)
+
+    monkeypatch.setattr(
+        AutoOfferStore,
+        "_open_existing_rw",
+        staticmethod(replace_then_open),
+    )
+
+    with pytest.raises(AutoOfferStoreError, match="identity changed"):
+        AutoOfferStore.migrate_existing_v1_to_v2(path)
+    assert_v1_source(path, purchase_id="replacement-purchase")
+
+
+def test_injected_failure_after_alter_rolls_back_to_valid_v1(tmp_path, monkeypatch):
+    path = tmp_path / "auto_offer.db"
+    create_v1_source(path)
+    original_apply = AutoOfferStore._apply_v1_to_v2_schema_change
+
+    def inject_failure(connection):
+        original_apply(connection)
+        raise sqlite3.DatabaseError("injected")
+
+    monkeypatch.setattr(
+        AutoOfferStore,
+        "_apply_v1_to_v2_schema_change",
+        staticmethod(inject_failure),
+    )
+
+    with pytest.raises(AutoOfferStoreCorruptError):
+        AutoOfferStore.migrate_existing_v1_to_v2(path)
+    assert_v1_source(path)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pragma_table_info('auto_offer_delivery') "
+            "WHERE name = 'counterparty_steam_id'"
+        ).fetchone() == (0,)
 
 
 def test_ensure_initial_is_exactly_idempotent(tmp_path):

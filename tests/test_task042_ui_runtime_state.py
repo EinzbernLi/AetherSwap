@@ -18,6 +18,15 @@ def test_auto_offer_settings_has_one_intent_checkbox_and_serializes_only_intent(
     assert "autoOfferIntentDirty" in settings
     assert "autoOfferPatch" in settings
     assert "enabled: !!autoOfferCheckbox.checked" in settings
+    assert 'typeof autoOfferIntentBaseline !== "boolean"' in settings
+    assert "checkbox.checked !== autoOfferIntentBaseline" in settings
+    assert "autoOfferIntentBaseline = gAutoOffer.checked" in settings
+    assert "autoOfferIntentDirty = false" in settings
+    assert "autoOfferIntentDirty && autoOfferCheckbox" in settings
+    listener_start = settings.index("function bindAutoOfferIntentTracking")
+    listener_end = settings.index("function detectBrowserTimezone", listener_start)
+    listener_source = settings[listener_start:listener_end]
+    assert "autoOfferIntentDirty = true" not in listener_source
     assert "auto_offer_runtime" not in settings
 
 
