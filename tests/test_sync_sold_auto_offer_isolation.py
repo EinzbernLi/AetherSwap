@@ -15,6 +15,7 @@ from app.auto_offer.host_ownership import (
     HostPurchaseOwnership,
     HostPurchaseOwnershipDecision,
 )
+from app.database import Purchase, _purchase_to_dict
 
 
 def _purchase(db_id, name="Knife", **changes):
@@ -35,6 +36,13 @@ def _purchase(db_id, name="Knife", **changes):
 
 def _decision(ownership):
     return HostPurchaseOwnershipDecision(ownership, None, ownership.value)
+
+
+def _sparse_purchase(db_id=7):
+    """Match the real serializer: SQL NULL optional fields are omitted."""
+    return _purchase_to_dict(
+        Purchase(id=db_id, name="Knife", goods_id=1, price=1.0, at=1.0)
+    )
 
 
 class _FakeState:
@@ -332,6 +340,96 @@ def test_batch_classification_loads_one_store_index(monkeypatch):
 
     assert len(decisions) == 2
     assert calls == [True]
+
+
+def _patch_state_cas(monkeypatch, current, writes):
+    @contextmanager
+    def guard(_action, **_kwargs):
+        yield
+
+    monkeypatch.setattr(state_module, "external_write_guard", guard)
+    monkeypatch.setattr(state_module, "db_get_purchases", lambda: [current])
+    monkeypatch.setattr(
+        state_module,
+        "require_purchase_mutation_allowed",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        state_module,
+        "db_update_purchase_by_id",
+        lambda *_args: writes.append(True) or True,
+    )
+
+
+def test_stable_id_helper_accepts_unchanged_sparse_serializer_purchase(monkeypatch):
+    current = _sparse_purchase()
+    writes = []
+    _patch_state_cas(monkeypatch, current, writes)
+    expected = {
+        field: current.get(field)
+        for field in sync_sold._EXPECTED_PURCHASE_FIELDS
+    }
+
+    assert state_module.State().update_purchase_by_id_if_matches(
+        7,
+        {"listing": False},
+        expected,
+    ) is True
+    assert writes == [True]
+
+
+def test_stable_id_helper_treats_explicit_none_as_sparse_none(monkeypatch):
+    expected_source = _sparse_purchase()
+    current = dict(expected_source)
+    current["assetid"] = None
+    writes = []
+    _patch_state_cas(monkeypatch, current, writes)
+    expected = {
+        field: current.get(field)
+        for field in sync_sold._EXPECTED_PURCHASE_FIELDS
+        if field != "assetid"
+    }
+
+    assert state_module.State().update_purchase_by_id_if_matches(
+        7,
+        {"listing": False},
+        expected,
+    ) is True
+    assert writes == [True]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("assetid", "asset-new"),
+        ("pending_receipt", True),
+        ("sale_price", 12.0),
+        ("listing", True),
+        ("listing_status", "active"),
+    ],
+)
+def test_stable_id_helper_rejects_sparse_to_nonnull_stale_changes(
+    monkeypatch,
+    field,
+    value,
+):
+    expected_source = _sparse_purchase()
+    current = dict(expected_source)
+    current[field] = value
+    writes = []
+    _patch_state_cas(monkeypatch, current, writes)
+    expected = {
+        item: expected_source.get(item)
+        for item in sync_sold._EXPECTED_PURCHASE_FIELDS
+        if item != field
+    }
+
+    assert state_module.State().update_purchase_by_id_if_matches(
+        7,
+        {"listing": False},
+        expected,
+    ) is False
+    assert writes == []
 
 
 def test_stable_id_helper_orders_guard_read_ownership_compare_write(monkeypatch):

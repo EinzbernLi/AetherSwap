@@ -151,7 +151,6 @@ class State:
             "listing",
             "listing_status",
         )
-        missing = object()
         with external_write_guard("host_transaction_mutation"):
             if type(db_id) is not int or db_id <= 0:
                 return False
@@ -172,7 +171,7 @@ class State:
                 data=data,
             )
             if any(
-                purchase.get(field, missing) != expected.get(field, missing)
+                purchase.get(field) != expected.get(field)
                 for field in expected_fields
             ):
                 return False
