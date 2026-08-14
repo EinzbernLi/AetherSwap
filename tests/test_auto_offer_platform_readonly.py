@@ -307,6 +307,110 @@ def test_buff_multiple_exact_matches_are_malformed():
     assert result.detail == "ambiguous_order"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        buff_record(
+            buff_order_id="buff-order-1",
+            bill_order_id="other-order",
+        ),
+        buff_record(
+            bill_order_id="buff-order-1",
+            buff_order_id="other-order",
+        ),
+    ],
+)
+def test_conflicting_order_aliases_are_malformed_without_buyer_fallback(payload):
+    client = BuffStub([payload], wait_payload=[wait_send_record()])
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.wait_calls == []
+
+
+def test_identical_order_aliases_preserve_exact_direction_success():
+    result = buff_adapter(
+        BuffStub(
+            [
+                buff_record(
+                    buff_order_id="buff-order-1",
+                    bill_order_id="buff-order-1",
+                )
+            ]
+        )
+    ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "seller_sends_offer"
+    assert result.evidence == DeliveryDirectionEvidence(
+        counterparty_steam_id="seller-1"
+    )
+
+
+def test_malformed_present_order_alias_is_malformed_without_buyer_fallback():
+    client = BuffStub(
+        [buff_record(bill_order_id=None)],
+        wait_payload=[wait_send_record()],
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.wait_calls == []
+
+
+def test_conflicting_trade_offer_aliases_are_malformed_without_evidence():
+    result = buff_adapter(
+        BuffStub([buff_record(trade_offer_id="offer-2")])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_identical_trade_offer_aliases_preserve_exact_offer_success():
+    result = buff_adapter(
+        BuffStub([buff_record(trade_offer_id="offer-1")])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "offer_pending"
+    assert result.evidence == OfferStateEvidence("offer-1")
+
+
+def test_malformed_present_trade_offer_alias_is_malformed_without_evidence():
+    result = buff_adapter(
+        BuffStub([buff_record(trade_offer_id=None)])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_absent_trade_offer_aliases_preserve_order_not_proven():
+    payload = buff_record()
+    del payload["tradeofferid"]
+
+    result = buff_adapter(BuffStub([payload])).execute(
+        request(capability=PlatformCapability.READ_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_not_proven"
+    assert result.evidence is None
+
+
 def test_buff_unique_direction_requires_recipient_and_proves_seller_send():
     result = buff_adapter(
         BuffStub([buff_record()])
@@ -444,13 +548,19 @@ def test_buff_offer_state_requires_exact_order_trade_offer_and_known_pending_sta
     assert result.detail == "offer_pending"
     assert result.evidence == OfferStateEvidence("offer-1")
 
-    for record in (
-        buff_record(tradeofferid=None),
-        buff_record(state="unknown"),
-    ):
-        result = buff_adapter(BuffStub([record])).execute(request())
-        assert result.status is PlatformResultStatus.RESULT_UNKNOWN
-        assert result.is_success is False
+    malformed = buff_adapter(
+        BuffStub([buff_record(tradeofferid=None)])
+    ).execute(request())
+    assert malformed.status is PlatformResultStatus.MALFORMED
+    assert malformed.detail == "malformed_payload"
+    assert malformed.evidence is None
+
+    unknown_state = buff_adapter(
+        BuffStub([buff_record(state="unknown")])
+    ).execute(request())
+    assert unknown_state.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert unknown_state.detail == "order_not_proven"
+    assert unknown_state.evidence is None
 
 
 @pytest.mark.parametrize("payload", [None, {"code": "OK", "data": []}, ["not-a-record"]])

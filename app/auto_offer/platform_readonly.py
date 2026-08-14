@@ -56,6 +56,10 @@ STEAM_COMPLETED_TRADE_CAPABILITIES: Final[frozenset[PlatformCapability]] = froze
 )
 
 _ORDER_FIELDS: Final[tuple[str, ...]] = ("buff_order_id", "bill_order_id")
+_TRADE_OFFER_FIELDS: Final[tuple[str, ...]] = (
+    "tradeofferid",
+    "trade_offer_id",
+)
 _RECIPIENT_FIELDS: Final[tuple[str, ...]] = (
     "recipient_steam_id",
     "recipient_steamid",
@@ -202,6 +206,8 @@ def _canonical_order_values(record: Mapping[str, Any]) -> tuple[str, ...] | None
         if value is None:
             return None
         values.append(value)
+    if len(set(values)) > 1:
+        return None
     return tuple(values)
 
 
@@ -281,16 +287,6 @@ def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
     if seller_values is None:
         return None
     return bool(seller_values)
-
-
-def _trade_offer_id(record: Mapping[str, Any]) -> str | None:
-    for field in ("tradeofferid", "trade_offer_id"):
-        if field in record:
-            value = _normalize_identifier(record[field])
-            if value is None:
-                return None
-            return value
-    return None
 
 
 class BuffReadOnlyAdapter:
@@ -379,11 +375,16 @@ class BuffReadOnlyAdapter:
                 ),
             )
 
-        offer_id = _trade_offer_id(record)
-        if offer_id is None:
+        offer_values = _identity_values(record, _TRADE_OFFER_FIELDS)
+        if offer_values is None:
+            return _result(
+                request, PlatformResultStatus.MALFORMED, "malformed_payload"
+            )
+        if not offer_values:
             return _result(
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
+        offer_id = offer_values[0]
         state = record.get("state")
         if state not in _PENDING_STATES:
             return _result(
