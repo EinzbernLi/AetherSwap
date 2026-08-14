@@ -27,6 +27,7 @@ from app.config_loader import (
 )
 from app.auto_offer.contracts import AutoOfferResult
 from app.auto_offer.host_integration import (
+    DeliveryTickOutcome,
     build_host_auto_offer_integration,
     is_auto_offer_enabled,
 )
@@ -264,8 +265,14 @@ def _buff_background_request_is_safe() -> bool:
     )
 
 
-def _run_auto_offer_receive_once(cfg: dict, buff_client, purchases: list) -> AutoOfferResult:
-    """Advance enabled Auto Offer delivery through the existing Host worker.
+def _run_auto_offer_delivery_tick(
+    cfg: dict,
+    buff_client,
+    purchases: list,
+    *,
+    cursor: str | None = None,
+) -> DeliveryTickOutcome:
+    """Run one bounded Auto Offer tick through the existing Host worker.
 
     This helper deliberately creates no worker, scheduler or retry loop.  The
     caller already owns the Host receive cadence and BUFF activity exclusion.
@@ -279,10 +286,10 @@ def _run_auto_offer_receive_once(cfg: dict, buff_client, purchases: list) -> Aut
     if integration is None:
         raise RuntimeError("auto_offer_enabled_without_integration")
     try:
-        result = integration.next_purchase_result(purchases)
-        if type(result) is not AutoOfferResult:
-            raise RuntimeError("auto_offer_receive_result_invalid")
-        return result
+        outcome = integration.run_delivery_tick(purchases, cursor=cursor)
+        if type(outcome) is not DeliveryTickOutcome:
+            raise RuntimeError("auto_offer_delivery_tick_outcome_invalid")
+        return outcome
     finally:
         integration.close()
 
@@ -300,9 +307,13 @@ def receive_worker() -> None:
     )
 
     buff_client = None
+    auto_offer_cursor = None
     while True:
         try:
             cfg = load_app_config_validated()
+            auto_offer_active = is_auto_offer_enabled(cfg)
+            if not auto_offer_active:
+                auto_offer_cursor = None
             interval = max(10, int(cfg.get("pipeline", {}).get("receive_poll_interval_seconds", 30) or 30))
             time.sleep(interval)
             if not is_steam_background_allowed() or not _buff_background_request_is_safe():
@@ -317,10 +328,11 @@ def receive_worker() -> None:
                     ):
                         continue
                     purchases = get_purchases()
-                    if not any(
+                    has_pending_receipt = any(
                         p.get("pending_receipt") and not p.get("assetid")
                         for p in purchases
-                    ):
+                    )
+                    if not auto_offer_active and not has_pending_receipt:
                         continue
                     credentials = get_buff_credentials() or {}
                     if not credentials.get("cookies"):
@@ -330,8 +342,15 @@ def receive_worker() -> None:
                             credentials,
                             cfg,
                         )
-                    if is_auto_offer_enabled(cfg):
-                        result = _run_auto_offer_receive_once(cfg, buff_client, purchases)
+                    if auto_offer_active:
+                        outcome = _run_auto_offer_delivery_tick(
+                            cfg,
+                            buff_client,
+                            purchases,
+                            cursor=auto_offer_cursor,
+                        )
+                        auto_offer_cursor = outcome.next_cursor
+                        result = outcome.result
                         if result is AutoOfferResult.RESULT_UNKNOWN:
                             log(
                                 "receive_worker: Auto Offer 不可逆写结果未知，已停止新的交付写动作",
