@@ -503,15 +503,24 @@ def test_next_purchase_gate_uses_exact_host_and_store_sets(
 ):
     _patch_identity(monkeypatch)
     bridge = FakeBridge(stored)
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    writes = []
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge,
+        complete_purchase_receipt_by_id=lambda *args: writes.append(args) or True,
+    )
     assert integration.next_purchase_result(host_rows) is expected
     assert bridge.steps == []
+    assert bridge.recoveries == []
+    assert writes == []
 
 
 def test_next_purchase_gate_rejects_identity_mismatch(monkeypatch):
     _patch_identity(monkeypatch)
+    bridge = FakeBridge([_stored("order-1", recipient="76561198000000002")])
+    writes = []
     integration = host_integration.HostAutoOfferIntegration(
-        FakeBridge([_stored("order-1", recipient="76561198000000002")])
+        bridge,
+        complete_purchase_receipt_by_id=lambda *args: writes.append(args) or True,
     )
     assert integration.next_purchase_result(
         [_host_row("order-1")]
@@ -519,6 +528,9 @@ def test_next_purchase_gate_rejects_identity_mismatch(monkeypatch):
 
     _patch_identity(monkeypatch, account_id="account-2")
     assert integration.next_purchase_result([]) is AutoOfferResult.BLOCKED
+    assert bridge.steps == []
+    assert bridge.recoveries == []
+    assert writes == []
 
 
 def test_pending_host_with_existing_asset_is_inconsistent_and_blocks(monkeypatch):
@@ -547,7 +559,9 @@ def test_normal_admission_is_verdict_only_for_exact_safe_pending_sets(monkeypatc
     assert writes == []
 
 
-def test_normal_admission_result_unknown_is_global_and_does_not_step(monkeypatch):
+def test_normal_admission_extra_store_result_unknown_blocks_without_side_effects(
+    monkeypatch,
+):
     _patch_identity(monkeypatch)
     unknown = _stored(
         "order-2",
@@ -556,10 +570,39 @@ def test_normal_admission_result_unknown_is_global_and_does_not_step(monkeypatch
         revision=3,
     )
     bridge = FakeBridge((_stored("order-1"), unknown))
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    writes = []
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge,
+        complete_purchase_receipt_by_id=lambda *args: writes.append(args) or True,
+    )
+
+    assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.BLOCKED
+    assert bridge.steps == []
+    assert bridge.recoveries == []
+    assert writes == []
+
+
+def test_normal_admission_exact_result_unknown_is_global_and_does_not_step(
+    monkeypatch,
+):
+    _patch_identity(monkeypatch)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = FakeBridge((unknown,))
+    writes = []
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge,
+        complete_purchase_receipt_by_id=lambda *args: writes.append(args) or True,
+    )
 
     assert integration.next_purchase_result([_host_row("order-1")]) is AutoOfferResult.RESULT_UNKNOWN
     assert bridge.steps == []
+    assert bridge.recoveries == []
+    assert writes == []
 
 
 def test_normal_admission_received_is_waiting_without_receipt_write(monkeypatch):

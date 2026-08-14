@@ -1544,19 +1544,14 @@ class HostAutoOfferIntegration:
             order_id: self._validate_normal_store_state(stored, order_id)
             for order_id, stored in recoverable.items()
         }
-        if any(
-            stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
-            for stored in recoverable.values()
-        ):
-            return AutoOfferResult.RESULT_UNKNOWN
         stored_by_order = self._normal_store_by_order(host_pending, recoverable)
+        if set(host_pending) != set(stored_by_order):
+            return AutoOfferResult.BLOCKED
         if any(
             stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
             for stored in stored_by_order.values()
         ):
             return AutoOfferResult.RESULT_UNKNOWN
-        if set(host_pending) != set(stored_by_order):
-            return AutoOfferResult.BLOCKED
         return AutoOfferResult.WAITING if host_pending else AutoOfferResult.COMPLETE
 
     def _run_normal_delivery_tick(
