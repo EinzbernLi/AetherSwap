@@ -18,6 +18,7 @@ _LIFECYCLES = {
     "countered": SteamTradeOfferLifecycle.COUNTERED,
     "expired": SteamTradeOfferLifecycle.EXPIRED,
     "canceled": SteamTradeOfferLifecycle.CANCELED,
+    "cancelled": SteamTradeOfferLifecycle.CANCELED,
     "declined": SteamTradeOfferLifecycle.DECLINED,
     "invalid_items": SteamTradeOfferLifecycle.INVALID_ITEMS,
     "canceled_by_second_factor": SteamTradeOfferLifecycle.CANCELED_BY_SECOND_FACTOR,

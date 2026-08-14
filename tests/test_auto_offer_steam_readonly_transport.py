@@ -15,6 +15,7 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResultStatus,
     SteamCompletedTradeEvidence,
+    SteamTradeOfferLifecycle,
 )
 from app.auto_offer.contracts import (
     AutoOfferResult,
@@ -1037,6 +1038,7 @@ def trade_offer_delivery(status, *, mode=DeliveryMode.SELLER_SENDS_OFFER):
             delivery_error=None,
             pending_receipt=True,
             assetid=None,
+            counterparty_steam_id=COUNTERPARTY_ID if not buyer else None,
         ),
         revision=1,
     )
@@ -1170,10 +1172,33 @@ def test_trade_offer_reader_created_needs_confirmation_is_exact_evidence():
     assert len(session.calls) == 1
 
 
-@pytest.mark.parametrize("state", [1, 4, 5, 6, 7, 8, 10, 11, 99])
+@pytest.mark.parametrize("state", [1, 99])
 def test_trade_offer_reader_non_positive_lifecycle_returns_no_evidence(state):
     session = FakeSession([json_response(offer_payload(trade_offer_state=state))])
     assert trade_offer_reader_for(session)(OFFER_ID) is None
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "lifecycle"),
+    [
+        (2, "active"),
+        (3, "accepted"),
+        (4, "countered"),
+        (5, "expired"),
+        (6, "canceled"),
+        (7, "declined"),
+        (8, "invalid_items"),
+        (9, "created_needs_confirmation"),
+        (10, "canceled_by_second_factor"),
+        (11, "in_escrow"),
+    ],
+)
+def test_trade_offer_reader_maps_all_canonical_exact_lifecycles(state, lifecycle):
+    session = FakeSession([json_response(offer_payload(trade_offer_state=state))])
+    result = trade_offer_reader_for(session)(OFFER_ID)
+
+    assert result["lifecycle"] == lifecycle
     assert len(session.calls) == 1
 
 
@@ -1272,7 +1297,7 @@ def test_trade_offer_reader_maps_through_existing_adapter_to_typed_active_eviden
     assert result.evidence.items_to_receive[0].assetid == SOURCE_ASSET
 
 
-def test_trade_offer_reader_non_positive_state_remains_result_unknown_via_adapter():
+def test_trade_offer_reader_terminal_state_is_typed_via_adapter():
     from app.auto_offer.platform_readonly import SteamTradeOfferReadOnlyAdapter
 
     delivery = trade_offer_delivery(DeliveryStatus.OFFER_RECEIVED)
@@ -1283,9 +1308,9 @@ def test_trade_offer_reader_non_positive_state_remains_result_unknown_via_adapte
         recipient_steam_id=delivery.snapshot.recipient_steam_id,
     )
     result = adapter.execute(trade_offer_request(delivery))
-    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
-    assert result.evidence is None
-    assert result.detail == "trade_offer_not_proven"
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence.lifecycle is SteamTradeOfferLifecycle.CANCELED
+    assert result.detail == "trade_offer_canceled"
 
 
 def test_task014_seller_offer_received_active_proposes_offer_confirmed():

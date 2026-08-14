@@ -51,6 +51,7 @@ IDENTITY = {
     "account_id": "account-1",
     "recipient_steam_id": "steam-1",
 }
+_UNSET = object()
 
 
 def make_snapshot(
@@ -64,7 +65,15 @@ def make_snapshot(
     received_at=None,
     assetid=None,
     delivery_error=None,
+    counterparty_steam_id=_UNSET,
 ):
+    if counterparty_steam_id is _UNSET:
+        counterparty_steam_id = (
+            "counterparty-1"
+            if mode is DeliveryMode.SELLER_SENDS_OFFER
+            and status is not DeliveryStatus.PENDING_DIRECTION
+            else None
+        )
     value = DeliverySnapshot(
         **IDENTITY,
         delivery_mode=mode,
@@ -76,6 +85,7 @@ def make_snapshot(
         delivery_error=delivery_error,
         pending_receipt=pending_receipt,
         assetid=assetid,
+        counterparty_steam_id=counterparty_steam_id,
     )
     validate_delivery_snapshot(value)
     return value
@@ -192,7 +202,9 @@ def coordinator_for(item, adapter=None, *, store=None, timeout=7.5, capability=N
         capability = capability or PlatformCapability.READ_DELIVERY_DIRECTION
         adapter = SpyAdapter(
             {capability},
-            success_factory(DeliveryDirectionEvidence()),
+            success_factory(
+                DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1")
+            ),
         )
     capability = capability or next(iter(adapter.capabilities))
     return (
@@ -211,7 +223,9 @@ def test_result_is_frozen_and_invalid_direct_construction_is_rejected():
     store = SpyStore(item)
     adapter = SpyAdapter(
         {PlatformCapability.READ_DELIVERY_DIRECTION},
-        success_factory(DeliveryDirectionEvidence()),
+        success_factory(
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1")
+        ),
     )
     result = ReadOnlyDeliveryCoordinator(
         store,
@@ -403,7 +417,9 @@ def test_direction_routes_exact_request_and_advances_once():
     store = SpyStore(item)
     adapter = SpyAdapter(
         {PlatformCapability.READ_DELIVERY_DIRECTION},
-        success_factory(DeliveryDirectionEvidence()),
+        success_factory(
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1")
+        ),
     )
     coordinator = ReadOnlyDeliveryCoordinator(
         store,
@@ -963,7 +979,11 @@ def test_forged_success_evidence_is_not_trusted():
     object.__setattr__(forged, "request", None)
     object.__setattr__(forged, "status", PlatformResultStatus.SUCCESS)
     object.__setattr__(forged, "detail", "forged")
-    object.__setattr__(forged, "evidence", DeliveryDirectionEvidence())
+    object.__setattr__(
+        forged,
+        "evidence",
+        DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
+    )
     adapter = SpyAdapter({PlatformCapability.READ_DELIVERY_DIRECTION}, lambda _: forged)
     result = ReadOnlyDeliveryCoordinator(
         SpyStore(item),
@@ -1005,7 +1025,9 @@ def test_stale_write_is_conflict_without_retrying_adapter_or_advance():
     store = SpyStore(item, advance_error=AutoOfferStoreStaleWriteError("secret"))
     adapter = SpyAdapter(
         {PlatformCapability.READ_DELIVERY_DIRECTION},
-        success_factory(DeliveryDirectionEvidence()),
+        success_factory(
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1")
+        ),
     )
     coordinator = ReadOnlyDeliveryCoordinator(
         store,
@@ -1031,7 +1053,9 @@ def test_other_advance_failures_are_stable(error, expected):
     store = SpyStore(item, advance_error=error)
     adapter = SpyAdapter(
         {PlatformCapability.READ_DELIVERY_DIRECTION},
-        success_factory(DeliveryDirectionEvidence()),
+        success_factory(
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1")
+        ),
     )
     coordinator = ReadOnlyDeliveryCoordinator(
         store,

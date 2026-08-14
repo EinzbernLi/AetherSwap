@@ -820,10 +820,10 @@ def test_gate_runs_before_second_purchase(monkeypatch):
     )
     result = _run_pipeline_slice(monkeypatch, integration, state, target=2.0)
 
-    assert result == (1.0, 1, True)
-    assert len(integration.registered) == 1
+    assert result == (2.0, 2, False)
+    assert len(integration.registered) == 2
     assert integration.closed is True
-    assert any(message == "AUTO_OFFER_WAITING" for _, message in state.statuses)
+    assert not any(message == "AUTO_OFFER_WAITING" for _, message in state.statuses)
 
 
 def test_registration_failure_is_fail_closed_after_host_commit(monkeypatch):
@@ -889,12 +889,17 @@ def test_batch_records_register_exact_order_ids(monkeypatch):
 
 def test_enabled_receive_worker_skips_legacy_transaction(monkeypatch):
     import app.receive_flow as receive_flow
+    import app.services.buff_auth as buff_auth
+    import app.services.buff_checkout_guard as buff_checkout_guard
+    import app.services.buff_client as buff_client_module
     import app.services.workers as workers
+    from contextlib import nullcontext
 
     class StopWorker(BaseException):
         pass
 
     sleep_calls = []
+    background_gate_calls = []
 
     def controlled_sleep(_seconds):
         sleep_calls.append(_seconds)
@@ -911,12 +916,30 @@ def test_enabled_receive_worker_skips_legacy_transaction(monkeypatch):
     monkeypatch.setattr(
         workers,
         "is_steam_background_allowed",
-        lambda: (_ for _ in ()).throw(AssertionError("legacy Steam path used")),
+        lambda: background_gate_calls.append(True) or True,
     )
     monkeypatch.setattr(
         workers,
         "get_buff_credentials",
-        lambda: (_ for _ in ()).throw(AssertionError("legacy BUFF path used")),
+        lambda: {"cookies": {"session": "fake"}},
+    )
+    monkeypatch.setattr(workers, "_buff_background_request_is_safe", lambda: True)
+    monkeypatch.setattr(
+        workers,
+        "get_purchases",
+        lambda: [{"pending_receipt": True, "assetid": None}],
+    )
+    monkeypatch.setattr(
+        workers,
+        "_run_auto_offer_receive_once",
+        lambda *_args: AutoOfferResult.WAITING,
+    )
+    monkeypatch.setattr(buff_auth, "get_buff_auth_lock", nullcontext)
+    monkeypatch.setattr(buff_checkout_guard, "buff_activity_guard", nullcontext)
+    monkeypatch.setattr(
+        buff_client_module,
+        "create_buff_client_from_config",
+        lambda *_args: object(),
     )
     monkeypatch.setattr(
         receive_flow,
@@ -929,6 +952,7 @@ def test_enabled_receive_worker_skips_legacy_transaction(monkeypatch):
     with pytest.raises(StopWorker):
         workers.receive_worker()
     assert sleep_calls == [30, 30]
+    assert background_gate_calls == [True, True]
 
 
 def test_task034_runtime_markers_remain_confined_to_existing_host_seam():

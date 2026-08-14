@@ -63,7 +63,7 @@ def test_initialize_creates_schema_and_pragmas(tmp_path):
             "id", "purchase_id", "buff_order_id", "account_id", "recipient_steam_id",
             "delivery_mode", "delivery_status", "steam_tradeoffer_id",
             "offer_attempted_at", "offer_sent_at", "received_at", "delivery_error",
-            "pending_receipt", "assetid", "revision",
+            "pending_receipt", "assetid", "revision", "counterparty_steam_id",
         ]
     store.close()
 
@@ -84,6 +84,65 @@ def test_initial_persists_and_reload_preserves_snapshot_and_revision(tmp_path):
     assert stored == StoredDelivery(value, 1)
     assert second.get_by_purchase_id("purchase-1") == stored
     assert second.get_by_buff_order_id("buff-1") == stored
+
+
+def test_v1_migration_is_atomic_and_preserves_historical_null_counterparty(tmp_path):
+    path = tmp_path / "auto_offer.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE auto_offer_delivery ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "purchase_id TEXT NOT NULL UNIQUE, buff_order_id TEXT NOT NULL UNIQUE, "
+            "account_id TEXT NOT NULL, recipient_steam_id TEXT NOT NULL, "
+            "delivery_mode TEXT NULL, delivery_status TEXT NOT NULL, "
+            "steam_tradeoffer_id TEXT NULL, offer_attempted_at REAL NULL, "
+            "offer_sent_at REAL NULL, received_at REAL NULL, delivery_error TEXT NULL, "
+            "pending_receipt INTEGER NOT NULL, assetid TEXT NULL, revision INTEGER NOT NULL"
+            ")"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            "INSERT INTO auto_offer_delivery ("
+            "purchase_id, buff_order_id, account_id, recipient_steam_id, "
+            "delivery_mode, delivery_status, steam_tradeoffer_id, offer_attempted_at, "
+            "offer_sent_at, received_at, delivery_error, pending_receipt, assetid, revision"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "purchase-1",
+                "buff-1",
+                "account-1",
+                "steam-1",
+                DeliveryMode.SELLER_SENDS_OFFER.value,
+                DeliveryStatus.AWAITING_OFFER.value,
+                None,
+                None,
+                None,
+                None,
+                None,
+                1,
+                None,
+                4,
+            ),
+        )
+        connection.commit()
+
+    store = AutoOfferStore(path)
+    store.initialize()
+    migrated = store.get_by_purchase_id("purchase-1")
+
+    assert migrated == StoredDelivery(
+        snapshot(
+            delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+            delivery_status=DeliveryStatus.AWAITING_OFFER,
+            counterparty_steam_id=None,
+        ),
+        4,
+    )
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT counterparty_steam_id FROM auto_offer_delivery"
+        ).fetchone() == (None,)
 
 
 def test_ensure_initial_is_exactly_idempotent(tmp_path):
@@ -140,12 +199,14 @@ def test_seller_transition_is_supported(tmp_path):
     awaiting = snapshot(
         delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
         delivery_status=DeliveryStatus.AWAITING_OFFER,
+        counterparty_steam_id="seller-1",
     )
     initial = store.advance(initial, awaiting)
     received = snapshot(
         delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
         delivery_status=DeliveryStatus.OFFER_RECEIVED,
         steam_tradeoffer_id="offer-2",
+        counterparty_steam_id="seller-1",
     )
     assert store.advance(initial, received).snapshot == received
 
@@ -234,6 +295,127 @@ def test_recoverable_excludes_terminal_rows_and_is_ordered(tmp_path):
     assert [item.snapshot.purchase_id for item in store.list_recoverable()] == ["purchase-2"]
 
 
+def test_accept_attempted_and_offer_terminated_survive_restart_recovery(tmp_path):
+    store = make_store(tmp_path)
+
+    attempted_initial = store.ensure_initial(snapshot())
+    attempted_awaiting = replace(
+        attempted_initial.snapshot,
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+        counterparty_steam_id="seller-1",
+    )
+    attempted = store.advance(attempted_initial, attempted_awaiting)
+    attempted = store.advance(
+        attempted,
+        replace(
+            attempted_awaiting,
+            delivery_status=DeliveryStatus.OFFER_RECEIVED,
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    attempted = store.advance(
+        attempted,
+        replace(attempted.snapshot, delivery_status=DeliveryStatus.OFFER_CONFIRMED),
+    )
+    attempted = store.advance(
+        attempted,
+        replace(
+            attempted.snapshot,
+            delivery_status=DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+        ),
+    )
+
+    terminated_initial = store.ensure_initial(
+        snapshot(purchase_id="purchase-2", buff_order_id="buff-2")
+    )
+    terminated_awaiting = replace(
+        terminated_initial.snapshot,
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+        counterparty_steam_id="seller-2",
+    )
+    terminated = store.advance(terminated_initial, terminated_awaiting)
+    terminated = store.advance(
+        terminated,
+        replace(
+            terminated_awaiting,
+            delivery_status=DeliveryStatus.OFFER_RECEIVED,
+            steam_tradeoffer_id="offer-2",
+        ),
+    )
+    terminated = store.advance(
+        terminated,
+        replace(
+            terminated.snapshot,
+            delivery_status=DeliveryStatus.OFFER_TERMINATED,
+            delivery_error="offer_terminated",
+        ),
+    )
+    store.close()
+
+    reopened = make_store(tmp_path)
+    recovered = reopened.list_recoverable()
+    assert recovered == [attempted, terminated]
+
+
+def test_bound_counterparty_survives_restart_and_cannot_change_or_clear(tmp_path):
+    store = make_store(tmp_path)
+    initial = store.ensure_initial(snapshot())
+    awaiting = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+        counterparty_steam_id="seller-1",
+    )
+    current = store.advance(initial, awaiting)
+    store.close()
+
+    reopened = make_store(tmp_path)
+    current = reopened.get_by_purchase_id("purchase-1")
+    assert current.snapshot.counterparty_steam_id == "seller-1"
+
+    for replacement in (None, "seller-2"):
+        with pytest.raises(
+            DeliveryContractError,
+            match="bound counterparty Steam ID cannot change",
+        ):
+            reopened.advance(
+                current,
+                replace(
+                    current.snapshot,
+                    delivery_status=DeliveryStatus.OFFER_RECEIVED,
+                    steam_tradeoffer_id="offer-1",
+                    counterparty_steam_id=replacement,
+                ),
+            )
+        assert reopened.get_by_purchase_id("purchase-1") == current
+
+
+def test_historical_null_counterparty_cannot_be_adopted_after_direction_binding(tmp_path):
+    store = make_store(tmp_path)
+    initial = store.ensure_initial(snapshot())
+    awaiting = snapshot(
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+    )
+    current = store.advance(initial, awaiting)
+
+    with pytest.raises(
+        DeliveryContractError,
+        match="counterparty Steam ID cannot be adopted after direction binding",
+    ):
+        store.advance(
+            current,
+            replace(
+                awaiting,
+                delivery_status=DeliveryStatus.OFFER_RECEIVED,
+                steam_tradeoffer_id="offer-1",
+                counterparty_steam_id="seller-guessed",
+            ),
+        )
+    assert store.get_by_purchase_id("purchase-1") == current
+
+
 def test_corrupt_rows_fail_closed(tmp_path):
     store = make_store(tmp_path)
     store.ensure_initial(snapshot())
@@ -306,6 +488,7 @@ def test_bound_tradeoffer_id_cannot_rebind_or_clear_and_row_stays_unchanged(tmp_
     awaiting = snapshot(
         delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
         delivery_status=DeliveryStatus.AWAITING_OFFER,
+        counterparty_steam_id="seller-1",
     )
     current = store.advance(initial, awaiting)
     received = replace(

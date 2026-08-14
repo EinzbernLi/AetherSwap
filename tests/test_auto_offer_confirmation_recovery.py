@@ -203,10 +203,17 @@ def steam_result(
     [
         (2, "active"),
         (3, "accepted"),
+        (4, "countered"),
+        (5, "expired"),
+        (6, "canceled"),
+        (7, "declined"),
+        (8, "invalid_items"),
         (9, "created_needs_confirmation"),
+        (10, "canceled_by_second_factor"),
+        (11, "in_escrow"),
     ],
 )
-def test_exact_http_reader_maps_only_proven_trade_offer_states(state, expected):
+def test_exact_http_reader_maps_canonical_trade_offer_states(state, expected):
     session = FakeSession([FakeResponse(steam_offer_payload(state))])
     reader = SteamTradeOfferHttpReader(COOKIE, session=session)
 
@@ -221,7 +228,7 @@ def test_exact_http_reader_maps_only_proven_trade_offer_states(state, expected):
     assert session.calls[0][1]["allow_redirects"] is False
 
 
-@pytest.mark.parametrize("state", [1, 4, 5, 6, 7, 8, 10, 99])
+@pytest.mark.parametrize("state", [1, 99])
 def test_exact_http_reader_keeps_other_states_unproven(state):
     reader = SteamTradeOfferHttpReader(
         COOKIE,
@@ -354,8 +361,8 @@ def test_send_and_confirmation_unknown_are_distinguished_by_bound_offer_id():
         )
 
 
-def test_store_persists_required_to_attempted_without_schema_change(tmp_path):
-    assert AUTO_OFFER_STORE_SCHEMA_VERSION == 1
+def test_store_persists_required_to_attempted_under_current_schema(tmp_path):
+    assert AUTO_OFFER_STORE_SCHEMA_VERSION == 2
     store = AutoOfferStore(tmp_path / "auto_offer.db")
     store.initialize()
     try:

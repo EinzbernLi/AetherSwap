@@ -39,6 +39,7 @@ IDENTITY = {
     "account_id": "account-1",
     "recipient_steam_id": "steam-1",
 }
+_UNSET = object()
 
 
 def snapshot(
@@ -52,7 +53,15 @@ def snapshot(
     received_at=None,
     assetid=None,
     delivery_error=None,
+    counterparty_steam_id=_UNSET,
 ):
+    if counterparty_steam_id is _UNSET:
+        counterparty_steam_id = (
+            "counterparty-1"
+            if mode is DeliveryMode.SELLER_SENDS_OFFER
+            and status is not DeliveryStatus.PENDING_DIRECTION
+            else None
+        )
     value = DeliverySnapshot(
         **IDENTITY,
         delivery_mode=mode,
@@ -64,6 +73,7 @@ def snapshot(
         delivery_error=delivery_error,
         pending_receipt=pending_receipt,
         assetid=assetid,
+        counterparty_steam_id=counterparty_steam_id,
     )
     validate_delivery_snapshot(value)
     return value
@@ -170,7 +180,11 @@ def test_decision_is_frozen_and_preserves_original_delivery():
     item = delivery()
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
+        result_for(
+            item,
+            PlatformCapability.READ_DELIVERY_DIRECTION,
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
+        ),
     )
     assert isinstance(decision, ReconciliationDecision)
     with pytest.raises(FrozenInstanceError):
@@ -181,7 +195,7 @@ def test_decision_is_frozen_and_preserves_original_delivery():
 
 
 def test_invalid_delivery_type_and_revision_fail_closed():
-    evidence = DeliveryDirectionEvidence()
+    evidence = DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1")
     with pytest.raises(DeliveryContractError):
         plan_read_evidence_transition(object(), object())
     with pytest.raises(DeliveryContractError):
@@ -200,7 +214,7 @@ def test_each_identity_mismatch_blocks_before_evidence_interpretation(field):
     result = result_for(
         item,
         PlatformCapability.READ_DELIVERY_DIRECTION,
-        DeliveryDirectionEvidence(),
+        DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
         **{field: "different"},
     )
     decision = plan_read_evidence_transition(item, result)
@@ -215,7 +229,7 @@ def test_revision_mismatch_blocks_exactly():
     result = result_for(
         item,
         PlatformCapability.READ_DELIVERY_DIRECTION,
-        DeliveryDirectionEvidence(),
+        DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
         revision=1,
     )
     decision = plan_read_evidence_transition(item, result)
@@ -293,7 +307,11 @@ def test_pending_direction_proposes_only_seller_awaiting_offer():
     item = delivery()
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
+        result_for(
+            item,
+            PlatformCapability.READ_DELIVERY_DIRECTION,
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
+        ),
     )
     assert decision.result is AutoOfferResult.WAITING
     assert decision.retryable is True
@@ -370,11 +388,106 @@ def test_awaiting_seller_offer_wrong_capability_cannot_advance():
         result_for(
             item,
             PlatformCapability.READ_DELIVERY_DIRECTION,
-            DeliveryDirectionEvidence(),
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
         ),
     )
     assert decision.result is AutoOfferResult.BLOCKED
     assert decision.target is None
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [
+        SteamTradeOfferLifecycle.COUNTERED,
+        SteamTradeOfferLifecycle.EXPIRED,
+        SteamTradeOfferLifecycle.CANCELED,
+        SteamTradeOfferLifecycle.DECLINED,
+        SteamTradeOfferLifecycle.INVALID_ITEMS,
+        SteamTradeOfferLifecycle.CANCELED_BY_SECOND_FACTOR,
+    ],
+)
+def test_exact_terminal_offer_lifecycle_persists_non_cleanup_terminal_state(lifecycle):
+    item = delivery(
+        snapshot(
+            DeliveryStatus.OFFER_RECEIVED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(is_our_offer=False, lifecycle=lifecycle),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.target.delivery_status is DeliveryStatus.OFFER_TERMINATED
+    assert decision.target.delivery_error == "offer_terminated"
+    assert decision.target.pending_receipt is True
+
+
+def test_offer_terminated_only_accepts_same_exact_terminal_read_without_write():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.OFFER_TERMINATED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+            delivery_error="offer_terminated",
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(
+                is_our_offer=False,
+                lifecycle=SteamTradeOfferLifecycle.DECLINED,
+            ),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+
+    assert decision.result is AutoOfferResult.WAITING
+    assert decision.target is None
+    assert decision.detail == "offer_termination_still_proven"
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "expected_target"),
+    [
+        (SteamTradeOfferLifecycle.ACTIVE, None),
+        (SteamTradeOfferLifecycle.ACCEPTED, DeliveryStatus.AWAITING_INVENTORY),
+        (SteamTradeOfferLifecycle.IN_ESCROW, DeliveryStatus.AWAITING_INVENTORY),
+    ],
+)
+def test_accept_attempt_recovery_never_reaccepts(lifecycle, expected_target):
+    item = delivery(
+        snapshot(
+            DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(is_our_offer=False, lifecycle=lifecycle),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+
+    if expected_target is None:
+        assert decision.target is None
+        assert decision.detail == "accept_attempt_unresolved"
+    else:
+        assert decision.target.delivery_status is expected_target
 
 
 def test_buyer_mode_never_plans_first_send_or_synthetic_fields():
@@ -399,7 +512,11 @@ def test_result_unknown_delivery_never_plans_resend():
     )
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
+        result_for(
+            item,
+            PlatformCapability.READ_DELIVERY_DIRECTION,
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
+        ),
     )
     assert decision.result is AutoOfferResult.WAITING
     assert decision.retryable is True
@@ -903,7 +1020,11 @@ def test_terminal_states_never_produce_a_target(status, mode, kwargs, expected_r
     item = delivery(snapshot(status, mode, **kwargs))
     decision = plan_read_evidence_transition(
         item,
-        result_for(item, PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
+        result_for(
+            item,
+            PlatformCapability.READ_DELIVERY_DIRECTION,
+            DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
+        ),
     )
     assert decision.result is expected_result
     assert decision.retryable is False
@@ -929,7 +1050,11 @@ def test_terminal_result_semantics_match_the_executor_contract():
         item = delivery(snapshot(status, DeliveryMode.SELLER_SENDS_OFFER if status is DeliveryStatus.RECEIVED else None, **kwargs))
         decision = plan_read_evidence_transition(
             item,
-            result_for(item, PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
+            result_for(
+                item,
+                PlatformCapability.READ_DELIVERY_DIRECTION,
+                DeliveryDirectionEvidence(counterparty_steam_id="counterparty-1"),
+            ),
         )
         assert decision.result is expected_result
         assert decision.retryable is False

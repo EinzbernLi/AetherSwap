@@ -59,11 +59,21 @@ class DeliveryDirectionEvidence:
     """Proof of the exact delivery direction for one canonical order."""
 
     direction: str = "seller_sends_offer"
+    counterparty_steam_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.direction not in {"seller_sends_offer", "buyer_sends_offer"}:
             raise PlatformAdapterProtocolError(
                 "direction evidence must be seller_sends_offer or buyer_sends_offer"
+            )
+        if self.counterparty_steam_id is not None:
+            _require_id(self.counterparty_steam_id, "counterparty_steam_id")
+        if (
+            self.direction == "buyer_sends_offer"
+            and self.counterparty_steam_id is not None
+        ):
+            raise PlatformAdapterProtocolError(
+                "buyer direction cannot carry seller counterparty evidence"
             )
 
 

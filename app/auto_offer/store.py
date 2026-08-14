@@ -17,7 +17,7 @@ from .contracts import (
 )
 
 
-AUTO_OFFER_STORE_SCHEMA_VERSION: Final[int] = 1
+AUTO_OFFER_STORE_SCHEMA_VERSION: Final[int] = 2
 _TABLE_NAME: Final[str] = "auto_offer_delivery"
 _RECOVERABLE_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
     {
@@ -29,7 +29,9 @@ _RECOVERABLE_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
         DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
+        DeliveryStatus.OFFER_TERMINATED,
         DeliveryStatus.RESULT_UNKNOWN,
     }
 )
@@ -37,15 +39,15 @@ _SELECT_COLUMNS: Final[str] = (
     "id, purchase_id, buff_order_id, account_id, recipient_steam_id, "
     "delivery_mode, delivery_status, steam_tradeoffer_id, "
     "offer_attempted_at, offer_sent_at, received_at, delivery_error, "
-    "pending_receipt, assetid, revision"
+    "pending_receipt, assetid, counterparty_steam_id, revision"
 )
 _INSERT_COLUMNS: Final[str] = (
     "purchase_id, buff_order_id, account_id, recipient_steam_id, "
     "delivery_mode, delivery_status, steam_tradeoffer_id, "
     "offer_attempted_at, offer_sent_at, received_at, delivery_error, "
-    "pending_receipt, assetid, revision"
+    "pending_receipt, assetid, counterparty_steam_id, revision"
 )
-_EXPECTED_COLUMNS: Final[tuple[tuple[str, str, int, int], ...]] = (
+_V1_EXPECTED_COLUMNS: Final[tuple[tuple[str, str, int, int], ...]] = (
     ("id", "INTEGER", 0, 1),
     ("purchase_id", "TEXT", 1, 0),
     ("buff_order_id", "TEXT", 1, 0),
@@ -61,6 +63,10 @@ _EXPECTED_COLUMNS: Final[tuple[tuple[str, str, int, int], ...]] = (
     ("pending_receipt", "INTEGER", 1, 0),
     ("assetid", "TEXT", 0, 0),
     ("revision", "INTEGER", 1, 0),
+)
+_EXPECTED_COLUMNS: Final[tuple[tuple[str, str, int, int], ...]] = (
+    *_V1_EXPECTED_COLUMNS,
+    ("counterparty_steam_id", "TEXT", 0, 0),
 )
 _CREATE_TABLE_SQL: Final[str] = f"""
 CREATE TABLE {_TABLE_NAME} (
@@ -78,7 +84,8 @@ CREATE TABLE {_TABLE_NAME} (
     delivery_error TEXT NULL,
     pending_receipt INTEGER NOT NULL,
     assetid TEXT NULL,
-    revision INTEGER NOT NULL
+    revision INTEGER NOT NULL,
+    counterparty_steam_id TEXT NULL
 )
 """
 
@@ -121,7 +128,7 @@ class AutoOfferStore:
         self._connection: sqlite3.Connection | None = None
 
     def initialize(self) -> None:
-        """Open the database, configure SQLite, and create or verify schema v1."""
+        """Open the database, configure SQLite, and create, migrate, or verify v2."""
         if self._connection is not None:
             self._configure_connection(self._connection)
             self._validate_schema(self._connection)
@@ -152,7 +159,10 @@ class AutoOfferStore:
                     self._rollback(connection)
                     raise
             else:
-                self._validate_schema(connection)
+                if version == 1:
+                    self._migrate_v1_to_v2(connection)
+                else:
+                    self._validate_schema(connection)
         except AutoOfferStoreError:
             self.close()
             raise
@@ -210,7 +220,7 @@ class AutoOfferStore:
 
             connection.execute(
                 f"INSERT INTO {_TABLE_NAME} ({_INSERT_COLUMNS}) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 self._snapshot_values(snapshot) + (1,),
             )
             connection.commit()
@@ -254,6 +264,12 @@ class AutoOfferStore:
             and target.steam_tradeoffer_id != current.snapshot.steam_tradeoffer_id
         ):
             raise DeliveryContractError("bound steam trade offer ID cannot change")
+        if (
+            current.snapshot.counterparty_steam_id is not None
+            and target.counterparty_steam_id
+            != current.snapshot.counterparty_steam_id
+        ):
+            raise DeliveryContractError("bound counterparty Steam ID cannot change")
 
         try:
             validate_delivery_transition(current.snapshot, target)
@@ -288,6 +304,7 @@ class AutoOfferStore:
                 "delivery_status = ?, steam_tradeoffer_id = ?, "
                 "offer_attempted_at = ?, offer_sent_at = ?, received_at = ?, "
                 "delivery_error = ?, pending_receipt = ?, assetid = ?, "
+                "counterparty_steam_id = ?, "
                 "revision = revision + 1 "
                 "WHERE purchase_id = ? AND revision = ?",
                 self._snapshot_values(target)[2:]
@@ -406,7 +423,25 @@ class AutoOfferStore:
                 )
             return
         if version != AUTO_OFFER_STORE_SCHEMA_VERSION or tables != {_TABLE_NAME}:
+            raise AutoOfferStoreSchemaError("Auto Offer schema does not match v2")
+
+        cls._validate_table_shape(connection, _EXPECTED_COLUMNS, "v2")
+
+    @classmethod
+    def _validate_v1_schema(cls, connection: sqlite3.Connection) -> None:
+        if cls._user_version(connection) != 1 or cls._user_tables(connection) != {
+            _TABLE_NAME
+        }:
             raise AutoOfferStoreSchemaError("Auto Offer schema does not match v1")
+        cls._validate_table_shape(connection, _V1_EXPECTED_COLUMNS, "v1")
+
+    @classmethod
+    def _validate_table_shape(
+        cls,
+        connection: sqlite3.Connection,
+        expected_columns: tuple[tuple[str, str, int, int], ...],
+        version_label: str,
+    ) -> None:
 
         try:
             table_info = connection.execute(
@@ -425,8 +460,10 @@ class AutoOfferStore:
         actual_columns = tuple(
             (row[1], str(row[2]).upper(), row[3], row[5]) for row in table_info
         )
-        if actual_columns != _EXPECTED_COLUMNS:
-            raise AutoOfferStoreSchemaError("Auto Offer table columns do not match v1")
+        if actual_columns != expected_columns:
+            raise AutoOfferStoreSchemaError(
+                f"Auto Offer table columns do not match {version_label}"
+            )
         if not table_sql or "AUTOINCREMENT" not in str(table_sql[0]).upper():
             raise AutoOfferStoreSchemaError("Auto Offer id must use AUTOINCREMENT")
 
@@ -446,6 +483,26 @@ class AutoOfferStore:
             raise AutoOfferStoreSchemaError(
                 "purchase_id and buff_order_id must both be unique"
             )
+
+    @classmethod
+    def _migrate_v1_to_v2(cls, connection: sqlite3.Connection) -> None:
+        cls._validate_v1_schema(connection)
+        cls._begin(connection)
+        try:
+            connection.execute(
+                f"ALTER TABLE {_TABLE_NAME} "
+                "ADD COLUMN counterparty_steam_id TEXT NULL"
+            )
+            connection.execute(
+                f"PRAGMA user_version = {AUTO_OFFER_STORE_SCHEMA_VERSION}"
+            )
+            connection.commit()
+        except sqlite3.DatabaseError as exc:
+            cls._rollback(connection)
+            raise AutoOfferStoreCorruptError(
+                "SQLite rejected Auto Offer schema migration"
+            ) from exc
+        cls._validate_schema(connection)
 
     @staticmethod
     def _begin(connection: sqlite3.Connection) -> None:
@@ -503,11 +560,12 @@ class AutoOfferStore:
             snapshot.delivery_error,
             int(snapshot.pending_receipt),
             snapshot.assetid,
+            snapshot.counterparty_steam_id,
         )
 
     @classmethod
     def _row_to_stored(cls, row: tuple[object, ...]) -> StoredDelivery:
-        if len(row) != 15:
+        if len(row) != 16:
             raise AutoOfferStoreCorruptError("persisted delivery row has wrong shape")
         if type(row[0]) is not int or row[0] < 1:
             raise AutoOfferStoreCorruptError("persisted delivery id is invalid")
@@ -518,7 +576,7 @@ class AutoOfferStore:
             raise AutoOfferStoreCorruptError("persisted delivery enum is unknown") from exc
         if type(row[12]) is not int or row[12] not in (0, 1):
             raise AutoOfferStoreCorruptError("persisted pending_receipt is invalid")
-        if type(row[14]) is not int or row[14] < 1:
+        if type(row[15]) is not int or row[15] < 1:
             raise AutoOfferStoreCorruptError("persisted delivery revision is invalid")
         snapshot = DeliverySnapshot(
             purchase_id=row[1],
@@ -534,6 +592,7 @@ class AutoOfferStore:
             delivery_error=row[11],
             pending_receipt=bool(row[12]),
             assetid=row[13],
+            counterparty_steam_id=row[14],
         )
         try:
             validate_delivery_snapshot(snapshot)
@@ -541,7 +600,7 @@ class AutoOfferStore:
             raise AutoOfferStoreCorruptError(
                 "persisted delivery violates the delivery contract"
             ) from exc
-        return StoredDelivery(snapshot=snapshot, revision=row[14])
+        return StoredDelivery(snapshot=snapshot, revision=row[15])
 
 
 __all__ = [

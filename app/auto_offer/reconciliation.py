@@ -173,6 +173,17 @@ def _safe_steam_trade_offer_evidence(
         return "trade_offer_direction_mismatch"
     if evidence.items_to_give != ():
         return "trade_offer_outgoing_items_present"
+    expected_counterparty = snapshot.counterparty_steam_id
+    if snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER:
+        if expected_counterparty is None:
+            return "counterparty_not_bound"
+        if evidence.counterparty_steam_id != expected_counterparty:
+            return "trade_offer_counterparty_mismatch"
+    elif (
+        expected_counterparty is not None
+        and evidence.counterparty_steam_id != expected_counterparty
+    ):
+        return "trade_offer_counterparty_mismatch"
     return evidence
 
 
@@ -219,10 +230,35 @@ def _plan_steam_trade_offer_lifecycle(
     status = snapshot.delivery_status
     lifecycle = evidence.lifecycle
 
+    if status is DeliveryStatus.OFFER_TERMINATED:
+        if lifecycle.is_terminal_without_trade:
+            return _decision(
+                delivery,
+                None,
+                AutoOfferResult.WAITING,
+                True,
+                "offer_termination_still_proven",
+            )
+        return _blocked(delivery, "terminated_offer_state_changed")
+
+    if lifecycle.is_terminal_without_trade:
+        return _propose(
+            delivery,
+            replace(
+                snapshot,
+                delivery_status=DeliveryStatus.OFFER_TERMINATED,
+                delivery_error="offer_terminated",
+            ),
+            f"trade_offer_{lifecycle.value}",
+        )
+
     if status is DeliveryStatus.OFFER_RECEIVED:
         if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
             detail = "trade_offer_confirmed_active"
-        elif lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+        elif lifecycle in {
+            SteamTradeOfferLifecycle.ACCEPTED,
+            SteamTradeOfferLifecycle.IN_ESCROW,
+        }:
             detail = "trade_offer_confirmed_accepted"
         else:
             return _blocked(delivery, "evidence_not_allowed")
@@ -244,7 +280,10 @@ def _plan_steam_trade_offer_lifecycle(
             )
         if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
             detail = "trade_offer_confirmed_active"
-        elif lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+        elif lifecycle in {
+            SteamTradeOfferLifecycle.ACCEPTED,
+            SteamTradeOfferLifecycle.IN_ESCROW,
+        }:
             detail = "trade_offer_confirmed_accepted"
         else:
             return _blocked(delivery, "evidence_not_allowed")
@@ -263,6 +302,7 @@ def _plan_steam_trade_offer_lifecycle(
         if lifecycle in {
             SteamTradeOfferLifecycle.ACTIVE,
             SteamTradeOfferLifecycle.ACCEPTED,
+            SteamTradeOfferLifecycle.IN_ESCROW,
         }:
             return _confirmation_recovered(delivery, lifecycle)
         return _blocked(delivery, "evidence_not_allowed")
@@ -280,6 +320,7 @@ def _plan_steam_trade_offer_lifecycle(
         if lifecycle in {
             SteamTradeOfferLifecycle.ACTIVE,
             SteamTradeOfferLifecycle.ACCEPTED,
+            SteamTradeOfferLifecycle.IN_ESCROW,
         }:
             return _confirmation_recovered(delivery, lifecycle)
         return _blocked(delivery, "evidence_not_allowed")
@@ -293,7 +334,10 @@ def _plan_steam_trade_offer_lifecycle(
                 True,
                 "trade_offer_not_accepted",
             )
-        if lifecycle is SteamTradeOfferLifecycle.ACCEPTED:
+        if lifecycle in {
+            SteamTradeOfferLifecycle.ACCEPTED,
+            SteamTradeOfferLifecycle.IN_ESCROW,
+        }:
             return _propose(
                 delivery,
                 replace(
@@ -301,6 +345,28 @@ def _plan_steam_trade_offer_lifecycle(
                     delivery_status=DeliveryStatus.AWAITING_INVENTORY,
                 ),
                 "trade_offer_accepted",
+            )
+    if status is DeliveryStatus.OFFER_ACCEPT_ATTEMPTED:
+        if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
+            return _decision(
+                delivery,
+                None,
+                AutoOfferResult.WAITING,
+                True,
+                "accept_attempt_unresolved",
+            )
+        if lifecycle in {
+            SteamTradeOfferLifecycle.ACCEPTED,
+            SteamTradeOfferLifecycle.IN_ESCROW,
+        }:
+            return _propose(
+                delivery,
+                replace(
+                    snapshot,
+                    delivery_status=DeliveryStatus.AWAITING_INVENTORY,
+                    delivery_error=None,
+                ),
+                "trade_offer_accept_recovered",
             )
     return _blocked(delivery, "evidence_not_allowed")
 
@@ -493,7 +559,10 @@ def plan_read_evidence_transition(
                 snapshot,
                 delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
                 delivery_status=DeliveryStatus.AWAITING_OFFER,
+                counterparty_steam_id=evidence.counterparty_steam_id,
             )
+            if target.counterparty_steam_id is None:
+                return _blocked(delivery, "seller_counterparty_not_proven")
             return _propose(delivery, target, "seller_direction_proven")
         return _blocked(delivery, "evidence_not_allowed")
 
@@ -538,6 +607,8 @@ def plan_read_evidence_transition(
         DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+        DeliveryStatus.OFFER_TERMINATED,
     }:
         safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)
         if type(safe_evidence) is str:

@@ -246,6 +246,11 @@ def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
                 return PlatformCapability.READ_OFFER_STATE
             if snapshot.steam_tradeoffer_id is not None:
                 return PlatformCapability.READ_STEAM_TRADE_OFFER
+        if (
+            mode is DeliveryMode.SELLER_SENDS_OFFER
+            and snapshot.steam_tradeoffer_id is not None
+        ):
+            return PlatformCapability.READ_STEAM_TRADE_OFFER
     if status is DeliveryStatus.AWAITING_INVENTORY:
         return PlatformCapability.READ_STEAM_COMPLETED_TRADE
     if status is DeliveryStatus.OFFER_RECEIVED:
@@ -259,6 +264,15 @@ def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
         if mode is DeliveryMode.BUYER_SENDS_OFFER:
             return PlatformCapability.READ_STEAM_TRADE_OFFER
     if status is DeliveryStatus.OFFER_CONFIRMED:
+        if mode in {
+            DeliveryMode.SELLER_SENDS_OFFER,
+            DeliveryMode.BUYER_SENDS_OFFER,
+        }:
+            return PlatformCapability.READ_STEAM_TRADE_OFFER
+    if status in {
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+        DeliveryStatus.OFFER_TERMINATED,
+    }:
         if mode in {
             DeliveryMode.SELLER_SENDS_OFFER,
             DeliveryMode.BUYER_SENDS_OFFER,
@@ -599,8 +613,25 @@ class DeliveryCoordinator:
         delivery: StoredDelivery,
         platform_result: PlatformResult,
     ) -> PlatformResult:
-        expected_counterparty = self._expected_trade_offer_counterparty_steam_id
+        durable_counterparty = delivery.snapshot.counterparty_steam_id
+        configured_counterparty = self._expected_trade_offer_counterparty_steam_id
+        if (
+            durable_counterparty is not None
+            and configured_counterparty is not None
+            and durable_counterparty != configured_counterparty
+        ):
+            return PlatformResult(
+                request=platform_result.request,
+                status=PlatformResultStatus.FAILURE,
+                detail="identity_mismatch",
+            )
+        expected_counterparty = durable_counterparty or configured_counterparty
         expected_direction = self._expected_trade_offer_is_our_offer
+        delivery_direction = (
+            delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        )
+        if expected_direction is None and durable_counterparty is not None:
+            expected_direction = delivery_direction
         if (
             expected_counterparty is None
             or platform_result.request.capability
@@ -609,9 +640,6 @@ class DeliveryCoordinator:
         ):
             return platform_result
         evidence = platform_result.evidence
-        delivery_direction = (
-            delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
-        )
         if (
             type(evidence) is not SteamTradeOfferEvidence
             or evidence.steam_tradeoffer_id

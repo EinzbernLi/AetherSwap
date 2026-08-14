@@ -313,7 +313,9 @@ def test_buff_unique_direction_requires_recipient_and_proves_seller_send():
     ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "seller_sends_offer"
-    assert result.evidence == DeliveryDirectionEvidence()
+    assert result.evidence == DeliveryDirectionEvidence(
+        counterparty_steam_id="seller-1"
+    )
 
     mismatch = buff_adapter(
         BuffStub([buff_record(buyer_steam_id="other-steam")])
@@ -807,17 +809,32 @@ def test_steam_trade_offer_identity_mismatch_is_failure(field, value):
 
 
 @pytest.mark.parametrize(
-    "lifecycle",
+    ("lifecycle", "expected"),
     [
-        "confirmation_need",
-        "countered",
-        "expired",
-        "canceled",
-        "declined",
-        "invalid_items",
-        42,
+        ("countered", SteamTradeOfferLifecycle.COUNTERED),
+        ("expired", SteamTradeOfferLifecycle.EXPIRED),
+        ("canceled", SteamTradeOfferLifecycle.CANCELED),
+        ("cancelled", SteamTradeOfferLifecycle.CANCELED),
+        ("declined", SteamTradeOfferLifecycle.DECLINED),
+        ("invalid_items", SteamTradeOfferLifecycle.INVALID_ITEMS),
+        (
+            "canceled_by_second_factor",
+            SteamTradeOfferLifecycle.CANCELED_BY_SECOND_FACTOR,
+        ),
+        ("in_escrow", SteamTradeOfferLifecycle.IN_ESCROW),
     ],
 )
+def test_extended_trade_offer_lifecycle_is_canonical(lifecycle, expected):
+    result = steam_trade_offer_adapter(
+        TradeOfferReaderStub(steam_trade_offer_payload(lifecycle=lifecycle))
+    ).execute(steam_trade_offer_request())
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == f"trade_offer_{expected.value}"
+    assert result.evidence.lifecycle is expected
+
+
+@pytest.mark.parametrize("lifecycle", ["confirmation_need", "unknown", 42])
 def test_unknown_trade_offer_lifecycle_is_not_success(lifecycle):
     result = steam_trade_offer_adapter(
         TradeOfferReaderStub(steam_trade_offer_payload(lifecycle=lifecycle))

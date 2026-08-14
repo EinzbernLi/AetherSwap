@@ -29,6 +29,14 @@ from app.auto_offer.adapters import (
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
 )
+from app.auto_offer.counterparty_evidence import (
+    CounterpartyEvidenceError,
+    seller_counterparty_from_exact_buff_record,
+)
+from app.auto_offer.steam_lifecycle import (
+    SteamLifecycleEvidenceError,
+    map_exact_steam_lifecycle,
+)
 
 
 BUFF_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
@@ -350,11 +358,25 @@ class BuffReadOnlyAdapter:
                 )
             if not proven:
                 return self._execute_buyer_wait_send(request)
+            try:
+                counterparty = seller_counterparty_from_exact_buff_record(
+                    record
+                ).steam_id
+            except CounterpartyEvidenceError:
+                return _result(
+                    request, PlatformResultStatus.MALFORMED, "malformed_payload"
+                )
+            if counterparty == request.recipient_steam_id:
+                return _result(
+                    request, PlatformResultStatus.FAILURE, "identity_mismatch"
+                )
             return _result(
                 request,
                 PlatformResultStatus.SUCCESS,
                 "seller_sends_offer",
-                DeliveryDirectionEvidence(),
+                DeliveryDirectionEvidence(
+                    "seller_sends_offer", counterparty
+                ),
             )
 
         offer_id = _trade_offer_id(record)
@@ -627,17 +649,15 @@ def _steam_trade_offer_evidence(
             PlatformResultStatus.RESULT_UNKNOWN,
             "trade_offer_state_not_proven",
         )
-    lifecycle_value = {
-        "active": SteamTradeOfferLifecycle.ACTIVE,
-        "accepted": SteamTradeOfferLifecycle.ACCEPTED,
-        "created_needs_confirmation": SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION,
-    }.get(lifecycle)
-    if lifecycle_value is None:
+    try:
+        lifecycle_evidence = map_exact_steam_lifecycle(lifecycle)
+    except SteamLifecycleEvidenceError:
         return _result(
             request,
             PlatformResultStatus.RESULT_UNKNOWN,
             "trade_offer_state_not_proven",
         )
+    lifecycle_value = lifecycle_evidence.lifecycle
 
     try:
         evidence = SteamTradeOfferEvidence(
@@ -653,15 +673,8 @@ def _steam_trade_offer_evidence(
         return _result(
             request, PlatformResultStatus.MALFORMED, "malformed_payload"
         )
-    detail = {
-        SteamTradeOfferLifecycle.ACTIVE: "trade_offer_active",
-        SteamTradeOfferLifecycle.ACCEPTED: "trade_offer_accepted",
-        SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION: (
-            "trade_offer_created_needs_confirmation"
-        ),
-    }[lifecycle_value]
     return _result(
-        request, PlatformResultStatus.SUCCESS, detail, evidence
+        request, PlatformResultStatus.SUCCESS, lifecycle_evidence.detail, evidence
     )
 
 

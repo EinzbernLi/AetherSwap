@@ -22,6 +22,7 @@ from app.auto_offer.steam_lifecycle import (
         ("countered", SteamTradeOfferLifecycle.COUNTERED, True),
         ("expired", SteamTradeOfferLifecycle.EXPIRED, True),
         ("canceled", SteamTradeOfferLifecycle.CANCELED, True),
+        ("cancelled", SteamTradeOfferLifecycle.CANCELED, True),
         ("declined", SteamTradeOfferLifecycle.DECLINED, True),
         ("invalid_items", SteamTradeOfferLifecycle.INVALID_ITEMS, True),
         (
@@ -41,7 +42,7 @@ def test_exact_lifecycle_mapping(raw, expected, terminal):
 
 @pytest.mark.parametrize(
     "raw",
-    [None, "", " active", "active ", "cancelled", "unknown", 3],
+    [None, "", " active", "active ", "unknown", 3],
 )
 def test_unknown_or_noncanonical_lifecycle_fails_closed(raw):
     with pytest.raises(
