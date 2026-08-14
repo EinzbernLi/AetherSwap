@@ -3,7 +3,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, List, Optional
+from typing import Any, Deque, List, Mapping, Optional
 from app.auto_offer.canary_authority import external_write_guard
 from app.auto_offer.host_ownership import (
     require_broad_transaction_mutation_allowed,
@@ -134,6 +134,49 @@ class State:
                 data=data,
             )
             return db_update_purchase_by_id(db_id, data)
+    def update_purchase_by_id_if_matches(
+        self,
+        db_id: int,
+        data: Mapping[str, object],
+        expected: Mapping[str, object],
+    ) -> bool:
+        """Update one Purchase only if its guarded identity snapshot is unchanged."""
+        expected_fields = (
+            "name",
+            "buff_order_id",
+            "assetid",
+            "pending_receipt",
+            "sale_price",
+            "sold_at",
+            "listing",
+            "listing_status",
+        )
+        missing = object()
+        with external_write_guard("host_transaction_mutation"):
+            if type(db_id) is not int or db_id <= 0:
+                return False
+            purchases = db_get_purchases()
+            purchase = next(
+                (
+                    item
+                    for item in purchases
+                    if item.get("_db_id") == db_id
+                ),
+                None,
+            )
+            if purchase is None:
+                return False
+            require_purchase_mutation_allowed(
+                purchase,
+                operation="update",
+                data=data,
+            )
+            if any(
+                purchase.get(field, missing) != expected.get(field, missing)
+                for field in expected_fields
+            ):
+                return False
+            return db_update_purchase_by_id(db_id, dict(data))
     def complete_purchase_receipt_by_id(
         self,
         db_id: int,
@@ -369,6 +412,12 @@ def update_purchase(idx: int, data: dict) -> bool:
     return get_state().update_purchase(idx, data)
 def update_purchase_by_id(db_id: int, data: dict) -> bool:
     return get_state().update_purchase_by_id(db_id, data)
+def update_purchase_by_id_if_matches(
+    db_id: int,
+    data: Mapping[str, object],
+    expected: Mapping[str, object],
+) -> bool:
+    return get_state().update_purchase_by_id_if_matches(db_id, data, expected)
 def update_sale(idx: int, data: dict) -> bool:
     return get_state().update_sale(idx, data)
 def set_inventory(items: list) -> None:

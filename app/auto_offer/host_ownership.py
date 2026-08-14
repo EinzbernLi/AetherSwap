@@ -189,6 +189,22 @@ def classify_host_purchase(
     )
 
 
+def classify_host_purchases(
+    purchases: Sequence[Mapping[str, object]],
+    *,
+    store_path: str | Path | None = None,
+) -> list[HostPurchaseOwnershipDecision]:
+    """Classify one Host Purchase snapshot against one canonical Store index."""
+    index = _store_index(store_path)
+    return [
+        classify_host_purchase(
+            purchase,
+            store_index=index,
+        )
+        for purchase in purchases
+    ]
+
+
 def require_purchase_mutation_allowed(
     purchase: Mapping[str, object],
     *,
@@ -282,6 +298,7 @@ __all__ = [
     "HostPurchaseOwnership",
     "HostPurchaseOwnershipDecision",
     "classify_host_purchase",
+    "classify_host_purchases",
     "require_broad_transaction_mutation_allowed",
     "require_purchase_mutation_allowed",
 ]
