@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Iterator
 
 from .contracts import (
     DeliveryContractError,
@@ -19,6 +22,7 @@ from .contracts import (
 
 AUTO_OFFER_STORE_SCHEMA_VERSION: Final[int] = 2
 _TABLE_NAME: Final[str] = "auto_offer_delivery"
+_SOURCE_SUFFIXES: Final[tuple[str, ...]] = ("", "-wal", "-shm", "-journal")
 _RECOVERABLE_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
     {
         DeliveryStatus.PENDING_DIRECTION,
@@ -116,6 +120,22 @@ class StoredDelivery:
     revision: int
 
 
+@dataclass(frozen=True)
+class _SourceFingerprint:
+    exists: bool
+    device: int | None
+    inode: int | None
+    size: int | None
+    mtime_ns: int | None
+    sha256: str | None
+
+
+@dataclass(frozen=True)
+class _DetachedSource:
+    main: bytes
+    wal: bytes | None
+
+
 class AutoOfferStore:
     """A small explicit API around the independent Auto Offer database.
 
@@ -198,10 +218,9 @@ class AutoOfferStore:
             or any(ord(character) < 32 for character in buff_order_id)
         ):
             raise AutoOfferStoreError("buff_order_id must be a non-whitespace ID")
-        connection = cls._open_existing_readonly(db_path)
-        if connection is None:
-            return None
-        try:
+        with cls._detached_readonly(db_path) as connection:
+            if connection is None:
+                return None
             rows = connection.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM {_TABLE_NAME} WHERE buff_order_id = ?",
                 (buff_order_id,),
@@ -211,53 +230,44 @@ class AutoOfferStore:
                     "buff_order_id maps to multiple persisted rows"
                 )
             return None if not rows else cls._row_to_stored(rows[0])
-        except AutoOfferStoreError:
-            raise
-        except sqlite3.DatabaseError as exc:
-            raise AutoOfferStoreCorruptError(
-                "SQLite rejected read-only buff_order_id lookup"
-            ) from exc
-        finally:
-            cls._close_readonly(connection)
+
 
     @classmethod
     def inspect_existing(cls, db_path: str | Path) -> list[StoredDelivery]:
         """Read every current v2 row without initializing or mutating the Store."""
-        connection = cls._open_existing_readonly(db_path)
-        if connection is None:
-            return []
-        try:
+        with cls._detached_readonly(db_path) as connection:
+            if connection is None:
+                return []
             rows = connection.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM {_TABLE_NAME} ORDER BY id ASC"
             ).fetchall()
             return [cls._row_to_stored(row) for row in rows]
-        except AutoOfferStoreError:
-            raise
-        except sqlite3.DatabaseError as exc:
-            raise AutoOfferStoreCorruptError(
-                "SQLite rejected read-only Store inspection"
-            ) from exc
-        finally:
-            cls._close_readonly(connection)
 
     @classmethod
-    def _open_existing_readonly(
+    @contextmanager
+    def _detached_readonly(
         cls,
         db_path: str | Path,
-    ) -> sqlite3.Connection | None:
-        path = Path(db_path)
-        if not path.exists():
-            return None
+    ) -> Iterator[sqlite3.Connection | None]:
+        source = cls._capture_source(db_path)
+        if source is None:
+            yield None
+            return
+
+        temporary = tempfile.TemporaryDirectory(prefix="aetherswap-auto-offer-")
+        detached_path = Path(temporary.name) / "auto_offer.db"
         try:
-            uri = f"{path.resolve().as_uri()}?mode=ro"
+            detached_path.write_bytes(source.main)
+            if source.wal is not None:
+                Path(f"{detached_path}-wal").write_bytes(source.wal)
             connection = sqlite3.connect(
-                uri,
-                uri=True,
+                str(detached_path),
                 timeout=5.0,
                 isolation_level=None,
             )
         except (OSError, sqlite3.DatabaseError) as exc:
-            raise AutoOfferStoreError("cannot open existing Auto Offer database read-only") from exc
+            temporary.cleanup()
+            raise AutoOfferStoreError("cannot open detached Auto Offer database") from exc
         try:
             connection.execute("PRAGMA query_only = ON")
             if connection.execute("PRAGMA query_only").fetchone()[0] != 1:
@@ -269,28 +279,109 @@ class AutoOfferStore:
             connection.execute("PRAGMA busy_timeout = 5000")
             if connection.execute("PRAGMA busy_timeout").fetchone()[0] != 5000:
                 raise AutoOfferStoreCorruptError("SQLite busy timeout was not enabled")
-            if (
-                cls._user_version(connection) != AUTO_OFFER_STORE_SCHEMA_VERSION
-                or cls._user_tables(connection) != {_TABLE_NAME}
-            ):
+            cls._validate_schema(connection)
+            if cls._user_version(connection) != AUTO_OFFER_STORE_SCHEMA_VERSION:
                 raise AutoOfferStoreSchemaError("Auto Offer schema does not match v2")
-            cls._validate_table_shape(connection, _EXPECTED_COLUMNS, "v2")
-            return connection
+            yield connection
         except AutoOfferStoreError:
-            cls._close_readonly(connection)
             raise
         except sqlite3.DatabaseError as exc:
-            cls._close_readonly(connection)
             raise AutoOfferStoreCorruptError(
                 "SQLite rejected read-only Auto Offer inspection"
             ) from exc
+        finally:
+            try:
+                connection.close()
+            except sqlite3.DatabaseError as exc:
+                raise AutoOfferStoreError("cannot close detached Auto Offer database") from exc
+            temporary.cleanup()
+
+    @classmethod
+    def _capture_source(cls, db_path: str | Path) -> _DetachedSource | None:
+        path = Path(db_path).expanduser()
+        try:
+            if path.is_symlink():
+                raise AutoOfferStoreError("invalid Auto Offer source file")
+            path = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AutoOfferStoreError("cannot resolve Auto Offer source path") from exc
+
+        before = cls._fingerprint_source_family(path)
+        main, wal, shm, journal = before
+        if not main.exists:
+            if any(item.exists for item in (wal, shm, journal)):
+                raise AutoOfferStoreCorruptError("orphan Auto Offer SQLite sidecar")
+            return None
+        if journal.exists:
+            raise AutoOfferStoreCorruptError("Auto Offer SQLite rollback journal is present")
+
+        main_payload = cls._read_source_bytes(path)
+        wal_payload = None
+        if wal.exists:
+            wal_payload = cls._read_source_bytes(Path(f"{path}-wal"))
+
+        if main_payload is None or hashlib.sha256(main_payload).hexdigest() != main.sha256:
+            raise AutoOfferStoreError("Auto Offer source changed during collection")
+        if wal.exists and (
+            wal_payload is None or hashlib.sha256(wal_payload).hexdigest() != wal.sha256
+        ):
+            raise AutoOfferStoreError("Auto Offer source changed during collection")
+
+        after = cls._fingerprint_source_family(path)
+        if before != after:
+            raise AutoOfferStoreError("Auto Offer source changed during collection")
+        return _DetachedSource(main=main_payload, wal=wal_payload)
+
+    @classmethod
+    def _fingerprint_source_family(
+        cls,
+        path: Path,
+    ) -> tuple[_SourceFingerprint, ...]:
+        fingerprints: list[_SourceFingerprint] = []
+        for suffix in _SOURCE_SUFFIXES:
+            candidate = path if not suffix else Path(f"{path}{suffix}")
+            try:
+                if candidate.is_symlink():
+                    raise AutoOfferStoreError("invalid Auto Offer source file")
+                if not candidate.exists():
+                    fingerprints.append(_SourceFingerprint(False, None, None, None, None, None))
+                    continue
+                if not candidate.is_file():
+                    raise AutoOfferStoreError("invalid Auto Offer source file")
+                stat = candidate.stat()
+                fingerprints.append(
+                    _SourceFingerprint(
+                        True,
+                        getattr(stat, "st_dev", None),
+                        getattr(stat, "st_ino", None),
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                        cls._hash_source_file(candidate),
+                    )
+                )
+            except AutoOfferStoreError:
+                raise
+            except OSError as exc:
+                raise AutoOfferStoreError("cannot fingerprint Auto Offer source") from exc
+        return tuple(fingerprints)
 
     @staticmethod
-    def _close_readonly(connection: sqlite3.Connection) -> None:
+    def _hash_source_file(path: Path) -> str:
+        digest = hashlib.sha256()
         try:
-            connection.close()
-        except sqlite3.DatabaseError as exc:
-            raise AutoOfferStoreError("cannot close read-only Auto Offer database") from exc
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise AutoOfferStoreError("cannot read Auto Offer source") from exc
+        return digest.hexdigest()
+
+    @staticmethod
+    def _read_source_bytes(path: Path) -> bytes:
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise AutoOfferStoreError("cannot read Auto Offer source") from exc
 
     def ensure_initial(self, snapshot: DeliverySnapshot) -> StoredDelivery:
         """Insert one pending-direction delivery, or return its exact duplicate."""

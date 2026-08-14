@@ -238,7 +238,7 @@ def api_update_transaction(body: TransactionUpdateBody):
         if body.type == "purchase":
             ok = update_purchase_by_id(body.db_id, data) if body.db_id else update_purchase(body.idx, data)
         elif body.type == "sale":
-            ok = update_sale(body.idx, data)  
+            ok = update_sale(body.idx, data)
         else:
             return {"ok": False, "error": "type 须为 purchase 或 sale"}
     except HostPurchaseMutationBlockedError as exc:
