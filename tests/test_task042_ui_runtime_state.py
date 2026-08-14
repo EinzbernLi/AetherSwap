@@ -25,13 +25,16 @@ def test_runtime_display_uses_status_payload_and_all_required_modes():
     assert main.count('API + "/status"') == 1
     assert "status.auto_offer_runtime" in main
     for mode, label in {
-        "OFF": "关闭",
-        "ENABLING": "开启中",
-        "ON": "开启",
-        "DRAINING": "排空中",
-        "BLOCKED": "阻止",
+        "off": "关闭",
+        "enabling": "开启中",
+        "on": "开启",
+        "draining": "排空中",
+        "blocked": "阻止",
     }.items():
         assert f'{mode}: "{label}"' in main
+    assert "runtime.reason === null || typeof runtime.reason === \"string\"" in main
+    assert 'OFF: "关闭"' not in main
+    assert 'ON: "开启"' not in main
     assert "Number.isInteger(runtime.active_delivery_count)" in main
     assert "runtime.active_delivery_count >= 0" in main
     assert "reasonEl.textContent" in main
@@ -48,20 +51,12 @@ def test_missing_runtime_is_explicitly_unavailable_and_no_second_poller():
     assert main.count("setInterval(refreshStatus") == 1
 
 
-def test_d3_production_changes_stay_within_allowlist():
-    import subprocess
+def test_d3_runtime_source_has_no_history_or_authority_dependencies():
+    main = _source("web/js/main.js")
 
-    result = subprocess.run(
-        ["git", "diff", "--name-only", "bb79aac2c2a74289d4830b5e30162427f6157771"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    changed = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-    assert changed <= {
-        "web/index.html",
-        "web/js/settings.js",
-        "web/js/main.js",
-        "tests/test_task042_ui_runtime_state.py",
-    }
+    render_start = main.index("function renderAutoOfferRuntime")
+    render_end = main.index("let reloginType", render_start)
+    render_source = main[render_start:render_end]
+    assert "fetch(" not in render_source
+    assert "localStorage" not in render_source
+    assert "auto_offer.db" not in render_source

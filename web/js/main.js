@@ -222,18 +222,18 @@ function renderAutoOfferRuntime(status) {
     ? status.auto_offer_runtime
     : null;
   const modeLabels = {
-    OFF: "关闭",
-    ENABLING: "开启中",
-    ON: "开启",
-    DRAINING: "排空中",
-    BLOCKED: "阻止",
+    off: "关闭",
+    enabling: "开启中",
+    on: "开启",
+    draining: "排空中",
+    blocked: "阻止",
   };
   const valid = runtime
     && typeof runtime.requested_enabled === "boolean"
     && Object.prototype.hasOwnProperty.call(modeLabels, runtime.mode)
     && Number.isInteger(runtime.active_delivery_count)
     && runtime.active_delivery_count >= 0
-    && (runtime.reason === undefined || typeof runtime.reason === "string");
+    && (runtime.reason === null || typeof runtime.reason === "string");
   if (!valid) {
     intentEl.textContent = "意图：未知";
     modeEl.textContent = "运行态：不可用";
