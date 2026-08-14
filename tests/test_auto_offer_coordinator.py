@@ -7,6 +7,7 @@ import pytest
 
 from app.auto_offer.adapters import (
     CompletedTradeItemEvidence,
+    ConfirmOfferEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
     OfferStateEvidence,
@@ -1198,6 +1199,98 @@ def normal_send_coordinator(
     ), direction_adapter
 
 
+CONFIRM_COUNTERPARTY = "76561198000000002"
+
+
+def buyer_confirmation_required(revision=5, *, counterparty=CONFIRM_COUNTERPARTY):
+    snapshot = make_snapshot(
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryMode.BUYER_SENDS_OFFER,
+        steam_tradeoffer_id="offer-1",
+        offer_attempted_at=10.0,
+        offer_sent_at=11.0,
+        counterparty_steam_id=counterparty,
+    )
+    return make_delivery(
+        replace(snapshot, recipient_steam_id="76561198000000001"),
+        revision=revision,
+    )
+
+
+def exact_confirmation_steam_evidence(
+    *,
+    lifecycle=SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION,
+    offer_id="offer-1",
+    account_id="76561198000000001",
+    counterparty=CONFIRM_COUNTERPARTY,
+    is_our_offer=True,
+    items_to_give=(),
+):
+    return SteamTradeOfferEvidence(
+        steam_tradeoffer_id=offer_id,
+        account_steam_id=account_id,
+        counterparty_steam_id=counterparty,
+        is_our_offer=is_our_offer,
+        lifecycle=lifecycle,
+        items_to_give=items_to_give,
+        items_to_receive=(TradeOfferItemEvidence(730, "2", "offer-asset-1", 1),),
+    )
+
+
+class RecordingConfirmAdapter:
+    capabilities = frozenset({PlatformCapability.CONFIRM_OFFER})
+
+    def __init__(self, result_factory=None):
+        self.result_factory = result_factory
+        self.calls = []
+
+    def execute(self, request):
+        self.calls.append(request)
+        if self.result_factory is None:
+            return None
+        return self.result_factory(request)
+
+
+def normal_confirmation_coordinator(
+    store,
+    *,
+    buff_evidence=None,
+    steam_evidence=None,
+    buff_result_factory=None,
+    steam_result_factory=None,
+    confirm_adapter=None,
+):
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    buff_evidence = buff_evidence or OfferStateEvidence(
+        "offer-1",
+        CONFIRM_COUNTERPARTY,
+    )
+    steam_evidence = steam_evidence or exact_confirmation_steam_evidence()
+    buff_adapter = SpyAdapter(
+        {PlatformCapability.READ_OFFER_STATE},
+        buff_result_factory or success_factory(buff_evidence),
+    )
+    steam_adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_TRADE_OFFER},
+        steam_result_factory or success_factory(steam_evidence),
+    )
+    adapters = {
+        PlatformCapability.READ_OFFER_STATE: buff_adapter,
+        PlatformCapability.READ_STEAM_TRADE_OFFER: steam_adapter,
+    }
+    if confirm_adapter is not None:
+        adapters[PlatformCapability.CONFIRM_OFFER] = confirm_adapter
+    coordinator = DeliveryCoordinator(
+        store,
+        adapters,
+        timeout_seconds=1.0,
+        allow_writes=True,
+        allow_confirmation_writes=confirm_adapter is not None,
+    )
+    return coordinator, buff_adapter, steam_adapter
+
+
 def buyer_result_unknown(revision=3):
     snapshot = make_snapshot(
         DeliveryStatus.RESULT_UNKNOWN,
@@ -1702,6 +1795,387 @@ def test_canary_post_call_clock_failure_or_regression_becomes_result_unknown():
         assert len(adapter.calls) == 1
         assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
         assert result.after.snapshot.delivery_error == "write_result_unknown"
+
+
+def test_normal_confirmation_snapshot_alone_blocks_before_attempt_or_adapter():
+    item = buyer_confirmation_required()
+    store = RecordingStore(item)
+    confirm_adapter = RecordingConfirmAdapter(
+        lambda _request: (_ for _ in ()).throw(
+            AssertionError("snapshot-only CONFIRM must not execute")
+        )
+    )
+    coordinator, buff_adapter, steam_adapter = normal_confirmation_coordinator(
+        store,
+        confirm_adapter=confirm_adapter,
+    )
+
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="normal_confirmation_authority_required",
+    ):
+        coordinator.step(item)
+
+    assert store.advance_count == 0
+    assert buff_adapter.calls == []
+    assert steam_adapter.calls == []
+    assert confirm_adapter.calls == []
+
+
+def test_normal_confirmation_authority_requires_durable_seller():
+    item = buyer_confirmation_required(counterparty=None)
+    store = RecordingStore(item)
+    coordinator, buff_adapter, steam_adapter = normal_confirmation_coordinator(store)
+
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="normal_confirmation_authority_not_available",
+    ):
+        coordinator.read_confirmation_authority(item)
+
+    assert buff_adapter.calls == []
+    assert steam_adapter.calls == []
+    assert store.advance_count == 0
+
+
+@pytest.mark.parametrize(
+    "buff_evidence",
+    [
+        OfferStateEvidence("offer-other", CONFIRM_COUNTERPARTY),
+        OfferStateEvidence("offer-1", "76561198000000003"),
+    ],
+)
+def test_normal_confirmation_authority_rejects_buff_offer_or_seller_mismatch(
+    buff_evidence,
+):
+    item = buyer_confirmation_required()
+    store = RecordingStore(item)
+    coordinator, buff_adapter, steam_adapter = normal_confirmation_coordinator(
+        store,
+        buff_evidence=buff_evidence,
+    )
+
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="confirmation_buff_identity_mismatch",
+    ):
+        coordinator.read_confirmation_authority(item)
+
+    assert len(buff_adapter.calls) == 1
+    assert steam_adapter.calls == []
+    assert store.advance_count == 0
+
+
+def test_normal_confirmation_transient_buff_evidence_mints_no_proof_or_steam_read():
+    item = buyer_confirmation_required()
+    store = RecordingStore(item)
+    coordinator, buff_adapter, steam_adapter = normal_confirmation_coordinator(
+        store,
+        buff_result_factory=lambda request: PlatformResult(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "order_not_proven",
+        ),
+    )
+
+    result = coordinator.read_confirmation_authority(item)
+
+    assert result.proof is None
+    assert result.steam_result is None
+    assert len(buff_adapter.calls) == 1
+    assert steam_adapter.calls == []
+    assert store.advance_count == 0
+
+
+@pytest.mark.parametrize(
+    "steam_evidence",
+    [
+        exact_confirmation_steam_evidence(offer_id="offer-other"),
+        exact_confirmation_steam_evidence(account_id="76561198000000003"),
+        exact_confirmation_steam_evidence(counterparty="76561198000000003"),
+        exact_confirmation_steam_evidence(is_our_offer=False),
+    ],
+)
+def test_normal_confirmation_authority_rejects_steam_identity_mismatch(
+    steam_evidence,
+):
+    item = buyer_confirmation_required()
+    store = RecordingStore(item)
+    coordinator, buff_adapter, steam_adapter = normal_confirmation_coordinator(
+        store,
+        steam_evidence=steam_evidence,
+    )
+
+    result = coordinator.read_confirmation_authority(item)
+
+    assert len(buff_adapter.calls) == len(steam_adapter.calls) == 1
+    assert result.proof is None
+    assert result.steam_result.decision.result is AutoOfferResult.BLOCKED
+    assert result.steam_result.persisted is False
+    assert store.advance_count == 0
+
+
+def test_normal_confirmation_authority_safe_read_transition_and_outgoing_items_never_confirm():
+    item = buyer_confirmation_required()
+    store = RecordingStore(item)
+    coordinator, _, _ = normal_confirmation_coordinator(
+        store,
+        steam_evidence=exact_confirmation_steam_evidence(
+            lifecycle=SteamTradeOfferLifecycle.ACTIVE
+        ),
+    )
+
+    result = coordinator.read_confirmation_authority(item)
+
+    assert result.proof is None
+    assert result.steam_result.persisted is True
+    assert result.steam_result.after.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+
+    item = buyer_confirmation_required()
+    store = RecordingStore(item)
+    outgoing = (TradeOfferItemEvidence(730, "2", "outgoing-asset", 1),)
+    coordinator, _, _ = normal_confirmation_coordinator(
+        store,
+        steam_evidence=exact_confirmation_steam_evidence(items_to_give=outgoing),
+    )
+    result = coordinator.read_confirmation_authority(item)
+    assert result.proof is None
+    assert result.steam_result.persisted is False
+    assert store.advance_count == 0
+
+
+def test_normal_confirmation_proof_is_exact_opaque_single_use_and_process_local():
+    item = buyer_confirmation_required(revision=7)
+    store = RecordingStore(item)
+    confirm_adapter = RecordingConfirmAdapter(
+        lambda request: PlatformResult(
+            request,
+            PlatformResultStatus.SUCCESS,
+            evidence=ConfirmOfferEvidence("offer-1", "76561198000000001"),
+        )
+    )
+    coordinator, _, _ = normal_confirmation_coordinator(
+        store,
+        confirm_adapter=confirm_adapter,
+    )
+
+    authority = coordinator.read_confirmation_authority(item)
+    proof = authority.proof
+    assert repr(proof) == "<opaque normal confirmation proof>"
+    assert (
+        proof.purchase_id,
+        proof.buff_order_id,
+        proof.account_id,
+        proof.recipient_steam_id,
+        proof.revision,
+        proof.steam_tradeoffer_id,
+        proof.counterparty_steam_id,
+    ) == (
+        item.snapshot.purchase_id,
+        item.snapshot.buff_order_id,
+        item.snapshot.account_id,
+        item.snapshot.recipient_steam_id,
+        item.revision,
+        item.snapshot.steam_tradeoffer_id,
+        item.snapshot.counterparty_steam_id,
+    )
+    with pytest.raises(TypeError, match="normal_confirmation_proof_not_serializable"):
+        pickle.dumps(proof)
+    with pytest.raises(TypeError, match="normal_confirmation_proof_not_serializable"):
+        copy.copy(proof)
+
+    restarted, _, _ = normal_confirmation_coordinator(
+        store,
+        confirm_adapter=confirm_adapter,
+    )
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="confirmation_authority_proof_required",
+    ):
+        restarted.confirm_offer_with_authority(item, proof)
+
+    result = coordinator.confirm_offer_with_authority(item, proof)
+    assert result.attempted.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
+    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+    assert len(confirm_adapter.calls) == 1
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="confirmation_authority_proof_required",
+    ):
+        coordinator.confirm_offer_with_authority(item, proof)
+    assert len(confirm_adapter.calls) == 1
+
+
+def test_normal_confirmation_stale_revision_blocks_before_attempt_or_confirm():
+    item = buyer_confirmation_required(revision=2)
+    store = RecordingStore(item)
+    confirm_adapter = RecordingConfirmAdapter()
+    coordinator, _, _ = normal_confirmation_coordinator(
+        store,
+        confirm_adapter=confirm_adapter,
+    )
+    proof = coordinator.read_confirmation_authority(item).proof
+    store.current = StoredDelivery(item.snapshot, item.revision + 1)
+
+    with pytest.raises(
+        ReadOnlyCoordinatorConflictError,
+        match="persisted_delivery_mismatch",
+    ):
+        coordinator.confirm_offer_with_authority(item, proof)
+    assert store.advance_count == 0
+    assert confirm_adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"purchase_id": "purchase-other"},
+        {"buff_order_id": "buff-order-other"},
+        {"account_id": "account-other"},
+        {"recipient_steam_id": "76561198000000003"},
+        {"steam_tradeoffer_id": "offer-other"},
+        {"counterparty_steam_id": "76561198000000003"},
+    ],
+)
+def test_normal_confirmation_proof_rejects_identity_offer_or_seller_mismatch(changes):
+    item = buyer_confirmation_required(revision=3)
+    store = RecordingStore(item)
+    confirm_adapter = RecordingConfirmAdapter()
+    coordinator, _, _ = normal_confirmation_coordinator(
+        store,
+        confirm_adapter=confirm_adapter,
+    )
+    proof = coordinator.read_confirmation_authority(item).proof
+    changed = StoredDelivery(replace(item.snapshot, **changes), item.revision)
+    store.current = changed
+
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="confirmation_authority_proof_mismatch",
+    ):
+        coordinator.confirm_offer_with_authority(changed, proof)
+    assert store.advance_count == 0
+    assert confirm_adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    "platform_status,expected_status,expected_revision_delta",
+    [
+        (PlatformResultStatus.SUCCESS, DeliveryStatus.OFFER_CONFIRMED, 2),
+        (PlatformResultStatus.RESULT_UNKNOWN, DeliveryStatus.RESULT_UNKNOWN, 2),
+        (PlatformResultStatus.FAILURE, DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED, 1),
+    ],
+)
+def test_normal_confirmation_attempt_precedes_exactly_one_call_and_preserves_results(
+    platform_status,
+    expected_status,
+    expected_revision_delta,
+):
+    item = buyer_confirmation_required(revision=4)
+    store = RecordingStore(item)
+
+    def result_factory(request):
+        assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
+        if platform_status is PlatformResultStatus.SUCCESS:
+            return PlatformResult(
+                request,
+                platform_status,
+                evidence=ConfirmOfferEvidence("offer-1", "76561198000000001"),
+            )
+        return PlatformResult(request, platform_status, "confirmation_not_proven")
+
+    confirm_adapter = RecordingConfirmAdapter(result_factory)
+    coordinator, _, _ = normal_confirmation_coordinator(
+        store,
+        confirm_adapter=confirm_adapter,
+    )
+    proof = coordinator.read_confirmation_authority(item).proof
+    result = coordinator.confirm_offer_with_authority(item, proof)
+
+    assert len(confirm_adapter.calls) == 1
+    assert result.after.snapshot.delivery_status is expected_status
+    assert result.after.revision == item.revision + expected_revision_delta
+    if platform_status is PlatformResultStatus.RESULT_UNKNOWN:
+        assert result.after.snapshot.delivery_error == "write_result_unknown"
+    with pytest.raises(ReadOnlyCoordinatorBlockedError):
+        coordinator.confirm_offer_with_authority(item, proof)
+    assert len(confirm_adapter.calls) == 1
+
+
+def bound_confirmation_unknown(revision=8):
+    required = buyer_confirmation_required(revision=revision)
+    return StoredDelivery(
+        replace(
+            required.snapshot,
+            delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+            delivery_error="write_result_unknown",
+        ),
+        revision,
+    )
+
+
+@pytest.mark.parametrize(
+    "lifecycle,expected_status,persisted",
+    [
+        (SteamTradeOfferLifecycle.ACTIVE, DeliveryStatus.OFFER_CONFIRMED, True),
+        (SteamTradeOfferLifecycle.ACCEPTED, DeliveryStatus.OFFER_CONFIRMED, True),
+        (SteamTradeOfferLifecycle.IN_ESCROW, DeliveryStatus.OFFER_CONFIRMED, True),
+        (
+            SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION,
+            DeliveryStatus.RESULT_UNKNOWN,
+            False,
+        ),
+    ],
+)
+def test_bound_confirmation_unknown_recovery_is_steam_read_only(
+    lifecycle,
+    expected_status,
+    persisted,
+):
+    item = bound_confirmation_unknown()
+    store = RecordingStore(item)
+    confirm_adapter = RecordingConfirmAdapter(
+        lambda _request: (_ for _ in ()).throw(
+            AssertionError("read-only recovery must never CONFIRM")
+        )
+    )
+    coordinator, buff_adapter, steam_adapter = normal_confirmation_coordinator(
+        store,
+        steam_evidence=exact_confirmation_steam_evidence(lifecycle=lifecycle),
+        confirm_adapter=confirm_adapter,
+    )
+
+    result = coordinator.recover_confirmation_result_unknown_readonly(item)
+
+    assert buff_adapter.calls == []
+    assert len(steam_adapter.calls) == 1
+    assert confirm_adapter.calls == []
+    assert result.persisted is persisted
+    assert result.after.snapshot.delivery_status is expected_status
+    if expected_status is DeliveryStatus.OFFER_CONFIRMED:
+        assert result.after.snapshot.delivery_error is None
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_bound_confirmation_unknown_recovery_identity_or_malformed_is_blocked(malformed):
+    item = bound_confirmation_unknown()
+    store = RecordingStore(item)
+    steam_evidence = exact_confirmation_steam_evidence(
+        counterparty="76561198000000003"
+    )
+    result_factory = (lambda _request: object()) if malformed else None
+    coordinator, _, steam_adapter = normal_confirmation_coordinator(
+        store,
+        steam_evidence=steam_evidence,
+        steam_result_factory=result_factory,
+    )
+
+    result = coordinator.recover_confirmation_result_unknown_readonly(item)
+
+    assert len(steam_adapter.calls) == 1
+    assert result.persisted is False
+    assert result.after == item
+    assert result.decision.result is AutoOfferResult.BLOCKED
 
 
 def test_write_authority_does_not_import_or_wire_task007_executor():

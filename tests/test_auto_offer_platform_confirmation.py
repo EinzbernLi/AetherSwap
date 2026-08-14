@@ -11,6 +11,9 @@ from app.auto_offer.adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+    TradeOfferItemEvidence,
 )
 from app.auto_offer.contracts import DeliveryMode, DeliverySnapshot, DeliveryStatus
 from app.auto_offer.coordinator import (
@@ -31,6 +34,7 @@ from app.auto_offer.store import AutoOfferStoreStaleWriteError, StoredDelivery
 ACCOUNT_ID = "account-1"
 STEAM_ID = "76561198000000001"
 OFFER_ID = "9876543210"
+COUNTERPARTY_STEAM_ID = "76561198000000002"
 
 
 class FakeTransport:
@@ -157,14 +161,48 @@ class RecordingConfirmAdapter:
         )
 
 
+class ExactConfirmationReadAdapter:
+    capabilities = frozenset({PlatformCapability.READ_STEAM_TRADE_OFFER})
+
+    def execute(self, request):
+        return PlatformResult(
+            request=request,
+            status=PlatformResultStatus.SUCCESS,
+            detail="trade_offer_created_needs_confirmation",
+            evidence=SteamTradeOfferEvidence(
+                steam_tradeoffer_id=request.steam_tradeoffer_id,
+                account_steam_id=request.recipient_steam_id,
+                counterparty_steam_id=COUNTERPARTY_STEAM_ID,
+                is_our_offer=True,
+                lifecycle=SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION,
+                items_to_give=(),
+                items_to_receive=(
+                    TradeOfferItemEvidence(730, "2", "asset-confirm-1", 1),
+                ),
+            ),
+        )
+
+
 def _coordinator(store, adapter):
     return DeliveryCoordinator(
         store,
-        {PlatformCapability.CONFIRM_OFFER: adapter},
+        {
+            PlatformCapability.CONFIRM_OFFER: adapter,
+            PlatformCapability.READ_STEAM_TRADE_OFFER: ExactConfirmationReadAdapter(),
+        },
         timeout_seconds=15.0,
         allow_writes=True,
         allow_confirmation_writes=True,
+        expected_trade_offer_counterparty_steam_id=COUNTERPARTY_STEAM_ID,
+        expected_trade_offer_is_our_offer=True,
     )
+
+
+def _confirm_after_exact_canary_read(coordinator, current):
+    read_result = coordinator.read_confirmation_state(current)
+    assert read_result.persisted is False
+    assert read_result.after == current
+    return coordinator.step(current)
 
 
 def test_confirm_offer_request_requires_exact_tradeoffer_id():
@@ -364,7 +402,7 @@ def test_runtime_confirmation_persists_attempt_before_exact_adapter_call():
     adapter = RecordingConfirmAdapter(store, events=events)
     coordinator = _coordinator(store, adapter)
 
-    result = coordinator.step(current)
+    result = _confirm_after_exact_canary_read(coordinator, current)
 
     assert type(result) is ConfirmOfferStepResult
     assert result.before == current
@@ -401,7 +439,7 @@ def test_confirmation_result_unknown_persists_exact_bound_unknown_and_never_retr
     adapter = RecordingConfirmAdapter(store, PlatformResultStatus.RESULT_UNKNOWN)
     coordinator = _coordinator(store, adapter)
 
-    result = coordinator.step(current)
+    result = _confirm_after_exact_canary_read(coordinator, current)
 
     assert type(result) is ConfirmOfferStepResult
     assert result.attempted.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
@@ -428,7 +466,7 @@ def test_confirmation_known_preflight_failure_leaves_durable_attempt_without_sec
     adapter = RecordingConfirmAdapter(store, status)
     coordinator = _coordinator(store, adapter)
 
-    result = coordinator.step(current)
+    result = _confirm_after_exact_canary_read(coordinator, current)
 
     assert type(result) is ConfirmOfferStepResult
     assert result.after == result.attempted
@@ -450,5 +488,5 @@ def test_confirmation_attempt_cas_failure_blocks_before_adapter_execution():
     coordinator = _coordinator(store, adapter)
 
     with pytest.raises(ReadOnlyCoordinatorConflictError, match="stale_write"):
-        coordinator.step(current)
+        _confirm_after_exact_canary_read(coordinator, current)
     assert adapter.calls == []

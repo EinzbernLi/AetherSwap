@@ -10,10 +10,15 @@ import pytest
 import app.auto_offer.host_integration as host_integration
 import app.pipeline as pipeline
 from app.auto_offer.adapters import (
+    ConfirmOfferEvidence,
+    OfferStateEvidence,
     PlatformCapability,
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    SteamTradeOfferEvidence,
+    SteamTradeOfferLifecycle,
+    TradeOfferItemEvidence,
 )
 from app.auto_offer.contracts import (
     AutoOfferResult,
@@ -22,6 +27,10 @@ from app.auto_offer.contracts import (
     DeliveryStatus,
 )
 from app.auto_offer.host_integration import HostAutoOfferIntegrationError
+from app.auto_offer.coordinator import (
+    ConfirmationAuthorityReadResult,
+    DeliveryCoordinator,
+)
 from app.auto_offer.store import StoredDelivery
 from app.pipeline_context import PipelineContext
 from app.pipeline_steps import TARGET_REACHED
@@ -41,6 +50,7 @@ def _stored(
     account_id: str = ACCOUNT_ID,
     recipient: str = STEAM_ID,
     assetid: str | None = None,
+    counterparty: str | None = None,
 ) -> StoredDelivery:
     attempted_at = None
     sent_at = None
@@ -99,6 +109,7 @@ def _stored(
             delivery_error=error,
             pending_receipt=pending_receipt,
             assetid=assetid,
+            counterparty_steam_id=counterparty,
         ),
         revision=revision,
     )
@@ -145,6 +156,7 @@ class FakeBridge:
         self.registered = []
         self.steps = []
         self.recoveries = []
+        self.confirmation_recoveries = []
         self.closed = False
 
     def register_committed_purchase(self, record):
@@ -174,6 +186,16 @@ class FakeBridge:
 
     def recover_result_unknown_readonly(self, delivery):
         self.recoveries.append(
+            (delivery.snapshot.buff_order_id, delivery.snapshot.delivery_status)
+        )
+        return SimpleNamespace(
+            after=delivery,
+            persisted=False,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
+    def recover_confirmation_result_unknown_readonly(self, delivery):
+        self.confirmation_recoveries.append(
             (delivery.snapshot.buff_order_id, delivery.snapshot.delivery_status)
         )
         return SimpleNamespace(
@@ -317,6 +339,200 @@ class ExactRecoveryBridge(FakeBridge):
             persisted=True,
             decision=SimpleNamespace(result=AutoOfferResult.WAITING),
         )
+
+
+class ExactConfirmationRecoveryBridge(FakeBridge):
+    def __init__(self, deliveries, *, malformed=False):
+        super().__init__(deliveries)
+        self.malformed = malformed
+
+    def recover_confirmation_result_unknown_readonly(self, delivery):
+        order_id = delivery.snapshot.buff_order_id
+        self.confirmation_recoveries.append(
+            (order_id, delivery.snapshot.delivery_status)
+        )
+        if self.malformed:
+            return SimpleNamespace(
+                after=delivery,
+                persisted=False,
+                decision=SimpleNamespace(result=AutoOfferResult.BLOCKED),
+            )
+        after = StoredDelivery(
+            replace(
+                delivery.snapshot,
+                delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+                delivery_error=None,
+            ),
+            delivery.revision + 1,
+        )
+        self.current[order_id] = after
+        return SimpleNamespace(
+            after=after,
+            persisted=True,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
+
+class TransientConfirmationBridge(FakeBridge):
+    def __init__(self, deliveries):
+        super().__init__(deliveries)
+        self.authority_reads = []
+        self.confirm_calls = []
+
+    def read_confirmation_authority(self, delivery):
+        self.authority_reads.append(delivery.snapshot.buff_order_id)
+        request = PlatformRequest(
+            purchase_id=delivery.snapshot.purchase_id,
+            buff_order_id=delivery.snapshot.buff_order_id,
+            account_id=delivery.snapshot.account_id,
+            recipient_steam_id=delivery.snapshot.recipient_steam_id,
+            revision=delivery.revision,
+            capability=PlatformCapability.READ_OFFER_STATE,
+            timeout_seconds=5.0,
+        )
+        return ConfirmationAuthorityReadResult(
+            before=delivery,
+            buff_result=PlatformResult(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_not_proven",
+            ),
+            steam_result=None,
+            proof=None,
+        )
+
+    def confirm_offer_with_authority(self, delivery, proof):
+        self.confirm_calls.append((delivery, proof))
+        raise AssertionError("transient evidence must not CONFIRM")
+
+
+class _CoordinatorBridgeStore:
+    def __init__(self, bridge):
+        self.bridge = bridge
+
+    def get_by_purchase_id(self, purchase_id):
+        return self.bridge.get_by_purchase_id(purchase_id)
+
+    def advance(self, current, target):
+        order_id = current.snapshot.buff_order_id
+        if self.bridge.current[order_id] != current:
+            raise AssertionError("stale test Store write")
+        after = StoredDelivery(target, current.revision + 1)
+        self.bridge.current[order_id] = after
+        self.bridge.events.append(
+            (
+                "advance",
+                current.snapshot.delivery_status,
+                target.delivery_status,
+            )
+        )
+        return after
+
+
+class _ExactAdapter:
+    def __init__(self, capability, execute):
+        self.capabilities = frozenset({capability})
+        self._execute = execute
+        self.calls = []
+
+    def execute(self, request):
+        self.calls.append(request)
+        return self._execute(request)
+
+
+class ExactNormalConfirmationBridge(FakeBridge):
+    def __init__(self, delivery, *, authority, db_path):
+        super().__init__((delivery,))
+        self.events = []
+        self.db_path = db_path
+        self.buff_adapter = _ExactAdapter(
+            PlatformCapability.READ_OFFER_STATE,
+            lambda request: PlatformResult(
+                request,
+                PlatformResultStatus.SUCCESS,
+                evidence=OfferStateEvidence(
+                    delivery.snapshot.steam_tradeoffer_id,
+                    delivery.snapshot.counterparty_steam_id,
+                ),
+            ),
+        )
+        self.steam_adapter = _ExactAdapter(
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            lambda request: PlatformResult(
+                request,
+                PlatformResultStatus.SUCCESS,
+                evidence=SteamTradeOfferEvidence(
+                    steam_tradeoffer_id=delivery.snapshot.steam_tradeoffer_id,
+                    account_steam_id=delivery.snapshot.recipient_steam_id,
+                    counterparty_steam_id=delivery.snapshot.counterparty_steam_id,
+                    is_our_offer=True,
+                    lifecycle=SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION,
+                    items_to_give=(),
+                    items_to_receive=(
+                        TradeOfferItemEvidence(730, "2", "asset-offer-1", 1),
+                    ),
+                ),
+            ),
+        )
+
+        def confirm(request):
+            self.events.append(
+                (
+                    "confirm",
+                    self.current[delivery.snapshot.buff_order_id].snapshot.delivery_status,
+                )
+            )
+            competing = sqlite3.connect(
+                self.db_path,
+                timeout=0.0,
+                isolation_level=None,
+            )
+            try:
+                with pytest.raises(sqlite3.OperationalError):
+                    competing.execute("BEGIN IMMEDIATE")
+            finally:
+                competing.close()
+            return PlatformResult(
+                request,
+                PlatformResultStatus.SUCCESS,
+                evidence=ConfirmOfferEvidence(
+                    delivery.snapshot.steam_tradeoffer_id,
+                    delivery.snapshot.recipient_steam_id,
+                ),
+            )
+
+        self.confirm_adapter = _ExactAdapter(PlatformCapability.CONFIRM_OFFER, confirm)
+
+        def write_guard(request):
+            return authority.external_write_guard(
+                host_integration.CanaryWriteTarget(
+                    action="auto_offer_confirm",
+                    purchase_id=request.purchase_id,
+                    buff_order_id=request.buff_order_id,
+                    account_id=request.account_id,
+                    recipient_steam_id=request.recipient_steam_id,
+                )
+            )
+
+        self.coordinator = DeliveryCoordinator(
+            _CoordinatorBridgeStore(self),
+            {
+                PlatformCapability.READ_OFFER_STATE: self.buff_adapter,
+                PlatformCapability.READ_STEAM_TRADE_OFFER: self.steam_adapter,
+                PlatformCapability.CONFIRM_OFFER: self.confirm_adapter,
+            },
+            timeout_seconds=5.0,
+            allow_writes=True,
+            allow_confirmation_writes=True,
+            write_guard=write_guard,
+        )
+
+    def read_confirmation_authority(self, delivery):
+        self.events.append(("authority_read", delivery.revision))
+        return self.coordinator.read_confirmation_authority(delivery)
+
+    def confirm_offer_with_authority(self, delivery, proof):
+        return self.coordinator.confirm_offer_with_authority(delivery, proof)
 
 
 def _patch_identity(monkeypatch, *, account_id=ACCOUNT_ID, steam_id=STEAM_ID):
@@ -732,22 +948,82 @@ def test_adjacent_readable_transitions_require_separate_ticks_and_receipt_tick(m
     assert writes == [(41, "order-1", "asset-exact")]
 
 
-def test_normal_buyer_confirmation_required_remains_safe_wait(monkeypatch):
+def test_normal_buyer_confirmation_without_fresh_proof_remains_safe_wait(
+    monkeypatch,
+    tmp_path,
+):
     _patch_identity(monkeypatch)
+    db_path = _local_host_db(
+        tmp_path / "host.db",
+        ((1, "order-1", 1, None),),
+    )
+    authority = host_integration.CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
     stored = _stored(
         "order-1",
         status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
         mode=DeliveryMode.BUYER_SENDS_OFFER,
         revision=5,
+        counterparty="76561198000000002",
     )
-    bridge = FakeBridge((stored,))
+    bridge = TransientConfirmationBridge((stored,))
     integration = host_integration.HostAutoOfferIntegration(bridge)
 
     outcome = integration.run_delivery_tick([_host_row("order-1")])
 
     assert outcome.result is AutoOfferResult.WAITING
     assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.authority_reads == ["order-1"]
+    assert bridge.confirm_calls == []
     assert bridge.steps == []
+
+
+def test_normal_confirmation_holds_host_barrier_and_attempts_before_one_call(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+    db_path = _local_host_db(
+        tmp_path / "host.db",
+        ((1, "order-1", 1, None), (2, "other-order", 1, None)),
+    )
+    authority = host_integration.CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    stored = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+        counterparty="76561198000000002",
+    )
+    bridge = ExactNormalConfirmationBridge(
+        stored,
+        authority=authority,
+        db_path=db_path,
+    )
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick([_host_row("order-1")])
+
+    assert outcome.result is AutoOfferResult.WAITING
+    assert outcome.visited_order_ids == ("order-1",)
+    assert len(bridge.buff_adapter.calls) == 1
+    assert len(bridge.steam_adapter.calls) == 1
+    assert len(bridge.confirm_adapter.calls) == 1
+    attempt_event = (
+        "advance",
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+    )
+    confirm_event = ("confirm", DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED)
+    assert bridge.events.index(attempt_event) < bridge.events.index(confirm_event)
+    assert bridge.current["order-1"].snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
 
 
 def test_normal_send_is_one_host_barrier_action_and_stops_at_result_unknown(
@@ -997,13 +1273,26 @@ def test_recovery_only_tick_is_bounded_and_cursor_fair(monkeypatch, tmp_path):
     monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
     orders = tuple(f"order-{index:02d}" for index in range(10))
     unknowns = tuple(
-        _stored(
+        StoredDelivery(
+            replace(
+                unknown.snapshot,
+                steam_tradeoffer_id=(f"offer-{order}" if index % 2 else None),
+                counterparty_steam_id=(
+                    "76561198000000002" if index % 2 else None
+                ),
+                offer_sent_at=(10.0 if index % 2 else None),
+            ),
+            unknown.revision,
+        )
+        for index, order in enumerate(orders)
+        for unknown in (
+            _stored(
             order,
             status=DeliveryStatus.RESULT_UNKNOWN,
             mode=DeliveryMode.BUYER_SENDS_OFFER,
             revision=3,
+            ),
         )
-        for order in orders
     )
     bridge = FakeBridge(unknowns)
     integration = host_integration.HostAutoOfferIntegration(bridge)
@@ -1026,10 +1315,12 @@ def test_recovery_only_tick_is_bounded_and_cursor_fair(monkeypatch, tmp_path):
         "order-05",
     )
     assert bridge.steps == []
-    assert len(bridge.recoveries) == 16
+    assert len(bridge.recoveries) + len(bridge.confirmation_recoveries) == 16
+    assert bridge.recoveries
+    assert bridge.confirmation_recoveries
 
 
-def test_bound_confirmation_result_unknown_is_not_c2a_auto_recovered(
+def test_bound_confirmation_result_unknown_uses_only_c2b_read_recovery(
     monkeypatch,
     tmp_path,
 ):
@@ -1062,9 +1353,134 @@ def test_bound_confirmation_result_unknown_is_not_c2a_auto_recovered(
     outcome = integration.run_delivery_tick([_host_row("order-1")])
 
     assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
-    assert outcome.visited_order_ids == ()
+    assert outcome.visited_order_ids == ("order-1",)
     assert bridge.recoveries == []
+    assert bridge.confirmation_recoveries == [
+        ("order-1", DeliveryStatus.RESULT_UNKNOWN)
+    ]
     assert bridge.steps == []
+
+
+def test_bound_confirmation_result_unknown_recovers_read_only(monkeypatch, tmp_path):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=6,
+    )
+    bound = StoredDelivery(
+        replace(
+            unknown.snapshot,
+            steam_tradeoffer_id="offer-1",
+            counterparty_steam_id="76561198000000002",
+            offer_sent_at=10.0,
+        ),
+        unknown.revision,
+    )
+    bridge = ExactConfirmationRecoveryBridge((bound,))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick([_host_row("order-1")])
+
+    assert outcome.result is AutoOfferResult.WAITING
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.recoveries == []
+    assert bridge.confirmation_recoveries == [
+        ("order-1", DeliveryStatus.RESULT_UNKNOWN)
+    ]
+    assert bridge.steps == []
+    assert bridge.current["order-1"].snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+
+
+@pytest.mark.parametrize("host_present,checkout_resolved", [(False, True), (True, False)])
+def test_confirmation_unknown_host_or_checkout_precondition_blocks_before_read(
+    monkeypatch,
+    tmp_path,
+    host_present,
+    checkout_resolved,
+):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: checkout_resolved),
+    )
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=6,
+    )
+    bound = StoredDelivery(
+        replace(
+            unknown.snapshot,
+            steam_tradeoffer_id="offer-1",
+            counterparty_steam_id="76561198000000002",
+            offer_sent_at=10.0,
+        ),
+        unknown.revision,
+    )
+    bridge = ExactConfirmationRecoveryBridge((bound,))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+    rows = [_host_row("order-1")] if host_present else []
+
+    outcome = integration.run_delivery_tick(rows, cursor="order-0")
+
+    expected = AutoOfferResult.RESULT_UNKNOWN if host_present else AutoOfferResult.BLOCKED
+    assert outcome.result is expected
+    assert outcome.next_cursor == "order-0"
+    assert outcome.visited_order_ids == ()
+    assert bridge.confirmation_recoveries == []
+    assert bridge.steps == []
+    assert bridge.current["order-1"] == bound
+
+
+def test_malformed_confirmation_unknown_recovery_blocks(monkeypatch, tmp_path):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=6,
+    )
+    bound = StoredDelivery(
+        replace(
+            unknown.snapshot,
+            steam_tradeoffer_id="offer-1",
+            counterparty_steam_id="76561198000000002",
+            offer_sent_at=10.0,
+        ),
+        unknown.revision,
+    )
+    bridge = ExactConfirmationRecoveryBridge((bound,), malformed=True)
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick([_host_row("order-1")])
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.confirmation_recoveries == [
+        ("order-1", DeliveryStatus.RESULT_UNKNOWN)
+    ]
+    assert bridge.steps == []
+    assert bridge.current["order-1"] == bound
 
 
 def test_offer_terminated_quarantine_does_not_starve_later_safe_order(monkeypatch):
@@ -1135,7 +1551,7 @@ def test_safe_wait_advances_cursor_and_allows_following_order(monkeypatch):
     _patch_identity(monkeypatch)
     waiting = _stored(
         "order-1",
-        status=DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        status=DeliveryStatus.OFFER_TERMINATED,
         mode=DeliveryMode.BUYER_SENDS_OFFER,
         revision=2,
     )

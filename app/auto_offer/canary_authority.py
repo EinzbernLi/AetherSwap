@@ -349,7 +349,7 @@ class CanaryAuthority:
         self._normal_runtime_guard_depth = 0
         self._normal_external_write_depth = 0
         self._normal_active_write: CanaryWriteTarget | None = None
-        self._normal_send_refinement_consumed = False
+        self._normal_write_refinement_consumed = False
         self._thread_lock = threading.RLock()
 
     @property
@@ -619,9 +619,9 @@ class CanaryAuthority:
                 connection.close()
 
     @staticmethod
-    def _require_normal_send_target(target: CanaryWriteTarget) -> None:
+    def _require_normal_delivery_target(target: CanaryWriteTarget) -> None:
         if (
-            target.action != "auto_offer_send"
+            target.action not in {"auto_offer_send", "auto_offer_confirm"}
             or target.purchase_id is None
             or target.buff_order_id is None
             or target.purchase_id != f"buff:{target.buff_order_id}"
@@ -630,7 +630,12 @@ class CanaryAuthority:
             or target.host_db_id is None
             or target.assetid is not None
         ):
-            raise CanaryWriteBlockedError("normal_send_target_invalid")
+            detail = (
+                "normal_send_target_invalid"
+                if target.action == "auto_offer_send"
+                else "normal_confirm_target_invalid"
+            )
+            raise CanaryWriteBlockedError(detail)
         _exact_steam_id(
             target.recipient_steam_id,
             field="recipient_steam_id",
@@ -775,15 +780,18 @@ class CanaryAuthority:
             and target.assetid == outer.assetid
         )
 
-    def _nested_normal_send_refinement_allowed(
+    def _nested_normal_write_refinement_allowed(
         self,
         target: CanaryWriteTarget,
     ) -> bool:
         outer = self._normal_active_write
-        if outer is None or outer.action != "auto_offer_send":
+        if outer is None or outer.action not in {
+            "auto_offer_send",
+            "auto_offer_confirm",
+        }:
             return False
         return (
-            target.action == "auto_offer_send"
+            target.action == outer.action
             and target.purchase_id == outer.purchase_id
             and target.buff_order_id == outer.buff_order_id
             and target.account_id == outer.account_id
@@ -797,12 +805,12 @@ class CanaryAuthority:
         self,
         target: CanaryWriteTarget,
     ) -> Iterator[None]:
-        """Hold one exact normal Host row barrier across one buyer SEND."""
+        """Hold one exact normal Host row barrier across one buyer write."""
 
         if type(target) is not CanaryWriteTarget:
             raise CanaryAuthorityError("invalid_write_target")
         CanaryWriteTarget.__post_init__(target)
-        self._require_normal_send_target(target)
+        self._require_normal_delivery_target(target)
         with self._thread_lock:
             if self._owner_handle is not None:
                 raise CanaryWriteBlockedError("canary_authority_active")
@@ -813,13 +821,13 @@ class CanaryAuthority:
             if self._normal_active_write is not None:
                 raise CanaryWriteBlockedError("normal_write_reentry_forbidden")
             self._normal_active_write = target
-            self._normal_send_refinement_consumed = False
+            self._normal_write_refinement_consumed = False
             try:
                 with self._normal_host_db_write_barrier(target):
                     yield
             finally:
                 self._normal_active_write = None
-                self._normal_send_refinement_consumed = False
+                self._normal_write_refinement_consumed = False
 
     @contextmanager
     def _owner_session_external_write_guard(self, capability: object, target: CanaryWriteTarget) -> Iterator[None]:
@@ -855,11 +863,16 @@ class CanaryAuthority:
                     return
                 raise CanaryWriteBlockedError("canary_owner_session_required")
             if self._normal_active_write is not None:
-                if not self._nested_normal_send_refinement_allowed(target):
+                if not self._nested_normal_write_refinement_allowed(target):
                     raise CanaryWriteBlockedError("normal_write_refinement_mismatch")
-                if self._normal_send_refinement_consumed:
-                    raise CanaryWriteBlockedError("normal_send_already_consumed")
-                self._normal_send_refinement_consumed = True
+                if self._normal_write_refinement_consumed:
+                    detail = (
+                        "normal_send_already_consumed"
+                        if target.action == "auto_offer_send"
+                        else "normal_confirm_already_consumed"
+                    )
+                    raise CanaryWriteBlockedError(detail)
+                self._normal_write_refinement_consumed = True
                 yield
                 return
             if target.action in {"auto_offer_send", "auto_offer_confirm"}:

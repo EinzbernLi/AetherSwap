@@ -526,8 +526,10 @@ def test_completed_session_disables_writes_and_completion_requires_no_pending_ho
     session.release_keep_fence()
 
 
-def test_normal_send_barrier_requires_runtime_guard_and_allows_unrelated_pending_rows(
+@pytest.mark.parametrize("action", ["auto_offer_send", "auto_offer_confirm"])
+def test_normal_delivery_barrier_requires_runtime_guard_and_allows_unrelated_pending_rows(
     tmp_path,
+    action,
 ):
     db_path = _host_db(
         tmp_path / "host.db",
@@ -537,7 +539,7 @@ def test_normal_send_barrier_requires_runtime_guard_and_allows_unrelated_pending
         _root=tmp_path / "authority",
         _host_db_path=db_path,
     )
-    outer = _target("auto_offer_send", db_id=7)
+    outer = _target(action, db_id=7)
     calls = []
 
     with pytest.raises(CanaryWriteBlockedError, match="normal_runtime_guard_required"):
@@ -569,17 +571,22 @@ def test_normal_send_barrier_requires_runtime_guard_and_allows_unrelated_pending
 
 
 @pytest.mark.parametrize(
-    "rows,db_id,reason",
+    "action,rows,db_id,reason",
     [
-        ((), 7, "normal_host_target_missing"),
-        (((7, "wrong-order", 1, None),), 7, "normal_host_target_mismatch"),
-        (((7, ORDER_ID, 0, None),), 7, "normal_host_target_mismatch"),
-        (((7, ORDER_ID, 1, "asset-present"),), 7, "normal_host_target_mismatch"),
-        (((7, ORDER_ID, 1, None),), 8, "normal_host_target_missing"),
+        (action, rows, db_id, reason)
+        for action in ("auto_offer_send", "auto_offer_confirm")
+        for rows, db_id, reason in (
+            ((), 7, "normal_host_target_missing"),
+            (((7, "wrong-order", 1, None),), 7, "normal_host_target_mismatch"),
+            (((7, ORDER_ID, 0, None),), 7, "normal_host_target_mismatch"),
+            (((7, ORDER_ID, 1, "asset-present"),), 7, "normal_host_target_mismatch"),
+            (((7, ORDER_ID, 1, None),), 8, "normal_host_target_missing"),
+        )
     ],
 )
-def test_normal_send_barrier_rejects_missing_or_changed_exact_host_target(
+def test_normal_delivery_barrier_rejects_missing_or_changed_exact_host_target(
     tmp_path,
+    action,
     rows,
     db_id,
     reason,
@@ -593,33 +600,45 @@ def test_normal_send_barrier_rejects_missing_or_changed_exact_host_target(
     with authority.runtime_guard():
         with pytest.raises(CanaryWriteBlockedError, match=reason):
             with authority.normal_delivery_write_guard(
-                _target("auto_offer_send", db_id=db_id)
+                _target(action, db_id=db_id)
             ):
-                calls.append("send")
+                calls.append(action)
     assert calls == []
 
 
-def test_normal_send_nested_refinement_is_exact_send_only_and_single_use(tmp_path):
+@pytest.mark.parametrize(
+    "action,other_action,duplicate_reason",
+    [
+        ("auto_offer_send", "auto_offer_confirm", "normal_send_already_consumed"),
+        ("auto_offer_confirm", "auto_offer_send", "normal_confirm_already_consumed"),
+    ],
+)
+def test_normal_nested_refinement_is_action_identity_exact_and_single_use(
+    tmp_path,
+    action,
+    other_action,
+    duplicate_reason,
+):
     db_path = _host_db(tmp_path / "host.db")
     authority = CanaryAuthority(
         _root=tmp_path / "authority",
         _host_db_path=db_path,
     )
-    outer = _target("auto_offer_send", db_id=7)
-    exact_inner = _target("auto_offer_send")
+    outer = _target(action, db_id=7)
+    exact_inner = _target(action)
     calls = []
 
     with authority.runtime_guard():
         with authority.normal_delivery_write_guard(outer):
             for mismatch in (
-                _target("auto_offer_send", order_id="other-order"),
+                _target(action, order_id="other-order"),
                 dataclasses.replace(exact_inner, purchase_id="buff:other-order"),
                 dataclasses.replace(exact_inner, account_id="other-account"),
                 dataclasses.replace(
                     exact_inner,
                     recipient_steam_id="76561198000000009",
                 ),
-                _target("auto_offer_confirm"),
+                _target(other_action),
                 _target("host_receipt", db_id=7, assetid="asset-7"),
                 CanaryWriteTarget(action="buff_purchase"),
             ):
@@ -631,8 +650,8 @@ def test_normal_send_nested_refinement_is_exact_send_only_and_single_use(tmp_pat
                         calls.append("mismatch")
 
             with authority.external_write_guard(exact_inner):
-                calls.append("send")
-            with pytest.raises(CanaryWriteBlockedError, match="normal_send_already_consumed"):
+                calls.append(action)
+            with pytest.raises(CanaryWriteBlockedError, match=duplicate_reason):
                 with authority.external_write_guard(exact_inner):
                     calls.append("duplicate")
 
@@ -642,17 +661,21 @@ def test_normal_send_nested_refinement_is_exact_send_only_and_single_use(tmp_pat
                 ):
                     calls.append("accept")
 
-    assert calls == ["send"]
+    assert calls == [action]
 
 
-def test_active_and_stale_canary_authority_block_normal_send_barrier(tmp_path):
+@pytest.mark.parametrize("action", ["auto_offer_send", "auto_offer_confirm"])
+def test_active_and_stale_canary_authority_block_normal_delivery_barrier(
+    tmp_path,
+    action,
+):
     db_path = _host_db(tmp_path / "host.db")
     authority = CanaryAuthority(
         _root=tmp_path / "authority",
         _host_db_path=db_path,
     )
     session = authority._arm_owner_session(_permit())
-    target = _target("auto_offer_send", db_id=7)
+    target = _target(action, db_id=7)
 
     with pytest.raises(CanaryAuthorityBusyError, match="canary_authority_active"):
         with authority.runtime_guard():
@@ -725,7 +748,7 @@ def test_coordinator_persists_send_attempt_before_fenced_adapter_call():
     assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
 
 
-def test_coordinator_persists_confirmation_attempt_before_fenced_adapter_call():
+def test_normal_snapshot_confirmation_blocks_before_fenced_adapter_call():
     from app.auto_offer.adapters import PlatformCapability
     from app.auto_offer.coordinator import DeliveryCoordinator, ReadOnlyCoordinatorBlockedError
 
@@ -770,7 +793,10 @@ def test_coordinator_persists_confirmation_attempt_before_fenced_adapter_call():
         allow_confirmation_writes=True,
         write_guard=blocked,
     )
-    with pytest.raises(ReadOnlyCoordinatorBlockedError, match="canary_write_blocked"):
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="normal_confirmation_authority_required",
+    ):
         coordinator.step(item)
     assert adapter.calls == []
-    assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
+    assert store.current == item
