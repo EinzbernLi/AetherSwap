@@ -762,6 +762,11 @@ def test_exact_result_unknown_recovery_ends_tick_before_normal_progression(
     tmp_path,
 ):
     _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
     authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
     monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
     unknown = _stored(
@@ -787,11 +792,135 @@ def test_exact_result_unknown_recovery_ends_tick_before_normal_progression(
     assert recovered.counterparty_steam_id == "76561198000000002"
 
 
+def test_missing_host_row_blocks_before_result_unknown_recovery(monkeypatch, tmp_path):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = ExactRecoveryBridge((unknown,))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick([])
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert outcome.visited_order_ids == ()
+    assert bridge.recoveries == []
+    assert bridge.steps == []
+    assert bridge.current["order-1"] == unknown
+
+
+def test_extra_host_pending_order_blocks_before_result_unknown_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = ExactRecoveryBridge((unknown,))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=1), _host_row("order-2", db_id=2)]
+    )
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert outcome.visited_order_ids == ()
+    assert bridge.recoveries == []
+    assert bridge.steps == []
+    assert bridge.current["order-1"] == unknown
+
+
+def test_extra_store_order_blocks_before_result_unknown_recovery(monkeypatch, tmp_path):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    extra = _stored("order-2")
+    bridge = ExactRecoveryBridge((unknown, extra))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick([_host_row("order-1")])
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert outcome.visited_order_ids == ()
+    assert bridge.recoveries == []
+    assert bridge.steps == []
+    assert bridge.current["order-1"] == unknown
+    assert bridge.current["order-2"] == extra
+
+
+def test_unresolved_checkout_defers_result_unknown_recovery_without_progression(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: False),
+    )
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = ExactRecoveryBridge((unknown,))
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    outcome = integration.run_delivery_tick([_host_row("order-1")], cursor="order-0")
+
+    assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
+    assert outcome.next_cursor == "order-0"
+    assert outcome.visited_order_ids == ()
+    assert bridge.recoveries == []
+    assert bridge.steps == []
+    assert bridge.current["order-1"] == unknown
+
+
 def test_malformed_result_unknown_recovery_blocks_without_other_progression(
     monkeypatch,
     tmp_path,
 ):
     _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
     authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
     monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
     unknown = _stored(
@@ -816,6 +945,11 @@ def test_malformed_result_unknown_recovery_blocks_without_other_progression(
 
 def test_recovery_only_tick_is_bounded_and_cursor_fair(monkeypatch, tmp_path):
     _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
     authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
     monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
     orders = tuple(f"order-{index:02d}" for index in range(10))
@@ -857,6 +991,11 @@ def test_bound_confirmation_result_unknown_is_not_c2a_auto_recovered(
     tmp_path,
 ):
     _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration.HostAutoOfferIntegration,
+        "_checkout_is_resolved",
+        staticmethod(lambda: True),
+    )
     authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
     monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
     unknown = _stored(
