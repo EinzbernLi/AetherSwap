@@ -142,6 +142,7 @@ class _SourceFingerprint:
     inode: int | None
     size: int | None
     mtime_ns: int | None
+    ctime_ns: int | None
     sha256: str | None
 
 
@@ -327,7 +328,7 @@ class AutoOfferStore:
 
             cls._begin(connection)
             try:
-                cls._assert_main_source_identity(path, approved_main)
+                cls._assert_main_source_approval(path, approved_main)
                 cls._validate_v1_schema(connection)
                 live_rows = cls._validate_v1_rows(connection)
                 if live_rows != approved_rows:
@@ -472,7 +473,7 @@ class AutoOfferStore:
                 if candidate.is_symlink():
                     raise AutoOfferStoreError("invalid Auto Offer source file")
                 if not candidate.exists():
-                    fingerprints.append(_SourceFingerprint(False, None, None, None, None, None))
+                    fingerprints.append(_SourceFingerprint(False, None, None, None, None, None, None))
                     continue
                 if not candidate.is_file():
                     raise AutoOfferStoreError("invalid Auto Offer source file")
@@ -484,6 +485,7 @@ class AutoOfferStore:
                         getattr(stat, "st_ino", None),
                         stat.st_size,
                         stat.st_mtime_ns,
+                        getattr(stat, "st_ctime_ns", None),
                         cls._hash_source_file(candidate),
                     )
                 )
@@ -858,6 +860,71 @@ class AutoOfferStore:
             raise AutoOfferStoreError(
                 "cannot open existing Auto Offer source"
             ) from exc
+
+    @classmethod
+    def _assert_main_source_approval(
+        cls,
+        path: Path,
+        approved: _SourceFingerprint,
+    ) -> None:
+        if (
+            not approved.exists
+            or approved.device is None
+            or approved.inode is None
+            or approved.size is None
+            or approved.mtime_ns is None
+            or approved.ctime_ns is None
+            or approved.sha256 is None
+        ):
+            raise AutoOfferStoreError(
+                "cannot prove existing Auto Offer source identity"
+            )
+
+        try:
+            if path.is_symlink() or not path.exists() or not path.is_file():
+                raise AutoOfferStoreError(
+                    "Auto Offer source identity changed before migration"
+                )
+            before = path.stat()
+            sha256 = cls._hash_source_file(path)
+            after = path.stat()
+        except AutoOfferStoreError:
+            raise
+        except OSError as exc:
+            raise AutoOfferStoreError(
+                "cannot verify Auto Offer source identity"
+            ) from exc
+
+        before_identity = (
+            getattr(before, "st_dev", None),
+            getattr(before, "st_ino", None),
+            before.st_size,
+            before.st_mtime_ns,
+            getattr(before, "st_ctime_ns", None),
+        )
+        after_identity = (
+            getattr(after, "st_dev", None),
+            getattr(after, "st_ino", None),
+            after.st_size,
+            after.st_mtime_ns,
+            getattr(after, "st_ctime_ns", None),
+        )
+        approved_identity = (
+            approved.device,
+            approved.inode,
+            approved.size,
+            approved.mtime_ns,
+            approved.ctime_ns,
+        )
+
+        if before_identity != after_identity or after_identity != approved_identity:
+            raise AutoOfferStoreError(
+                "Auto Offer source identity changed before migration"
+            )
+        if sha256 != approved.sha256:
+            raise AutoOfferStoreError(
+                "Auto Offer source identity changed before migration"
+            )
 
     @staticmethod
     def _assert_main_source_identity(

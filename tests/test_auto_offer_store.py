@@ -354,6 +354,42 @@ def test_source_replacement_is_rejected_under_live_write_custody(tmp_path, monke
     assert_v1_source(path, purchase_id="replacement-purchase")
 
 
+def test_same_logical_source_replacement_is_rejected_before_migration(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "auto_offer.db"
+    create_v1_source(path)
+    original_open = AutoOfferStore._open_existing_rw
+
+    def replace_same_logical_source_then_open(candidate):
+        previous = path.stat()
+        path.unlink()
+        create_v1_source(path)
+        replacement = path.stat()
+        # Force a metadata distinction even on filesystems with aggressive
+        # inode reuse/coarse timestamp behavior; persisted logical rows remain
+        # unchanged.
+        import os
+
+        os.utime(
+            path,
+            ns=(replacement.st_atime_ns, previous.st_mtime_ns + 1_000_000_000),
+        )
+        return original_open(candidate)
+
+    monkeypatch.setattr(
+        AutoOfferStore,
+        "_open_existing_rw",
+        staticmethod(replace_same_logical_source_then_open),
+    )
+
+    with pytest.raises(AutoOfferStoreError, match="identity changed"):
+        AutoOfferStore.migrate_existing_v1_to_v2(path)
+
+    assert_v1_source(path)
+
+
 def test_injected_failure_after_alter_rolls_back_to_valid_v1(tmp_path, monkeypatch):
     path = tmp_path / "auto_offer.db"
     create_v1_source(path)
