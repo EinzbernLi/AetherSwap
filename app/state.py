@@ -5,6 +5,10 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Deque, List, Optional
 from app.auto_offer.canary_authority import external_write_guard
+from app.auto_offer.host_ownership import (
+    require_broad_transaction_mutation_allowed,
+    require_purchase_mutation_allowed,
+)
 from app.database import (
     db_append_purchase,
     db_append_sale,
@@ -72,23 +76,63 @@ class State:
         return db_get_sales()
     def clear_transactions(self) -> None:
         with external_write_guard("host_transaction_mutation"):
+            current_purchases = db_get_purchases()
+            require_broad_transaction_mutation_allowed(current_purchases)
             db_clear_transactions()
     def reload_transactions(self) -> None:
         pass  # Replaced by direct SQLite queries
     def replace_transactions(self, purchases: List[dict], sales: List[dict]) -> None:
         with external_write_guard("host_transaction_mutation"):
+            current_purchases = db_get_purchases()
+            require_broad_transaction_mutation_allowed(
+                current_purchases,
+                proposed_purchases=purchases,
+            )
             db_replace_transactions(purchases, sales)
     def delete_purchase(self, idx: int) -> bool:
         with external_write_guard("host_transaction_mutation"):
+            purchases = db_get_purchases()
+            if type(idx) is not int or idx < 0 or idx >= len(purchases):
+                return False
+            require_purchase_mutation_allowed(
+                purchases[idx],
+                operation="delete",
+            )
             return db_delete_purchase(idx)
     def delete_sale(self, idx: int) -> bool:
         with external_write_guard("host_transaction_mutation"):
             return db_delete_sale(idx)
     def update_purchase(self, idx: int, data: dict) -> bool:
         with external_write_guard("host_transaction_mutation"):
+            purchases = db_get_purchases()
+            if type(idx) is not int or idx < 0 or idx >= len(purchases):
+                return False
+            require_purchase_mutation_allowed(
+                purchases[idx],
+                operation="update",
+                data=data,
+            )
             return db_update_purchase(idx, data)
     def update_purchase_by_id(self, db_id: int, data: dict) -> bool:
         with external_write_guard("host_transaction_mutation"):
+            if type(db_id) is not int or db_id <= 0:
+                return False
+            purchases = db_get_purchases()
+            purchase = next(
+                (
+                    item
+                    for item in purchases
+                    if item.get("_db_id") == db_id
+                ),
+                None,
+            )
+            if purchase is None:
+                return False
+            require_purchase_mutation_allowed(
+                purchase,
+                operation="update",
+                data=data,
+            )
             return db_update_purchase_by_id(db_id, data)
     def complete_purchase_receipt_by_id(
         self,
@@ -105,6 +149,23 @@ class State:
             return db_complete_purchase_receipt_by_id(db_id, buff_order_id, assetid)
     def delete_purchase_by_id(self, db_id: int) -> bool:
         with external_write_guard("host_transaction_mutation"):
+            if type(db_id) is not int or db_id <= 0:
+                return False
+            purchases = db_get_purchases()
+            purchase = next(
+                (
+                    item
+                    for item in purchases
+                    if item.get("_db_id") == db_id
+                ),
+                None,
+            )
+            if purchase is None:
+                return False
+            require_purchase_mutation_allowed(
+                purchase,
+                operation="delete",
+            )
             return db_delete_purchase_by_id(db_id)
     def update_sale(self, idx: int, data: dict) -> bool:
         with external_write_guard("host_transaction_mutation"):

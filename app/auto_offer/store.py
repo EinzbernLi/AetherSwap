@@ -184,6 +184,114 @@ class AutoOfferStore:
             except sqlite3.DatabaseError as exc:
                 raise AutoOfferStoreError("cannot close Auto Offer database") from exc
 
+    @classmethod
+    def inspect_existing_by_buff_order_id(
+        cls,
+        db_path: str | Path,
+        buff_order_id: str,
+    ) -> StoredDelivery | None:
+        """Read one current v2 row without creating, migrating, or writing Store state."""
+        if (
+            type(buff_order_id) is not str
+            or not buff_order_id
+            or buff_order_id.strip() != buff_order_id
+            or any(ord(character) < 32 for character in buff_order_id)
+        ):
+            raise AutoOfferStoreError("buff_order_id must be a non-whitespace ID")
+        connection = cls._open_existing_readonly(db_path)
+        if connection is None:
+            return None
+        try:
+            rows = connection.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM {_TABLE_NAME} WHERE buff_order_id = ?",
+                (buff_order_id,),
+            ).fetchall()
+            if len(rows) > 1:
+                raise AutoOfferStoreCorruptError(
+                    "buff_order_id maps to multiple persisted rows"
+                )
+            return None if not rows else cls._row_to_stored(rows[0])
+        except AutoOfferStoreError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise AutoOfferStoreCorruptError(
+                "SQLite rejected read-only buff_order_id lookup"
+            ) from exc
+        finally:
+            cls._close_readonly(connection)
+
+    @classmethod
+    def inspect_existing(cls, db_path: str | Path) -> list[StoredDelivery]:
+        """Read every current v2 row without initializing or mutating the Store."""
+        connection = cls._open_existing_readonly(db_path)
+        if connection is None:
+            return []
+        try:
+            rows = connection.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM {_TABLE_NAME} ORDER BY id ASC"
+            ).fetchall()
+            return [cls._row_to_stored(row) for row in rows]
+        except AutoOfferStoreError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise AutoOfferStoreCorruptError(
+                "SQLite rejected read-only Store inspection"
+            ) from exc
+        finally:
+            cls._close_readonly(connection)
+
+    @classmethod
+    def _open_existing_readonly(
+        cls,
+        db_path: str | Path,
+    ) -> sqlite3.Connection | None:
+        path = Path(db_path)
+        if not path.exists():
+            return None
+        try:
+            uri = f"{path.resolve().as_uri()}?mode=ro"
+            connection = sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=5.0,
+                isolation_level=None,
+            )
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise AutoOfferStoreError("cannot open existing Auto Offer database read-only") from exc
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            if connection.execute("PRAGMA query_only").fetchone()[0] != 1:
+                raise AutoOfferStoreCorruptError("SQLite query_only was not enabled")
+            connection.execute("PRAGMA trusted_schema = OFF")
+            trusted = connection.execute("PRAGMA trusted_schema").fetchone()
+            if trusted is None or trusted[0] != 0:
+                raise AutoOfferStoreCorruptError("SQLite trusted_schema was not disabled")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            if connection.execute("PRAGMA busy_timeout").fetchone()[0] != 5000:
+                raise AutoOfferStoreCorruptError("SQLite busy timeout was not enabled")
+            if (
+                cls._user_version(connection) != AUTO_OFFER_STORE_SCHEMA_VERSION
+                or cls._user_tables(connection) != {_TABLE_NAME}
+            ):
+                raise AutoOfferStoreSchemaError("Auto Offer schema does not match v2")
+            cls._validate_table_shape(connection, _EXPECTED_COLUMNS, "v2")
+            return connection
+        except AutoOfferStoreError:
+            cls._close_readonly(connection)
+            raise
+        except sqlite3.DatabaseError as exc:
+            cls._close_readonly(connection)
+            raise AutoOfferStoreCorruptError(
+                "SQLite rejected read-only Auto Offer inspection"
+            ) from exc
+
+    @staticmethod
+    def _close_readonly(connection: sqlite3.Connection) -> None:
+        try:
+            connection.close()
+        except sqlite3.DatabaseError as exc:
+            raise AutoOfferStoreError("cannot close read-only Auto Offer database") from exc
+
     def ensure_initial(self, snapshot: DeliverySnapshot) -> StoredDelivery:
         """Insert one pending-direction delivery, or return its exact duplicate."""
 
