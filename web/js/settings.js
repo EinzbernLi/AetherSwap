@@ -34,6 +34,7 @@ async function loadConfig() {
   const s = c.stability || {};
   const inv = c.inventory || {};
   const sys = c.system || {};
+  const ao = c.auto_offer || {};
   const gGames = el("cfg-games");
   if (gGames) gGames.value = i.type || i.games || "";
   const gPlatforms = el("cfg-platforms");
@@ -48,6 +49,8 @@ async function loadConfig() {
   if (gMinVolume) gMinVolume.value = i.min_volume ?? "";
   const gPay = el("cfg-pay_method");
   if (gPay) gPay.value = (b.pay_method || "wechat").toLowerCase();
+  const gAutoOffer = el("cfg-auto-offer-enabled");
+  if (gAutoOffer) gAutoOffer.checked = ao.enabled === true;
   const gTarget = el("cfg-target_balance");
   if (gTarget) gTarget.value = p.target_balance ?? "";
   const gMaxDisc = el("cfg-max_discount");
@@ -219,6 +222,9 @@ function formToConfig() {
       pay_method: el("cfg-pay_method") ? el("cfg-pay_method").value : undefined,
       game: el("cfg-buff-game") ? el("cfg-buff-game").value.trim() : undefined,
       price_tolerance: el("cfg-price_tolerance") ? parseFloat(el("cfg-price_tolerance").value) || undefined : undefined,
+    },
+    auto_offer: {
+      enabled: !!el("cfg-auto-offer-enabled")?.checked,
     },
     pipeline: {
       target_balance: el("cfg-target_balance") ? parseFloat(el("cfg-target_balance").value) || undefined : undefined,
