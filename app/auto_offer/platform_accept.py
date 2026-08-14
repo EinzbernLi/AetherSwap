@@ -95,7 +95,7 @@ class SteamIncomingOfferAcceptAdapter:
         *,
         account_id: str,
         recipient_steam_id: str,
-        expected_counterparty_steam_id: str,
+        expected_counterparty_steam_id: str | None = None,
     ) -> None:
         if not callable(getattr(transport, "accept", None)):
             raise PlatformAdapterProtocolError("invalid_accept_transport")
@@ -105,9 +105,13 @@ class SteamIncomingOfferAcceptAdapter:
             recipient_steam_id,
             "recipient_steam_id",
         )
-        self._counterparty_steam_id = _canonical_steam_id(
-            expected_counterparty_steam_id,
-            "expected_counterparty_steam_id",
+        self._counterparty_steam_id = (
+            None
+            if expected_counterparty_steam_id is None
+            else _canonical_steam_id(
+                expected_counterparty_steam_id,
+                "expected_counterparty_steam_id",
+            )
         )
         if self._recipient_steam_id == self._counterparty_steam_id:
             raise PlatformAdapterProtocolError(
@@ -141,6 +145,11 @@ class SteamIncomingOfferAcceptAdapter:
         if (
             request.account_id != self._account_id
             or request.recipient_steam_id != self._recipient_steam_id
+            or (
+                self._counterparty_steam_id is not None
+                and request.counterparty_steam_id
+                != self._counterparty_steam_id
+            )
         ):
             return _result(
                 request,
@@ -152,7 +161,7 @@ class SteamIncomingOfferAcceptAdapter:
             response = self._transport.accept(
                 steam_tradeoffer_id=request.steam_tradeoffer_id or "",
                 account_steam_id=request.recipient_steam_id,
-                counterparty_steam_id=self._counterparty_steam_id,
+                counterparty_steam_id=request.counterparty_steam_id or "",
                 timeout_seconds=request.timeout_seconds,
             )
         except AcceptOfferPreflightError:
@@ -185,8 +194,8 @@ class SteamIncomingOfferAcceptAdapter:
         if response.get("accepted") is False:
             return _result(
                 request,
-                PlatformResultStatus.FAILURE,
-                "accept_rejected",
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "write_result_unknown",
             )
         if response.get("accepted") is not True:
             return _result(

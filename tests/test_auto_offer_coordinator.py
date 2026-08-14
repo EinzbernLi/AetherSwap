@@ -2259,6 +2259,9 @@ def seller_authority_coordinator(
     steam_evidence=None,
     buff_result_factory=None,
     steam_result_factory=None,
+    accept_adapter=None,
+    allow_accept_writes=False,
+    write_guard=None,
     order_log=None,
 ):
     from app.auto_offer.coordinator import DeliveryCoordinator
@@ -2292,13 +2295,19 @@ def seller_authority_coordinator(
         {PlatformCapability.READ_STEAM_TRADE_OFFER},
         steam_result_factory or steam_success,
     )
+    adapters = {
+        PlatformCapability.READ_SELLER_OFFER_ITEM: buff_adapter,
+        PlatformCapability.READ_STEAM_TRADE_OFFER: steam_adapter,
+    }
+    if accept_adapter is not None:
+        adapters[PlatformCapability.ACCEPT_OFFER] = accept_adapter
     coordinator = DeliveryCoordinator(
         store,
-        {
-            PlatformCapability.READ_SELLER_OFFER_ITEM: buff_adapter,
-            PlatformCapability.READ_STEAM_TRADE_OFFER: steam_adapter,
-        },
+        adapters,
         timeout_seconds=1.0,
+        allow_writes=allow_accept_writes,
+        allow_accept_writes=allow_accept_writes,
+        write_guard=write_guard,
     )
     return coordinator, buff_adapter, steam_adapter
 
@@ -2592,14 +2601,286 @@ def test_persisted_snapshot_alone_cannot_mint_seller_proof():
     assert steam_adapter.calls == []
 
 
-def test_c3b1_adds_zero_accept_write_or_consumer():
+def test_c3b2_accept_is_explicitly_enabled_and_snapshot_step_stays_readonly():
     import app.auto_offer.coordinator as coordinator_module
+    from app.auto_offer.coordinator import DeliveryCoordinator
 
     assert (
         PlatformCapability.ACCEPT_OFFER
-        not in coordinator_module._WRITE_CAPABILITIES
+        in coordinator_module._WRITE_CAPABILITIES
     )
-    assert not hasattr(
+    assert hasattr(
         coordinator_module.DeliveryCoordinator,
         "accept_offer_with_authority",
     )
+    accept_adapter = SpyAdapter(
+        {PlatformCapability.ACCEPT_OFFER},
+        error=AssertionError("ordinary step must not ACCEPT"),
+    )
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    coordinator, _, steam_adapter = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+
+    result = coordinator.step(item)
+
+    assert result.persisted is False
+    assert result.after == item
+    assert len(steam_adapter.calls) == 1
+    assert accept_adapter.calls == []
+
+    with pytest.raises(ReadOnlyCoordinatorError, match="accept_writes_require_allow_writes"):
+        DeliveryCoordinator(
+            store,
+            {},
+            timeout_seconds=1.0,
+            allow_accept_writes=True,
+        )
+
+
+def test_seller_proof_consumption_persists_attempt_before_exactly_one_accept():
+    item = seller_offer_confirmed()
+    events = []
+    store = RecordingStore(item, events=events)
+
+    def accept_unknown(request):
+        assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_ACCEPT_ATTEMPTED
+        events.append(("accept", request.revision, request.counterparty_steam_id))
+        return PlatformResult(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "write_result_unknown",
+        )
+
+    accept_adapter = SpyAdapter(
+        {PlatformCapability.ACCEPT_OFFER},
+        accept_unknown,
+    )
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+    proof = coordinator.read_seller_accept_authority(
+        item,
+        SELLER_GOODS_ID,
+    ).proof
+
+    result = coordinator.accept_offer_with_authority(item, proof)
+
+    assert result.attempted.snapshot.delivery_status is DeliveryStatus.OFFER_ACCEPT_ATTEMPTED
+    assert result.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+    assert result.after.snapshot.delivery_error == "write_result_unknown"
+    assert len(accept_adapter.calls) == 1
+    request = accept_adapter.calls[0]
+    assert request.revision == result.attempted.revision
+    assert request.steam_tradeoffer_id == item.snapshot.steam_tradeoffer_id
+    assert request.counterparty_steam_id == SELLER_COUNTERPARTY
+    assert request.host_goods_id is None
+    assert events.index(("accept", request.revision, SELLER_COUNTERPARTY)) > next(
+        index
+        for index, event in enumerate(events)
+        if event[:3]
+        == (
+            "advance",
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+        )
+    )
+
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="seller_accept_authority_proof_required",
+    ):
+        coordinator.accept_offer_with_authority(item, proof)
+    assert len(accept_adapter.calls) == 1
+
+
+def test_accept_preflight_failure_stays_attempted_and_never_reuses_proof():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    accept_adapter = SpyAdapter(
+        {PlatformCapability.ACCEPT_OFFER},
+        lambda request: PlatformResult(
+            request,
+            PlatformResultStatus.FAILURE,
+            "write_preflight_failed",
+        ),
+    )
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+    proof = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID).proof
+
+    result = coordinator.accept_offer_with_authority(item, proof)
+
+    assert result.after == result.attempted
+    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_ACCEPT_ATTEMPTED
+    with pytest.raises(ReadOnlyCoordinatorBlockedError):
+        coordinator.accept_offer_with_authority(item, proof)
+    assert len(accept_adapter.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"purchase_id": "other-purchase"},
+        {"buff_order_id": "other-order"},
+        {"account_id": "other-account"},
+        {"recipient_steam_id": "76561198000000003"},
+        {"steam_tradeoffer_id": "offer-2"},
+        {"counterparty_steam_id": "76561198000000003"},
+    ],
+)
+def test_seller_accept_proof_identity_mismatch_blocks_before_attempted_cas(changed):
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    accept_adapter = SpyAdapter({PlatformCapability.ACCEPT_OFFER})
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+    proof = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID).proof
+    changed_item = StoredDelivery(replace(item.snapshot, **changed), item.revision)
+    store.current = changed_item
+    advances = store.advance_count
+
+    with pytest.raises(ReadOnlyCoordinatorBlockedError):
+        coordinator.accept_offer_with_authority(changed_item, proof)
+
+    assert store.advance_count == advances
+    assert accept_adapter.calls == []
+
+
+def test_seller_accept_proof_stale_revision_blocks_before_attempted_cas():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    accept_adapter = SpyAdapter({PlatformCapability.ACCEPT_OFFER})
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+    proof = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID).proof
+    store.current = StoredDelivery(item.snapshot, item.revision + 1)
+
+    with pytest.raises(
+        ReadOnlyCoordinatorConflictError,
+        match="persisted_delivery_mismatch",
+    ):
+        coordinator.accept_offer_with_authority(item, proof)
+
+    assert store.advance_count == 0
+    assert accept_adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("host_goods_id", SELLER_GOODS_ID + 1), ("seller_assetid", "other-asset")],
+)
+def test_seller_accept_proof_goods_or_asset_mismatch_blocks_before_cas(field, value):
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    accept_adapter = SpyAdapter({PlatformCapability.ACCEPT_OFFER})
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+    proof = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID).proof
+    object.__setattr__(proof, field, value)
+
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="seller_accept_authority_proof_mismatch",
+    ):
+        coordinator.accept_offer_with_authority(item, proof)
+    assert store.advance_count == 0
+    assert accept_adapter.calls == []
+
+
+def seller_accept_result_unknown(lifecycle=SteamTradeOfferLifecycle.ACTIVE):
+    item = seller_offer_confirmed()
+    snapshot = replace(
+        item.snapshot,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    return StoredDelivery(snapshot, item.revision + 2), exact_seller_accept_steam_evidence(
+        lifecycle=lifecycle
+    )
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "expected_status", "persisted"),
+    [
+        (SteamTradeOfferLifecycle.ACTIVE, DeliveryStatus.RESULT_UNKNOWN, False),
+        (SteamTradeOfferLifecycle.ACCEPTED, DeliveryStatus.AWAITING_INVENTORY, True),
+        (SteamTradeOfferLifecycle.IN_ESCROW, DeliveryStatus.AWAITING_INVENTORY, True),
+        (SteamTradeOfferLifecycle.DECLINED, DeliveryStatus.OFFER_TERMINATED, True),
+    ],
+)
+def test_seller_accept_unknown_recovery_is_exact_readonly(
+    lifecycle,
+    expected_status,
+    persisted,
+):
+    item, evidence = seller_accept_result_unknown(lifecycle)
+    store = RecordingStore(item)
+    read_adapter = SpyAdapter(
+        {PlatformCapability.READ_STEAM_TRADE_OFFER},
+        success_factory(evidence),
+    )
+    accept_adapter = SpyAdapter(
+        {PlatformCapability.ACCEPT_OFFER},
+        error=AssertionError("recovery must not ACCEPT"),
+    )
+    from app.auto_offer.coordinator import DeliveryCoordinator
+
+    coordinator = DeliveryCoordinator(
+        store,
+        {
+            PlatformCapability.READ_STEAM_TRADE_OFFER: read_adapter,
+            PlatformCapability.ACCEPT_OFFER: accept_adapter,
+        },
+        timeout_seconds=1.0,
+        allow_writes=True,
+        allow_accept_writes=True,
+    )
+
+    result = coordinator.recover_accept_result_unknown_readonly(item)
+
+    assert result.persisted is persisted
+    assert result.after.snapshot.delivery_status is expected_status
+    assert len(read_adapter.calls) == 1
+    assert accept_adapter.calls == []
+    if expected_status is DeliveryStatus.AWAITING_INVENTORY:
+        assert result.after.snapshot.delivery_error is None
+
+
+def test_restart_has_no_seller_accept_authority():
+    item = seller_offer_confirmed()
+    store = RecordingStore(item)
+    accept_adapter = SpyAdapter({PlatformCapability.ACCEPT_OFFER})
+    coordinator, _, _ = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+    proof = coordinator.read_seller_accept_authority(item, SELLER_GOODS_ID).proof
+    restarted, _, _ = seller_authority_coordinator(
+        store,
+        accept_adapter=accept_adapter,
+        allow_accept_writes=True,
+    )
+
+    with pytest.raises(ReadOnlyCoordinatorBlockedError):
+        restarted.accept_offer_with_authority(item, proof)
+    assert store.advance_count == 0
+    assert accept_adapter.calls == []

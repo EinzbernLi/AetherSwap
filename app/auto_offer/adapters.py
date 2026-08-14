@@ -635,6 +635,28 @@ def _validate_platform_request(request: object) -> None:
                 "host_goods_id must be a positive integer"
             )
         return
+    if capability is PlatformCapability.ACCEPT_OFFER:
+        _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_canonical_positive_decimal(
+            _request_attribute(request, "recipient_steam_id"),
+            "recipient_steam_id",
+        )
+        _require_canonical_positive_decimal(
+            counterparty_steam_id,
+            "counterparty_steam_id",
+        )
+        if counterparty_steam_id == _request_attribute(
+            request,
+            "recipient_steam_id",
+        ):
+            raise PlatformAdapterProtocolError(
+                "recipient and counterparty Steam IDs must differ"
+            )
+        if host_goods_id is not None:
+            raise PlatformAdapterProtocolError(
+                "host_goods_id is not valid for ACCEPT_OFFER"
+            )
+        return
     if counterparty_steam_id is not None or host_goods_id is not None:
         raise PlatformAdapterProtocolError(
             "seller item fields are only valid for READ_SELLER_OFFER_ITEM"
@@ -642,7 +664,6 @@ def _validate_platform_request(request: object) -> None:
     if capability in {
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
-        PlatformCapability.ACCEPT_OFFER,
         PlatformCapability.CONFIRM_OFFER,
     }:
         _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")

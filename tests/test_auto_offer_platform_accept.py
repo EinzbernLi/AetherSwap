@@ -34,6 +34,7 @@ def request(**changes):
         revision=7,
         capability=PlatformCapability.ACCEPT_OFFER,
         steam_tradeoffer_id=OFFER_ID,
+        counterparty_steam_id=SELLER_STEAM_ID,
         timeout_seconds=5.0,
     )
     return replace(value, **changes)
@@ -85,7 +86,10 @@ def test_wrong_capability_or_identity_never_enters_transport():
     value = adapter(transport)
 
     unsupported = value.execute(
-        request(capability=PlatformCapability.READ_STEAM_TRADE_OFFER)
+        request(
+            capability=PlatformCapability.READ_STEAM_TRADE_OFFER,
+            counterparty_steam_id=None,
+        )
     )
     wrong_account = value.execute(request(account_id="other-account"))
     wrong_recipient = value.execute(
@@ -166,11 +170,11 @@ def test_unproven_or_mismatched_success_response_is_result_unknown(response):
     assert len(transport.calls) == 1
 
 
-def test_explicit_rejection_is_known_failure_and_never_retried():
+def test_explicit_post_boundary_rejection_is_unknown_and_never_retried():
     transport = Transport(response={"accepted": False})
     result = adapter(transport).execute(request())
-    assert result.status is PlatformResultStatus.FAILURE
-    assert result.detail == "accept_rejected"
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "write_result_unknown"
     assert result.evidence is None
     assert len(transport.calls) == 1
 
@@ -194,3 +198,33 @@ def test_constructor_rejects_noncanonical_or_self_counterparty(
             recipient_steam_id=recipient,
             expected_counterparty_steam_id=counterparty,
         )
+
+
+def test_one_dynamic_adapter_supports_multiple_exact_counterparties():
+    transport = Transport(response=success_response())
+    value = SteamIncomingOfferAcceptAdapter(
+        transport,
+        account_id=ACCOUNT_ID,
+        recipient_steam_id=OUR_STEAM_ID,
+    )
+    second_seller = "76561198000000003"
+
+    first = value.execute(request())
+    second = value.execute(request(counterparty_steam_id=second_seller))
+
+    assert first.status is PlatformResultStatus.SUCCESS
+    assert second.status is PlatformResultStatus.SUCCESS
+    assert [call["counterparty_steam_id"] for call in transport.calls] == [
+        SELLER_STEAM_ID,
+        second_seller,
+    ]
+
+
+def test_fixed_compatibility_counterparty_mismatch_blocks_before_transport():
+    transport = Transport(response=success_response())
+    result = adapter(transport).execute(
+        request(counterparty_steam_id="76561198000000003")
+    )
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "identity_mismatch"
+    assert transport.calls == []

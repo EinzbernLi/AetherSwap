@@ -490,6 +490,90 @@ def test_accept_attempt_recovery_never_reaccepts(lifecycle, expected_target):
         assert decision.target.delivery_status is expected_target
 
 
+@pytest.mark.parametrize(
+    ("lifecycle", "expected_target", "detail"),
+    [
+        (
+            SteamTradeOfferLifecycle.ACTIVE,
+            None,
+            "accept_result_unknown_still_active",
+        ),
+        (
+            SteamTradeOfferLifecycle.ACCEPTED,
+            DeliveryStatus.AWAITING_INVENTORY,
+            "trade_offer_accept_recovered",
+        ),
+        (
+            SteamTradeOfferLifecycle.IN_ESCROW,
+            DeliveryStatus.AWAITING_INVENTORY,
+            "trade_offer_accept_recovered",
+        ),
+        (
+            SteamTradeOfferLifecycle.DECLINED,
+            DeliveryStatus.OFFER_TERMINATED,
+            "trade_offer_declined",
+        ),
+    ],
+)
+def test_seller_result_unknown_has_only_exact_readonly_recovery(
+    lifecycle,
+    expected_target,
+    detail,
+):
+    item = delivery(
+        snapshot(
+            DeliveryStatus.RESULT_UNKNOWN,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+            delivery_error="write_result_unknown",
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(is_our_offer=False, lifecycle=lifecycle),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+
+    assert decision.detail == detail
+    if expected_target is None:
+        assert decision.target is None
+        assert decision.result is AutoOfferResult.WAITING
+    else:
+        assert decision.target.delivery_status is expected_target
+        if expected_target is DeliveryStatus.AWAITING_INVENTORY:
+            assert decision.target.delivery_error is None
+
+
+def test_seller_result_unknown_wrong_direction_is_blocked():
+    item = delivery(
+        snapshot(
+            DeliveryStatus.RESULT_UNKNOWN,
+            DeliveryMode.SELLER_SENDS_OFFER,
+            steam_tradeoffer_id="offer-1",
+            delivery_error="write_result_unknown",
+        )
+    )
+    decision = plan_read_evidence_transition(
+        item,
+        result_for(
+            item,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            steam_offer_evidence(
+                is_our_offer=True,
+                lifecycle=SteamTradeOfferLifecycle.ACTIVE,
+            ),
+            steam_tradeoffer_id="offer-1",
+        ),
+    )
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
+    assert decision.detail == "trade_offer_direction_mismatch"
+
+
 def test_buyer_mode_never_plans_first_send_or_synthetic_fields():
     item = delivery(snapshot(DeliveryStatus.AWAITING_OFFER, DeliveryMode.BUYER_SENDS_OFFER))
     decision = plan_read_evidence_transition(

@@ -63,7 +63,14 @@ def _permit(
     )
 
 
-def _target(action: str, *, order_id: str = ORDER_ID, db_id: int | None = None, assetid=None):
+def _target(
+    action: str,
+    *,
+    order_id: str = ORDER_ID,
+    db_id: int | None = None,
+    host_goods_id: int | None = None,
+    assetid=None,
+):
     return CanaryWriteTarget(
         action=action,
         purchase_id=f"buff:{order_id}",
@@ -71,6 +78,7 @@ def _target(action: str, *, order_id: str = ORDER_ID, db_id: int | None = None, 
         account_id=ACCOUNT_ID,
         recipient_steam_id=STEAM_ID,
         host_db_id=db_id,
+        host_goods_id=host_goods_id,
         assetid=assetid,
     )
 
@@ -655,13 +663,132 @@ def test_normal_nested_refinement_is_action_identity_exact_and_single_use(
                 with authority.external_write_guard(exact_inner):
                     calls.append("duplicate")
 
-            with pytest.raises(CanaryAuthorityError, match="invalid_write_action"):
-                with authority.external_write_guard(
-                    CanaryWriteTarget(action="auto_offer_accept")
-                ):
-                    calls.append("accept")
-
     assert calls == [action]
+
+
+def _host_db_with_goods(
+    path: Path,
+    rows=((7, ORDER_ID, 73001, 1, None),),
+) -> Path:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE purchase ("
+            "id INTEGER PRIMARY KEY, "
+            "buff_order_id TEXT, "
+            "goods_id INTEGER, "
+            "pending_receipt INTEGER, "
+            "assetid TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO purchase("
+            "id,buff_order_id,goods_id,pending_receipt,assetid"
+            ") VALUES(?,?,?,?,?)",
+            rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return path
+
+
+def test_normal_accept_barrier_is_goods_exact_allows_unrelated_and_is_single_use(
+    tmp_path,
+):
+    db_path = _host_db_with_goods(
+        tmp_path / "host.db",
+        rows=(
+            (7, ORDER_ID, 73001, 1, None),
+            (8, "unrelated-order", 99999, 1, None),
+        ),
+    )
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    outer = _target(
+        "auto_offer_accept",
+        db_id=7,
+        host_goods_id=73001,
+    )
+    inner = _target("auto_offer_accept")
+    calls = []
+
+    with authority.runtime_guard():
+        with authority.normal_delivery_write_guard(outer):
+            for mismatch in (
+                _target("auto_offer_send"),
+                _target("auto_offer_confirm"),
+                _target("auto_offer_accept", order_id="other-order"),
+                _target("host_receipt", db_id=7, assetid="asset-7"),
+            ):
+                with pytest.raises(
+                    CanaryWriteBlockedError,
+                    match="normal_write_refinement_mismatch",
+                ):
+                    with authority.external_write_guard(mismatch):
+                        calls.append("mismatch")
+            with authority.external_write_guard(inner):
+                calls.append("accept")
+            with pytest.raises(
+                CanaryWriteBlockedError,
+                match="normal_accept_already_consumed",
+            ):
+                with authority.external_write_guard(inner):
+                    calls.append("duplicate")
+    assert calls == ["accept"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "goods_id", "reason"),
+    [
+        ((), 73001, "normal_host_target_missing"),
+        (((7, ORDER_ID, 73002, 1, None),), 73001, "normal_host_target_mismatch"),
+        (((7, "wrong-order", 73001, 1, None),), 73001, "normal_host_target_mismatch"),
+        (((7, ORDER_ID, 73001, 0, None),), 73001, "normal_host_target_mismatch"),
+        (((7, ORDER_ID, 73001, 1, "asset"),), 73001, "normal_host_target_mismatch"),
+    ],
+)
+def test_normal_accept_barrier_rejects_missing_or_changed_host_goods(
+    tmp_path,
+    rows,
+    goods_id,
+    reason,
+):
+    db_path = _host_db_with_goods(tmp_path / "host.db", rows=rows)
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    with authority.runtime_guard():
+        with pytest.raises(CanaryWriteBlockedError, match=reason):
+            with authority.normal_delivery_write_guard(
+                _target(
+                    "auto_offer_accept",
+                    db_id=7,
+                    host_goods_id=goods_id,
+                )
+            ):
+                pass
+
+
+def test_canary_owner_session_does_not_gain_accept_authority(tmp_path):
+    db_path = _host_db_with_goods(tmp_path / "host.db")
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    session = authority._arm_owner_session(_permit())
+    with pytest.raises(CanaryWriteBlockedError, match="write_not_allowlisted"):
+        with session.external_write_guard(
+            _target(
+                "auto_offer_accept",
+                db_id=7,
+                host_goods_id=73001,
+            )
+        ):
+            pass
+    session.release_keep_fence()
 
 
 @pytest.mark.parametrize("action", ["auto_offer_send", "auto_offer_confirm"])
@@ -676,6 +803,31 @@ def test_active_and_stale_canary_authority_block_normal_delivery_barrier(
     )
     session = authority._arm_owner_session(_permit())
     target = _target(action, db_id=7)
+
+    with pytest.raises(CanaryAuthorityBusyError, match="canary_authority_active"):
+        with authority.runtime_guard():
+            with authority.normal_delivery_write_guard(target):
+                pass
+
+    session.release_keep_fence()
+    with pytest.raises(CanaryAuthorityStaleError, match="canary_authority_fenced"):
+        with authority.runtime_guard():
+            with authority.normal_delivery_write_guard(target):
+                pass
+
+
+def test_active_and_stale_canary_authority_block_normal_accept_barrier(tmp_path):
+    db_path = _host_db_with_goods(tmp_path / "host.db")
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    session = authority._arm_owner_session(_permit())
+    target = _target(
+        "auto_offer_accept",
+        db_id=7,
+        host_goods_id=73001,
+    )
 
     with pytest.raises(CanaryAuthorityBusyError, match="canary_authority_active"):
         with authority.runtime_guard():

@@ -474,6 +474,15 @@ def _transition_statuses(
         DeliveryStatus.REFUNDED,
     }:
         return
+    if (
+        current is DeliveryStatus.RESULT_UNKNOWN
+        and target is DeliveryStatus.OFFER_TERMINATED
+    ):
+        if mode is None:
+            raise DeliveryContractError(
+                "result_unknown recovery requires a delivery mode"
+            )
+        return
     if target is DeliveryStatus.OFFER_TERMINATED:
         if current not in _TRADEOFFER_REQUIRED_STATUSES:
             raise DeliveryContractError("offer termination requires a bound offer state")

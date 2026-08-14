@@ -326,6 +326,34 @@ def _plan_steam_trade_offer_lifecycle(
             return _confirmation_recovered(delivery, lifecycle)
         return _blocked(delivery, "evidence_not_allowed")
 
+    if (
+        status is DeliveryStatus.RESULT_UNKNOWN
+        and snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER
+        and snapshot.steam_tradeoffer_id is not None
+    ):
+        if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
+            return _decision(
+                delivery,
+                None,
+                AutoOfferResult.WAITING,
+                True,
+                "accept_result_unknown_still_active",
+            )
+        if lifecycle in {
+            SteamTradeOfferLifecycle.ACCEPTED,
+            SteamTradeOfferLifecycle.IN_ESCROW,
+        }:
+            return _propose(
+                delivery,
+                replace(
+                    snapshot,
+                    delivery_status=DeliveryStatus.AWAITING_INVENTORY,
+                    delivery_error=None,
+                ),
+                "trade_offer_accept_recovered",
+            )
+        return _blocked(delivery, "evidence_not_allowed")
+
     if status is DeliveryStatus.OFFER_CONFIRMED:
         if lifecycle is SteamTradeOfferLifecycle.ACTIVE:
             return _decision(
@@ -526,6 +554,16 @@ def plan_read_evidence_transition(
     if (
         snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
         and snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and snapshot.steam_tradeoffer_id is not None
+    ):
+        safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)
+        if type(safe_evidence) is str:
+            return _blocked(delivery, safe_evidence)
+        return _plan_steam_trade_offer_lifecycle(delivery, safe_evidence)
+
+    if (
+        snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+        and snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER
         and snapshot.steam_tradeoffer_id is not None
     ):
         safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)

@@ -24,6 +24,7 @@ _MAX_USED_PERMIT_IDS = 128
 _PRODUCTION_HOST_DB_PATH = Path(__file__).resolve().parents[2] / "config" / "app.db"
 _ACTIVE_PHASES = frozenset({"armed", "completed"})
 _ALLOWED_OWNER_ACTIONS = frozenset({"auto_offer_send", "auto_offer_confirm", "host_receipt"})
+_NORMAL_ONLY_ACTIONS = frozenset({"auto_offer_accept"})
 _DENIED_DURING_CANARY_ACTIONS = frozenset({
     "buff_purchase",
     "host_transaction_mutation",
@@ -34,7 +35,11 @@ _DENIED_DURING_CANARY_ACTIONS = frozenset({
     "steam_gift_cart",
     "steam_gift_checkout",
 })
-_ALL_ACTIONS = _ALLOWED_OWNER_ACTIONS | _DENIED_DURING_CANARY_ACTIONS
+_ALL_ACTIONS = (
+    _ALLOWED_OWNER_ACTIONS
+    | _NORMAL_ONLY_ACTIONS
+    | _DENIED_DURING_CANARY_ACTIONS
+)
 
 
 class CanaryAuthorityError(RuntimeError):
@@ -181,6 +186,7 @@ class CanaryWriteTarget:
     account_id: str | None = None
     recipient_steam_id: str | None = None
     host_db_id: int | None = None
+    host_goods_id: int | None = None
     assetid: str | None = None
 
     def __post_init__(self) -> None:
@@ -192,6 +198,8 @@ class CanaryWriteTarget:
                 _exact_text(value, field=field)
         if self.host_db_id is not None:
             _exact_positive_int(self.host_db_id, field="host_db_id")
+        if self.host_goods_id is not None:
+            _exact_positive_int(self.host_goods_id, field="host_goods_id")
 
 
 def _production_root() -> Path:
@@ -621,7 +629,11 @@ class CanaryAuthority:
     @staticmethod
     def _require_normal_delivery_target(target: CanaryWriteTarget) -> None:
         if (
-            target.action not in {"auto_offer_send", "auto_offer_confirm"}
+            target.action not in {
+                "auto_offer_send",
+                "auto_offer_confirm",
+                "auto_offer_accept",
+            }
             or target.purchase_id is None
             or target.buff_order_id is None
             or target.purchase_id != f"buff:{target.buff_order_id}"
@@ -629,12 +641,20 @@ class CanaryAuthority:
             or target.recipient_steam_id is None
             or target.host_db_id is None
             or target.assetid is not None
-        ):
-            detail = (
-                "normal_send_target_invalid"
-                if target.action == "auto_offer_send"
-                else "normal_confirm_target_invalid"
+            or (
+                target.action == "auto_offer_accept"
+                and target.host_goods_id is None
             )
+            or (
+                target.action != "auto_offer_accept"
+                and target.host_goods_id is not None
+            )
+        ):
+            detail = {
+                "auto_offer_send": "normal_send_target_invalid",
+                "auto_offer_confirm": "normal_confirm_target_invalid",
+                "auto_offer_accept": "normal_accept_target_invalid",
+            }.get(target.action, "normal_write_target_invalid")
             raise CanaryWriteBlockedError(detail)
         _exact_steam_id(
             target.recipient_steam_id,
@@ -656,17 +676,29 @@ class CanaryAuthority:
                 isolation_level=None,
             )
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT id, buff_order_id, pending_receipt, assetid "
-                "FROM purchase WHERE id = ?",
-                (target.host_db_id,),
-            ).fetchone()
+            if target.action == "auto_offer_accept":
+                row = connection.execute(
+                    "SELECT id, buff_order_id, goods_id, pending_receipt, assetid "
+                    "FROM purchase WHERE id = ?",
+                    (target.host_db_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT id, buff_order_id, pending_receipt, assetid "
+                    "FROM purchase WHERE id = ?",
+                    (target.host_db_id,),
+                ).fetchone()
             if row is None:
                 raise CanaryWriteBlockedError("normal_host_target_missing")
-            db_id, order_id, pending_receipt, assetid = row
+            if target.action == "auto_offer_accept":
+                db_id, order_id, goods_id, pending_receipt, assetid = row
+            else:
+                db_id, order_id, pending_receipt, assetid = row
+                goods_id = None
             if (
                 db_id != target.host_db_id
                 or order_id != target.buff_order_id
+                or goods_id != target.host_goods_id
                 or pending_receipt not in (1, True)
                 or assetid not in (None, "")
             ):
@@ -788,6 +820,7 @@ class CanaryAuthority:
         if outer is None or outer.action not in {
             "auto_offer_send",
             "auto_offer_confirm",
+            "auto_offer_accept",
         }:
             return False
         return (
@@ -797,6 +830,7 @@ class CanaryAuthority:
             and target.account_id == outer.account_id
             and target.recipient_steam_id == outer.recipient_steam_id
             and target.host_db_id is None
+            and target.host_goods_id is None
             and target.assetid is None
         )
 
@@ -869,13 +903,21 @@ class CanaryAuthority:
                     detail = (
                         "normal_send_already_consumed"
                         if target.action == "auto_offer_send"
-                        else "normal_confirm_already_consumed"
+                        else (
+                            "normal_confirm_already_consumed"
+                            if target.action == "auto_offer_confirm"
+                            else "normal_accept_already_consumed"
+                        )
                     )
                     raise CanaryWriteBlockedError(detail)
                 self._normal_write_refinement_consumed = True
                 yield
                 return
-            if target.action in {"auto_offer_send", "auto_offer_confirm"}:
+            if target.action in {
+                "auto_offer_send",
+                "auto_offer_confirm",
+                "auto_offer_accept",
+            }:
                 raise CanaryWriteBlockedError("normal_write_barrier_required")
             if self._normal_guard_depth:
                 self._normal_guard_depth += 1

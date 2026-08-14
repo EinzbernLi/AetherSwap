@@ -642,6 +642,15 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         def confirm(self, *_args, **_kwargs):
             raise AssertionError("builder performed confirmation execution")
 
+    class FakeAcceptTransport:
+        bound_account_steam_id = STEAM_ID
+
+        def __init__(self, cookie, *, session):
+            calls.append(("accept_transport", cookie, session))
+
+        def accept(self, *_args, **_kwargs):
+            raise AssertionError("builder performed accept execution")
+
     class FakeAdapter:
         def __init__(self, *_args, **_kwargs):
             calls.append(("adapter",))
@@ -653,6 +662,10 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     class FakeConfirmationAdapter:
         def __init__(self, transport, **kwargs):
             calls.append(("confirmation_adapter", transport, kwargs))
+
+    class FakeAcceptAdapter:
+        def __init__(self, transport, **kwargs):
+            calls.append(("accept_adapter", transport, kwargs))
 
     class FakeCoordinator:
         def __init__(self, store, adapters, **kwargs):
@@ -675,6 +688,11 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         "SteamTradeOfferConfirmationTransport",
         FakeConfirmationTransport,
     )
+    monkeypatch.setattr(
+        host_integration,
+        "SteamIncomingOfferAcceptTransport",
+        FakeAcceptTransport,
+    )
     monkeypatch.setattr(host_integration, "BuffReadOnlyAdapter", FakeAdapter)
     monkeypatch.setattr(host_integration, "SteamTradeOfferReadOnlyAdapter", FakeAdapter)
     monkeypatch.setattr(host_integration, "SteamCompletedTradeReadOnlyAdapter", FakeAdapter)
@@ -683,6 +701,11 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         host_integration,
         "SteamTradeOfferConfirmationAdapter",
         FakeConfirmationAdapter,
+    )
+    monkeypatch.setattr(
+        host_integration,
+        "SteamIncomingOfferAcceptAdapter",
+        FakeAcceptAdapter,
     )
     monkeypatch.setattr(host_integration, "DeliveryCoordinator", FakeCoordinator)
 
@@ -703,11 +726,14 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.SEND_OFFER,
         PlatformCapability.CONFIRM_OFFER,
+        PlatformCapability.ACCEPT_OFFER,
     }
     assert kwargs["allow_writes"] is True
     assert kwargs["allow_confirmation_writes"] is True
+    assert kwargs["allow_accept_writes"] is True
 
     send_calls = [call for call in calls if call[0] == "send_adapter"]
     assert len(send_calls) == 1
@@ -724,6 +750,15 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     confirmation_calls = [call for call in calls if call[0] == "confirmation_adapter"]
     assert len(confirmation_calls) == 1
     assert confirmation_calls[0][2] == {
+        "account_id": ACCOUNT_ID,
+        "recipient_steam_id": STEAM_ID,
+    }
+    accept_transport_calls = [call for call in calls if call[0] == "accept_transport"]
+    assert len(accept_transport_calls) == 1
+    assert accept_transport_calls[0][1] == COOKIE
+    accept_calls = [call for call in calls if call[0] == "accept_adapter"]
+    assert len(accept_calls) == 1
+    assert accept_calls[0][2] == {
         "account_id": ACCOUNT_ID,
         "recipient_steam_id": STEAM_ID,
     }

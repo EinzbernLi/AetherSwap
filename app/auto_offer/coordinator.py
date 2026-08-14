@@ -69,6 +69,7 @@ _READ_CAPABILITIES = frozenset(
 _WRITE_CAPABILITIES = frozenset(
     {
         PlatformCapability.SEND_OFFER,
+        PlatformCapability.ACCEPT_OFFER,
         PlatformCapability.CONFIRM_OFFER,
     }
 )
@@ -77,6 +78,7 @@ _TRADEOFFER_BOUND_CAPABILITIES = frozenset(
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,
+        PlatformCapability.ACCEPT_OFFER,
         PlatformCapability.CONFIRM_OFFER,
     }
 )
@@ -247,11 +249,13 @@ def _request_matches_delivery(
         if request.capability in _TRADEOFFER_BOUND_CAPABILITIES
         else None
     )
-    seller_item_read = (
-        request.capability is PlatformCapability.READ_SELLER_OFFER_ITEM
-    )
+    seller_item_read = request.capability is PlatformCapability.READ_SELLER_OFFER_ITEM
+    seller_bound_request = request.capability in {
+        PlatformCapability.READ_SELLER_OFFER_ITEM,
+        PlatformCapability.ACCEPT_OFFER,
+    }
     expected_counterparty = (
-        snapshot.counterparty_steam_id if seller_item_read else None
+        snapshot.counterparty_steam_id if seller_bound_request else None
     )
     expected_goods_id = host_goods_id if seller_item_read else None
     return (
@@ -689,6 +693,61 @@ class ConfirmOfferStepResult:
             raise ReadOnlyCoordinatorError("invalid_confirm_step_result")
 
 
+@dataclass(frozen=True)
+class AcceptOfferStepResult:
+    """Immutable result of one durably recorded exact seller ACCEPT attempt."""
+
+    before: StoredDelivery
+    attempted: StoredDelivery
+    platform_result: PlatformResult
+    after: StoredDelivery
+
+    def __post_init__(self) -> None:
+        try:
+            _validate_delivery(self.before)
+            _validate_delivery(self.attempted)
+            _validate_delivery(self.after)
+            PlatformResult.__post_init__(self.platform_result)
+        except Exception as exc:
+            raise ReadOnlyCoordinatorError("invalid_accept_step_result") from exc
+        if (
+            self.before.snapshot.delivery_mode
+            is not DeliveryMode.SELLER_SENDS_OFFER
+            or self.before.snapshot.delivery_status
+            is not DeliveryStatus.OFFER_CONFIRMED
+            or self.attempted.snapshot.delivery_status
+            is not DeliveryStatus.OFFER_ACCEPT_ATTEMPTED
+            or self.attempted.revision != self.before.revision + 1
+            or not _same_delivery_identity(self.before, self.attempted)
+            or not _same_delivery_identity(self.attempted, self.after)
+            or self.attempted.snapshot.steam_tradeoffer_id
+            != self.before.snapshot.steam_tradeoffer_id
+            or self.attempted.snapshot.counterparty_steam_id
+            != self.before.snapshot.counterparty_steam_id
+            or not _request_matches_delivery(
+                self.platform_result.request,
+                self.attempted,
+            )
+            or self.platform_result.request.capability
+            is not PlatformCapability.ACCEPT_OFFER
+        ):
+            raise ReadOnlyCoordinatorError("invalid_accept_step_result")
+        if self.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+            if (
+                self.after.revision != self.attempted.revision + 1
+                or self.after.snapshot.delivery_error != "write_result_unknown"
+            ):
+                raise ReadOnlyCoordinatorError("invalid_accept_step_result")
+        elif self.after == self.attempted:
+            if (
+                self.platform_result.status is not PlatformResultStatus.FAILURE
+                or self.platform_result.detail != "write_preflight_failed"
+            ):
+                raise ReadOnlyCoordinatorError("invalid_accept_step_result")
+        else:
+            raise ReadOnlyCoordinatorError("invalid_accept_step_result")
+
+
 class DeliveryCoordinator:
     """Coordinate one exact platform step and contract-approved Store CAS writes."""
 
@@ -700,6 +759,7 @@ class DeliveryCoordinator:
         timeout_seconds: float,
         allow_writes: bool = False,
         allow_confirmation_writes: bool = False,
+        allow_accept_writes: bool = False,
         write_guard=None,
         expected_trade_offer_counterparty_steam_id: str | None = None,
         expected_trade_offer_is_our_offer: bool | None = None,
@@ -711,8 +771,12 @@ class DeliveryCoordinator:
             raise ReadOnlyCoordinatorError("invalid_allow_writes")
         if type(allow_confirmation_writes) is not bool:
             raise ReadOnlyCoordinatorError("invalid_allow_confirmation_writes")
+        if type(allow_accept_writes) is not bool:
+            raise ReadOnlyCoordinatorError("invalid_allow_accept_writes")
         if allow_confirmation_writes and not allow_writes:
             raise ReadOnlyCoordinatorError("confirmation_writes_require_allow_writes")
+        if allow_accept_writes and not allow_writes:
+            raise ReadOnlyCoordinatorError("accept_writes_require_allow_writes")
         if write_guard is not None and not callable(write_guard):
             raise ReadOnlyCoordinatorError("invalid_write_guard")
         expected_counterparty, expected_direction = _validate_trade_offer_expectations(
@@ -733,6 +797,10 @@ class DeliveryCoordinator:
                 not allow_writes or not allow_confirmation_writes
             ):
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
+            if capability is PlatformCapability.ACCEPT_OFFER and (
+                not allow_writes or not allow_accept_writes
+            ):
+                raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
             if capability not in _READ_CAPABILITIES and capability not in _WRITE_CAPABILITIES:
                 raise ReadOnlyCoordinatorError("adapter_capability_mismatch")
             try:
@@ -751,12 +819,16 @@ class DeliveryCoordinator:
         self._timeout_seconds = timeout_seconds
         self._allow_writes = allow_writes
         self._allow_confirmation_writes = allow_confirmation_writes
+        self._allow_accept_writes = allow_accept_writes
         self._write_guard = write_guard
         self._expected_trade_offer_counterparty_steam_id = expected_counterparty
         self._expected_trade_offer_is_our_offer = expected_direction
         self._normal_send_proof: _NormalSendProof | None = None
         self._normal_confirmation_proof: _NormalConfirmationProof | None = None
         self._seller_accept_proof: _SellerAcceptProof | None = None
+        self._seller_accept_proof_binding: (
+            tuple[str, str, str, str, int, str, str, int, str] | None
+        ) = None
         self._confirmation_identity_proof: tuple[str, str, int, str] | None = None
         self._clock = actual_clock
 
@@ -816,7 +888,10 @@ class DeliveryCoordinator:
             ),
             counterparty_steam_id=(
                 snapshot.counterparty_steam_id
-                if capability is PlatformCapability.READ_SELLER_OFFER_ITEM
+                if capability in {
+                    PlatformCapability.READ_SELLER_OFFER_ITEM,
+                    PlatformCapability.ACCEPT_OFFER,
+                }
                 else None
             ),
             host_goods_id=(
@@ -1082,6 +1157,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         self._read_current(delivery)
@@ -1122,6 +1198,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         self._read_current(delivery)
@@ -1154,6 +1231,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         self._read_current(delivery)
@@ -1236,6 +1314,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         self._read_current(delivery)
@@ -1317,14 +1396,14 @@ class DeliveryCoordinator:
             except BuffOrderEvidenceError:
                 authorized = None
             if authorized is buff_evidence:
-                proof = _SellerAcceptProof(
-                    *self._seller_accept_proof_key(
-                        delivery,
-                        host_goods_id,
-                        buff_evidence.seller_assetid,
-                    )
+                proof_binding = self._seller_accept_proof_key(
+                    delivery,
+                    host_goods_id,
+                    buff_evidence.seller_assetid,
                 )
+                proof = _SellerAcceptProof(*proof_binding)
                 self._seller_accept_proof = proof
+                self._seller_accept_proof_binding = proof_binding
         return SellerAcceptAuthorityReadResult(
             before=delivery,
             host_goods_id=host_goods_id,
@@ -1332,6 +1411,121 @@ class DeliveryCoordinator:
             steam_result=steam_result,
             proof=proof,
         )
+
+    def accept_offer_with_authority(
+        self,
+        delivery: StoredDelivery,
+        proof: object,
+    ) -> AcceptOfferStepResult:
+        """Consume one current seller proof and attempt exactly one ACCEPT."""
+
+        current_proof = self._seller_accept_proof
+        current_binding = self._seller_accept_proof_binding
+        self._normal_send_proof = None
+        self._normal_confirmation_proof = None
+        self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
+        self._confirmation_identity_proof = None
+        _validate_delivery(delivery)
+        if proof is not current_proof or type(proof) is not _SellerAcceptProof:
+            raise ReadOnlyCoordinatorBlockedError(
+                "seller_accept_authority_proof_required"
+            )
+        if not self._allow_writes or not self._allow_accept_writes:
+            raise ReadOnlyCoordinatorBlockedError(
+                "accept_write_capability_required"
+            )
+        adapter = self._adapters.get(PlatformCapability.ACCEPT_OFFER)
+        if adapter is None:
+            raise ReadOnlyCoordinatorBlockedError(
+                "accept_offer_adapter_required"
+            )
+        self._read_current(delivery)
+        proof_binding = (
+            proof.purchase_id,
+            proof.buff_order_id,
+            proof.account_id,
+            proof.recipient_steam_id,
+            proof.revision,
+            proof.steam_tradeoffer_id,
+            proof.counterparty_steam_id,
+            proof.host_goods_id,
+            proof.seller_assetid,
+        )
+        if current_binding != proof_binding or self._seller_accept_proof_key(
+            delivery,
+            proof.host_goods_id,
+            proof.seller_assetid,
+        ) != proof_binding:
+            raise ReadOnlyCoordinatorBlockedError(
+                "seller_accept_authority_proof_mismatch"
+            )
+        snapshot = delivery.snapshot
+        if (
+            snapshot.delivery_mode is not DeliveryMode.SELLER_SENDS_OFFER
+            or snapshot.delivery_status is not DeliveryStatus.OFFER_CONFIRMED
+            or snapshot.steam_tradeoffer_id != proof.steam_tradeoffer_id
+            or snapshot.counterparty_steam_id != proof.counterparty_steam_id
+        ):
+            raise ReadOnlyCoordinatorBlockedError(
+                "seller_accept_authority_not_available"
+            )
+
+        attempted_target = replace(
+            snapshot,
+            delivery_status=DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+        )
+        attempted = self._advance(delivery, attempted_target)
+        request = self._make_request(attempted, PlatformCapability.ACCEPT_OFFER)
+        platform_result = self._execute(adapter, request)
+        if (
+            platform_result.status is PlatformResultStatus.FAILURE
+            and platform_result.detail == "write_preflight_failed"
+        ):
+            after = attempted
+        else:
+            after = self._persist_result_unknown(attempted)
+        return AcceptOfferStepResult(
+            before=delivery,
+            attempted=attempted,
+            platform_result=platform_result,
+            after=after,
+        )
+
+    def recover_accept_result_unknown_readonly(
+        self,
+        delivery: StoredDelivery,
+    ) -> ReadOnlyStepResult:
+        """Perform one exact Steam read for a bound seller ACCEPT unknown."""
+
+        self._normal_send_proof = None
+        self._normal_confirmation_proof = None
+        self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
+        self._confirmation_identity_proof = None
+        _validate_delivery(delivery)
+        self._read_current(delivery)
+        snapshot = delivery.snapshot
+        if (
+            snapshot.delivery_mode is not DeliveryMode.SELLER_SENDS_OFFER
+            or snapshot.delivery_status is not DeliveryStatus.RESULT_UNKNOWN
+            or snapshot.steam_tradeoffer_id is None
+            or snapshot.counterparty_steam_id is None
+            or snapshot.offer_attempted_at is not None
+            or snapshot.offer_sent_at is not None
+        ):
+            raise ReadOnlyCoordinatorBlockedError(
+                "accept_result_unknown_recovery_not_available"
+            )
+        capability = PlatformCapability.READ_STEAM_TRADE_OFFER
+        adapter = self._adapters.get(capability)
+        if adapter is None:
+            raise ReadOnlyCoordinatorBlockedError("read_step_not_available")
+        request = self._make_request(delivery, capability)
+        platform_result = self._execute(adapter, request)
+        platform_result = self._guard_trade_offer_identity(delivery, platform_result)
+        decision = self._plan(delivery, platform_result)
+        return self._persist_read(delivery, decision, platform_result)
 
     def recover_confirmation_result_unknown_readonly(
         self,
@@ -1342,6 +1536,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         self._read_current(delivery)
@@ -1372,6 +1567,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         self._read_current(delivery)
@@ -1473,6 +1669,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         if proof is not current_proof or type(proof) is not _NormalSendProof:
@@ -1510,6 +1707,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         if proof is not current_proof or type(proof) is not _NormalConfirmationProof:
@@ -1592,6 +1790,7 @@ class DeliveryCoordinator:
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
         self._seller_accept_proof = None
+        self._seller_accept_proof_binding = None
         _validate_delivery(delivery)
         self._read_current(delivery)
         if (
@@ -1631,6 +1830,7 @@ DeliveryReadStepResult = ReadOnlyStepResult
 
 
 __all__ = [
+    "AcceptOfferStepResult",
     "ConfirmationAuthorityReadResult",
     "ConfirmOfferStepResult",
     "DeliveryCoordinator",

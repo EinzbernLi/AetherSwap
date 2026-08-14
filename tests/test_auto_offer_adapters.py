@@ -61,6 +61,21 @@ def seller_item_request(**changes):
     return replace(value, **changes)
 
 
+def accept_request(**changes):
+    value = PlatformRequest(
+        purchase_id="purchase-1",
+        buff_order_id="buff-order-1",
+        account_id="account-1",
+        recipient_steam_id="76561198000000001",
+        revision=4,
+        capability=PlatformCapability.ACCEPT_OFFER,
+        timeout_seconds=5.0,
+        steam_tradeoffer_id="offer-1",
+        counterparty_steam_id="76561198000000002",
+    )
+    return replace(value, **changes)
+
+
 def seller_item_evidence(**changes):
     value = SellerOrderItemEvidence(
         buff_order_id="buff-order-1",
@@ -157,11 +172,13 @@ def test_seller_specific_fields_are_rejected_on_every_old_capability(field):
     bound = {
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
-        PlatformCapability.ACCEPT_OFFER,
         PlatformCapability.CONFIRM_OFFER,
     }
     for capability in PlatformCapability:
-        if capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
+        if capability in {
+            PlatformCapability.READ_SELLER_OFFER_ITEM,
+            PlatformCapability.ACCEPT_OFFER,
+        }:
             continue
         changes = {"capability": capability}
         if capability in bound:
@@ -169,6 +186,28 @@ def test_seller_specific_fields_are_rejected_on_every_old_capability(field):
         value = "76561198000000002" if field == "counterparty_steam_id" else 73001
         with pytest.raises(PlatformAdapterProtocolError):
             request(**changes, **{field: value})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"steam_tradeoffer_id": None},
+        {"counterparty_steam_id": None},
+        {"counterparty_steam_id": "seller"},
+        {"counterparty_steam_id": "076561198000000002"},
+        {"counterparty_steam_id": "76561198000000001"},
+        {"host_goods_id": 73001},
+    ],
+)
+def test_accept_request_requires_exact_counterparty_and_rejects_host_goods(changes):
+    with pytest.raises(PlatformAdapterProtocolError):
+        accept_request(**changes)
+
+
+def test_accept_request_binds_dynamic_counterparty_without_host_goods():
+    item = accept_request()
+    assert item.counterparty_steam_id == "76561198000000002"
+    assert item.host_goods_id is None
 
 
 @pytest.mark.parametrize(
