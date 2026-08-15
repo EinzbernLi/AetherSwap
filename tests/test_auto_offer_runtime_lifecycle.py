@@ -43,15 +43,101 @@ def _runtime(monkeypatch, **kwargs):
 
 def test_missing_store_requested_off_is_off_without_creating_source(tmp_path, monkeypatch):
     path = tmp_path / "nested" / "auto_offer.db"
+    monkeypatch.setattr(
+        lifecycle,
+        "_host_snapshot",
+        lambda _purchases: pytest.fail("empty OFF Store must not read Host purchases"),
+    )
     state = _runtime(
         monkeypatch,
         config={"auto_offer": {"enabled": False}},
-        purchases=[],
         store_path=path,
     )
     assert state.mode is AutoOfferRuntimeMode.OFF
     assert not path.exists()
     assert not path.parent.exists()
+
+
+def test_empty_store_off_preserves_canary_fence_without_host_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        lifecycle,
+        "_host_snapshot",
+        lambda _purchases: pytest.fail("canary fence must precede Host snapshot"),
+    )
+    state = lifecycle.inspect_effective_runtime(
+        config={"auto_offer": {"enabled": False}},
+        store_rows=[],
+        canary_fenced=True,
+        reconciliation_checked=True,
+    )
+    assert state.mode is AutoOfferRuntimeMode.BLOCKED
+    assert state.reason == "canary_fenced"
+
+
+def test_empty_store_off_preserves_reconciliation_fence_without_host_snapshot(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        lifecycle,
+        "_host_snapshot",
+        lambda _purchases: pytest.fail(
+            "reconciliation fence must precede Host snapshot"
+        ),
+    )
+    state = lifecycle.inspect_effective_runtime(
+        config={"auto_offer": {"enabled": False}},
+        store_rows=[],
+        canary_fenced=False,
+        unresolved_checkout={"unresolved": True},
+        pipeline_active=False,
+    )
+    assert state.mode is AutoOfferRuntimeMode.BLOCKED
+    assert state.reason == "buff_reconciliation_required"
+
+
+def test_requested_on_empty_store_still_requires_host_snapshot(monkeypatch):
+    monkeypatch.setattr(lifecycle, "_host_snapshot", lambda _purchases: None)
+    state = lifecycle.inspect_effective_runtime(
+        config={"auto_offer": {"enabled": True}},
+        store_rows=[],
+        canary_fenced=False,
+        reconciliation_checked=True,
+    )
+    assert state.mode is AutoOfferRuntimeMode.BLOCKED
+    assert state.reason == "host_snapshot_invalid"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        DeliveryStatus.RECEIVED,
+        DeliveryStatus.CANCELLED,
+        DeliveryStatus.REFUNDED,
+    ],
+)
+def test_off_audit_store_rows_still_require_host_correlation(monkeypatch, status):
+    seen = []
+
+    def host_snapshot(purchases):
+        seen.append(purchases)
+        return []
+
+    monkeypatch.setattr(lifecycle, "_host_snapshot", host_snapshot)
+    state = lifecycle.inspect_effective_runtime(
+        config={"auto_offer": {"enabled": False}},
+        store_rows=[
+            _stored(
+                f"audit-{status.value}",
+                status,
+                pending_receipt=status is not DeliveryStatus.RECEIVED,
+                assetid="asset-1" if status is DeliveryStatus.RECEIVED else None,
+            )
+        ],
+        canary_fenced=False,
+        reconciliation_checked=True,
+    )
+    assert seen == [None]
+    assert state.mode is AutoOfferRuntimeMode.OFF
 
 
 def test_managed_and_receipt_pending_are_draining_when_requested_off(monkeypatch):
@@ -273,7 +359,7 @@ def test_tombstone_with_existing_host_row_is_unsafe(monkeypatch):
 def test_duplicate_host_order_identity_blocks(monkeypatch):
     state = _runtime(
         monkeypatch,
-        config={"auto_offer": {"enabled": False}},
+        config={"auto_offer": {"enabled": True}},
         purchases=[
             {"_db_id": 1, "buff_order_id": "same"},
             {"_db_id": 2, "buff_order_id": "same"},

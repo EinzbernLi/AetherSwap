@@ -132,10 +132,6 @@ def inspect_effective_runtime(
         if type(requested_enabled) is not bool:
             return _safe_blocked(False, 0, "runtime_request_invalid")
 
-        host_rows = _host_snapshot(purchases)
-        if not isinstance(host_rows, Sequence) or isinstance(host_rows, (str, bytes)):
-            return _safe_blocked(requested_enabled, 0, "host_snapshot_invalid")
-
         path = _STORE_PATH if store_path is None else Path(store_path)
         rows = _store_snapshot(path, store_rows)
         index: dict[str, StoredDelivery] = {}
@@ -158,6 +154,49 @@ def inspect_effective_runtime(
             if order_id in index:
                 return _safe_blocked(requested_enabled, 0, "duplicate_store_order_identity")
             index[order_id] = stored
+
+        if not requested_enabled and not rows:
+            if canary_fenced is None:
+                try:
+                    canary_fenced = bool(canary_metadata_present())
+                except CanaryAuthorityError:
+                    return _safe_blocked(False, 0, "canary_fenced")
+                except Exception:
+                    return _safe_blocked(False, 0, "canary_fenced")
+            if canary_fenced:
+                return _safe_blocked(False, 0, "canary_fenced")
+
+            if not reconciliation_checked:
+                if unresolved_checkout is None:
+                    try:
+                        from app.services.buff_checkout_guard import get_unresolved_checkout
+
+                        unresolved_checkout = get_unresolved_checkout()
+                    except Exception:
+                        return _safe_blocked(
+                            False,
+                            0,
+                            "buff_reconciliation_required",
+                        )
+                if _reconciliation_blocked(
+                    unresolved_checkout=unresolved_checkout,
+                    pipeline_active=pipeline_active,
+                ):
+                    return _safe_blocked(
+                        False,
+                        0,
+                        "buff_reconciliation_required",
+                    )
+
+            return resolve_runtime_mode(
+                requested_enabled=False,
+                active_delivery_count=0,
+                enable_preflight_passed=True,
+            )
+
+        host_rows = _host_snapshot(purchases)
+        if not isinstance(host_rows, Sequence) or isinstance(host_rows, (str, bytes)):
+            return _safe_blocked(requested_enabled, 0, "host_snapshot_invalid")
 
         host_order_ids: set[str] = set()
         decisions = []
