@@ -159,6 +159,23 @@ def test_page_one_paying_is_success_and_reads_exactly_once():
     assert stub.steam_calls == 0
 
 
+@pytest.mark.parametrize(
+    "expires",
+    [0, -0.5, -1, None, float("nan"), float("inf"), float("-inf"), True],
+)
+def test_paying_requires_strictly_positive_finite_timeout(expires):
+    stub = BuffStub(
+        history_pages={
+            1: history_page(items=[paying_item(pay_expire_timeout=expires)])
+        }
+    )
+    result = adapter(stub).execute(request())
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_state_unproven"
+    assert result.evidence is None
+    assert stub.history_calls == [(1, "csgo")]
+
+
 def test_page_one_refunded_is_terminal_success():
     stub = BuffStub(history_pages={1: history_page(items=[refunded_item()])})
     result = adapter(stub).execute(request())

@@ -314,7 +314,7 @@ def _classify_exact_buff_history_item(
 
     if state == "PAYING" and state_text == "等待付款":
         expires = _finite_number(item.get("pay_expire_timeout"))
-        if expires is None or expires <= -1:
+        if expires is None or expires <= 0:
             return _ReadFailure(
                 PlatformResultStatus.RESULT_UNKNOWN,
                 "order_state_unproven",
