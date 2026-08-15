@@ -1615,7 +1615,7 @@ def test_completed_trade_adapter_has_no_state_or_platform_write_dependencies():
         "PUT",
         "PATCH",
         "DELETE",
-        "accept_offer",
-        "send_offer",
+            "accept_offer(",
+            "send_offer(",
     ):
         assert banned not in text

@@ -637,6 +637,25 @@ class BuffBuyer:
         except Exception:
             return None
 
+    def get_buy_order_history_page(
+        self,
+        page_num: int,
+        game: str = "csgo",
+    ) -> dict:
+        """Read one bounded BUFF buy-order history page without mutation or retry."""
+
+        if type(page_num) is not int or not 1 <= page_num <= 10:
+            raise ValueError("page_num must be an integer between 1 and 10")
+        if game != "csgo":
+            raise ValueError("only csgo buy-order history is supported")
+        params = {
+            "game": game,
+            "page_num": str(page_num),
+            "page_size": "10",
+            "_": str(int(time.time() * 1000)),
+        }
+        return self._make_request("GET", API_HISTORY, params=params)
+
     def check_wait_pay_orders(self, game: str = "csgo") -> bool:
         params = {
             "game": game,

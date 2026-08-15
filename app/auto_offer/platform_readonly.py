@@ -7,12 +7,15 @@ state, retry, or execute platform mutations.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
 
 from app.auto_offer.adapters import (
     CompletedTradeItemEvidence,
+    BuffOrderLifecycle,
+    BuffOrderLifecycleEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
     OfferStateEvidence,
@@ -49,6 +52,7 @@ BUFF_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,
+        PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
     }
 )
 STEAM_INVENTORY_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
@@ -94,6 +98,14 @@ _PENDING_STATES: Final[frozenset[object]] = frozenset(
         "waiting_for_offer",
         "to_receive",
     }
+)
+_MAX_BUFF_LIFECYCLE_PAGES: Final[int] = 3
+_BUFF_HISTORY_PAGE_SIZE: Final[int] = 10
+_REFUNDED_TIMEOUT_FIELDS: Final[tuple[str, ...]] = (
+    "pay_expire_timeout",
+    "deliver_expire_timeout",
+    "receive_expire_timeout",
+    "buyer_send_offer_timeout",
 )
 
 
@@ -141,6 +153,7 @@ def _result(
     | InventoryStateEvidence
     | SteamTradeOfferEvidence
     | SteamCompletedTradeEvidence
+    | BuffOrderLifecycleEvidence
     | None = None,
 ) -> PlatformResult:
     return PlatformResult(
@@ -217,6 +230,133 @@ def _call_read(operation: Callable[[], object]) -> object | _ReadFailure:
     except Exception as error:
         detail = "auth_failed" if _is_auth_error(error) else "network_failure"
         return _ReadFailure(PlatformResultStatus.FAILURE, detail)
+
+
+def _call_lifecycle_read(operation: Callable[[], object]) -> object | _ReadFailure:
+    try:
+        return operation()
+    except (PlatformAdapterTimeoutError, TimeoutError):
+        return _ReadFailure(PlatformResultStatus.TIMEOUT, "timeout")
+    except Exception as error:
+        name = type(error).__name__.casefold()
+        if _is_auth_error(error):
+            detail = "auth_failed"
+        elif "verification" in name or "captcha" in name:
+            detail = "verification_required"
+        elif "rate" in name and "limit" in name:
+            detail = "rate_limited"
+        elif "risk" in name:
+            detail = "risk_control"
+        else:
+            detail = "network_failure"
+        return _ReadFailure(PlatformResultStatus.FAILURE, detail)
+
+
+@dataclass(frozen=True)
+class _BuffHistoryPage:
+    page_num: int
+    total_page: int
+    items: tuple[Mapping[str, Any], ...]
+
+
+def _parse_buff_history_page(
+    payload: object,
+    *,
+    expected_page_num: int,
+) -> _BuffHistoryPage | _ReadFailure:
+    if not isinstance(payload, Mapping):
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    if payload.get("code") != "OK":
+        return _ReadFailure(PlatformResultStatus.RESULT_UNKNOWN, "history_non_ok")
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    page_num = data.get("page_num")
+    page_size = data.get("page_size")
+    total_page = data.get("total_page")
+    items = data.get("items")
+    if (
+        type(page_num) is not int
+        or page_num != expected_page_num
+        or type(page_size) is not int
+        or page_size != _BUFF_HISTORY_PAGE_SIZE
+        or type(total_page) is not int
+        or total_page < page_num
+        or not isinstance(items, list)
+        or len(items) > _BUFF_HISTORY_PAGE_SIZE
+        or any(not isinstance(item, Mapping) for item in items)
+    ):
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    for item in items:
+        if _canonical_raw_identifier(item.get("id")) is None:
+            return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    return _BuffHistoryPage(page_num, total_page, tuple(items))
+
+
+def _finite_number(value: object) -> float | None:
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _classify_exact_buff_history_item(
+    item: Mapping[str, Any],
+    *,
+    buff_order_id: str,
+    page_num: int,
+) -> BuffOrderLifecycleEvidence | _ReadFailure:
+    if _canonical_raw_identifier(item.get("id")) != buff_order_id:
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "identity_mismatch")
+    state = item.get("state")
+    state_text = item.get("state_text")
+    if type(state) is not str or type(state_text) is not str:
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+
+    if state == "PAYING" and state_text == "等待付款":
+        expires = _finite_number(item.get("pay_expire_timeout"))
+        if expires is None or expires <= -1:
+            return _ReadFailure(
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_state_unproven",
+            )
+        return BuffOrderLifecycleEvidence(
+            buff_order_id=buff_order_id,
+            lifecycle=BuffOrderLifecycle.PAYING,
+            raw_state=state,
+            raw_state_text=state_text,
+            page_num=page_num,
+        )
+
+    if state == "FAIL" and state_text == "购买失败-已退款":
+        for field in _REFUNDED_TIMEOUT_FIELDS:
+            value = _finite_number(item.get(field))
+            if value is None or value != -1:
+                return _ReadFailure(
+                    PlatformResultStatus.RESULT_UNKNOWN,
+                    "order_state_unproven",
+                )
+        if (
+            "tradeofferid" not in item
+            or "trade_offer_url" not in item
+            or item.get("tradeofferid") is not None
+            or item.get("trade_offer_url") is not None
+        ):
+            return _ReadFailure(
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_state_unproven",
+            )
+        return BuffOrderLifecycleEvidence(
+            buff_order_id=buff_order_id,
+            lifecycle=BuffOrderLifecycle.REFUNDED,
+            raw_state=state,
+            raw_state_text=state_text,
+            page_num=page_num,
+        )
+
+    return _ReadFailure(
+        PlatformResultStatus.RESULT_UNKNOWN,
+        "order_state_unproven",
+    )
 
 
 def _records_from_payload(payload: object) -> list[Mapping[str, Any]] | PlatformResultStatus:
@@ -350,6 +490,9 @@ class BuffReadOnlyAdapter:
             )
         if request.account_id != self._account_id:
             return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
+
+        if request.capability is PlatformCapability.READ_BUFF_ORDER_LIFECYCLE:
+            return self._execute_order_lifecycle(request)
 
         raw = _call_read(self._client.get_steam_trades)
         if isinstance(raw, _ReadFailure):
@@ -555,6 +698,63 @@ class BuffReadOnlyAdapter:
             PlatformResultStatus.SUCCESS,
             "buyer_sends_offer",
             DeliveryDirectionEvidence("buyer_sends_offer"),
+        )
+
+    def _execute_order_lifecycle(self, request: PlatformRequest) -> PlatformResult:
+        reader = getattr(self._client, "get_buy_order_history_page", None)
+        if not callable(reader):
+            return _result(
+                request,
+                PlatformResultStatus.UNSUPPORTED,
+                "history_reader_not_available",
+            )
+
+        for page_num in range(1, _MAX_BUFF_LIFECYCLE_PAGES + 1):
+            raw = _call_lifecycle_read(
+                lambda page_num=page_num: reader(page_num, "csgo")
+            )
+            if isinstance(raw, _ReadFailure):
+                return _result(request, raw.status, raw.detail)
+            parsed = _parse_buff_history_page(
+                raw,
+                expected_page_num=page_num,
+            )
+            if isinstance(parsed, _ReadFailure):
+                return _result(request, parsed.status, parsed.detail)
+
+            matches = [
+                item
+                for item in parsed.items
+                if _canonical_raw_identifier(item.get("id"))
+                == request.buff_order_id
+            ]
+            if len(matches) > 1:
+                return _result(
+                    request,
+                    PlatformResultStatus.MALFORMED,
+                    "ambiguous_order",
+                )
+            if len(matches) == 1:
+                classified = _classify_exact_buff_history_item(
+                    matches[0],
+                    buff_order_id=request.buff_order_id,
+                    page_num=page_num,
+                )
+                if isinstance(classified, _ReadFailure):
+                    return _result(request, classified.status, classified.detail)
+                return _result(
+                    request,
+                    PlatformResultStatus.SUCCESS,
+                    classified.lifecycle.value,
+                    classified,
+                )
+            if page_num >= parsed.total_page:
+                break
+
+        return _result(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "order_not_proven",
         )
 
 

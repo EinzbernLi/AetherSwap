@@ -44,6 +44,7 @@ class PlatformCapability(str, Enum):
     READ_INVENTORY_STATE = "read_inventory_state"
     READ_STEAM_TRADE_OFFER = "read_steam_trade_offer"
     READ_STEAM_COMPLETED_TRADE = "read_steam_completed_trade"
+    READ_BUFF_ORDER_LIFECYCLE = "read_buff_order_lifecycle"
     SEND_OFFER = "send_offer"
     ACCEPT_OFFER = "accept_offer"
     CONFIRM_OFFER = "confirm_offer"
@@ -58,6 +59,49 @@ class PlatformResultStatus(str, Enum):
     TIMEOUT = "timeout"
     FAILURE = "failure"
     MALFORMED = "malformed"
+
+
+class BuffOrderLifecycle(str, Enum):
+    PAYING = "paying"
+    REFUNDED = "refunded"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self is BuffOrderLifecycle.REFUNDED
+
+
+@dataclass(frozen=True)
+class BuffOrderLifecycleEvidence:
+    """Positive lifecycle evidence for one exact canonical BUFF order ID."""
+
+    buff_order_id: str
+    lifecycle: BuffOrderLifecycle
+    raw_state: str
+    raw_state_text: str
+    page_num: int
+
+    def __post_init__(self) -> None:
+        _require_id(self.buff_order_id, "buff_order_id")
+        if type(self.lifecycle) is not BuffOrderLifecycle:
+            raise PlatformAdapterProtocolError(
+                "lifecycle must be a BuffOrderLifecycle"
+            )
+        if type(self.raw_state) is not str or not self.raw_state:
+            raise PlatformAdapterProtocolError("raw_state must be a non-empty string")
+        if type(self.raw_state_text) is not str or not self.raw_state_text:
+            raise PlatformAdapterProtocolError(
+                "raw_state_text must be a non-empty string"
+            )
+        if type(self.page_num) is not int or not 1 <= self.page_num <= 10:
+            raise PlatformAdapterProtocolError("page_num must be between 1 and 10")
+        expected = {
+            BuffOrderLifecycle.PAYING: ("PAYING", "等待付款"),
+            BuffOrderLifecycle.REFUNDED: ("FAIL", "购买失败-已退款"),
+        }[self.lifecycle]
+        if (self.raw_state, self.raw_state_text) != expected:
+            raise PlatformAdapterProtocolError(
+                "lifecycle evidence does not match the proven raw BUFF state"
+            )
 
 
 @dataclass(frozen=True)
@@ -380,6 +424,7 @@ PlatformEvidence: TypeAlias = (
     DeliveryDirectionEvidence
     | OfferStateEvidence
     | SellerOrderItemEvidence
+    | BuffOrderLifecycleEvidence
     | SendOfferEvidence
     | AcceptOfferEvidence
     | ConfirmOfferEvidence
@@ -736,6 +781,7 @@ class PlatformResult:
             PlatformCapability.READ_DELIVERY_DIRECTION: DeliveryDirectionEvidence,
             PlatformCapability.READ_OFFER_STATE: OfferStateEvidence,
             PlatformCapability.READ_SELLER_OFFER_ITEM: SellerOrderItemEvidence,
+            PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: BuffOrderLifecycleEvidence,
             PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,
             PlatformCapability.READ_STEAM_TRADE_OFFER: SteamTradeOfferEvidence,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: SteamCompletedTradeEvidence,
@@ -785,6 +831,11 @@ class PlatformResult:
                 != self.request.counterparty_steam_id
                 or self.evidence.goods_id != self.request.host_goods_id
             ):
+                raise PlatformAdapterProtocolError(
+                    "success evidence identity does not match request"
+                )
+        elif self.request.capability is PlatformCapability.READ_BUFF_ORDER_LIFECYCLE:
+            if self.evidence.buff_order_id != self.request.buff_order_id:
                 raise PlatformAdapterProtocolError(
                     "success evidence identity does not match request"
                 )
@@ -941,6 +992,8 @@ class FakePlatformAdapter:
 
 __all__ = [
     "AcceptOfferEvidence",
+    "BuffOrderLifecycle",
+    "BuffOrderLifecycleEvidence",
     "DEFAULT_PLATFORM_CAPABILITIES",
     "CompletedTradeItemEvidence",
     "ConfirmOfferEvidence",
