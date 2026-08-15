@@ -104,6 +104,7 @@ def test_delivery_status_values_are_exact():
         "offer_accept_attempted",
         "awaiting_inventory",
         "offer_terminated",
+        "refund_cleanup_pending",
         "received",
         "result_unknown",
         "blocked",
@@ -462,7 +463,6 @@ def test_exception_targets_reject_non_enum_delivery_mode(
         DeliveryStatus.RESULT_UNKNOWN,
         DeliveryStatus.BLOCKED,
         DeliveryStatus.CANCELLED,
-        DeliveryStatus.REFUNDED,
     ],
 )
 def test_exception_targets_accept_valid_delivery_mode(target: DeliveryStatus):
@@ -1030,7 +1030,6 @@ def test_bound_tradeoffer_id_is_immutable_across_normal_paths():
     [
         DeliveryStatus.BLOCKED,
         DeliveryStatus.CANCELLED,
-        DeliveryStatus.REFUNDED,
     ],
 )
 def test_bound_tradeoffer_id_is_preserved_on_exception_targets(

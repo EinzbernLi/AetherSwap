@@ -278,7 +278,9 @@ def test_preexisting_duplicate_never_authorizes_first_send(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
     bridge = ScriptedBridge(fresh_orders=())
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
 
     integration.register_committed_purchase(_purchase("order-1"))
     result = integration.next_purchase_result(_host_rows("order-1"))
@@ -298,7 +300,9 @@ def test_preexisting_buyer_awaiting_offer_is_never_sent(monkeypatch):
         mode=DeliveryMode.BUYER_SENDS_OFFER,
         revision=2,
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
 
     assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
     assert bridge.events == []
@@ -308,7 +312,9 @@ def test_runtime_identity_mismatch_blocks_before_any_platform_step(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
     bridge = ScriptedBridge(fresh_orders=("order-1",))
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     monkeypatch.setattr(host_integration, "get_current_id", lambda: "account-2")
@@ -343,7 +349,9 @@ def test_batch_registration_finishes_before_any_platform_step(monkeypatch):
         fresh_orders=("order-1", "order-2"),
         transitions=transitions,
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
 
     integration.register_committed_purchase(_purchase("order-1"))
     integration.register_committed_purchase(_purchase("order-2"))
@@ -376,7 +384,9 @@ def test_buyer_awaiting_offer_is_not_authorized_to_send_from_persisted_state(mon
         ),
     }
     bridge = ScriptedBridge(fresh_orders=("order-1",), transitions=transitions)
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     rows = _host_rows("order-1")
@@ -412,7 +422,9 @@ def test_seller_direction_progression_belongs_to_delivery_tick(monkeypatch):
             )
         },
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
@@ -440,7 +452,9 @@ def test_result_unknown_globally_stops_normal_runtime_progression(monkeypatch):
         ),
         "order-2": _delivery("order-2"),
     }
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     rows = _host_rows("order-1", "order-2")
 
     assert integration.next_purchase_result(rows) is AutoOfferResult.RESULT_UNKNOWN
@@ -465,7 +479,9 @@ def test_unresolved_checkout_defers_all_fresh_platform_steps_and_close_does_not_
         lambda: {"stage": "batch_partial"},
     )
     bridge = ScriptedBridge(fresh_orders=("order-1",))
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
@@ -489,7 +505,9 @@ def test_close_never_dispatches_even_after_checkout_is_resolved(monkeypatch):
             )
         },
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     integration.close()
@@ -723,6 +741,7 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     kwargs = coordinator_calls[0][3]
     assert set(registry) == {
         PlatformCapability.READ_DELIVERY_DIRECTION,
+        PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,

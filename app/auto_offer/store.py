@@ -36,6 +36,7 @@ _RECOVERABLE_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
         DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.OFFER_TERMINATED,
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
         DeliveryStatus.RESULT_UNKNOWN,
     }
 )

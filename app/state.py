@@ -7,6 +7,7 @@ from typing import Any, Deque, List, Mapping, Optional
 from app.auto_offer.canary_authority import external_write_guard
 from app.auto_offer.host_ownership import (
     require_broad_transaction_mutation_allowed,
+    require_purchase_append_allowed,
     require_purchase_mutation_allowed,
 )
 from app.database import (
@@ -16,6 +17,7 @@ from app.database import (
     db_complete_purchase_receipt_by_id,
     db_delete_purchase,
     db_delete_purchase_by_id,
+    db_delete_refund_cleanup_purchase,
     db_delete_sale,
     db_get_purchases,
     db_get_sales,
@@ -66,7 +68,19 @@ class State:
 
     def append_purchase(self, p: dict) -> None:
         with external_write_guard("host_transaction_mutation"):
+            require_purchase_append_allowed(p)
             db_append_purchase(p)
+
+    def delete_refund_cleanup_purchase(
+        self,
+        buff_order_id: str,
+        expected_present: bool,
+    ) -> bool:
+        with external_write_guard("host_transaction_mutation"):
+            return db_delete_refund_cleanup_purchase(
+                buff_order_id,
+                expected_present,
+            )
     def get_purchases(self) -> list:
         return db_get_purchases()
     def append_sale(self, s: dict) -> None:

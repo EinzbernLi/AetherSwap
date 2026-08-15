@@ -759,6 +759,7 @@ def test_enabled_builder_uses_exact_current_account_existing_client_and_fixed_st
         config={"auto_offer": {"enabled": True}},
         buff_client=buyer,
         complete_purchase_receipt_by_id=writer,
+        delete_refund_cleanup_purchase=lambda *_args: True,
     )
 
     assert integration is not None
@@ -805,6 +806,7 @@ def test_draining_builder_disables_new_registration_before_store_mutation(monkey
         config={"auto_offer": {"enabled": False}},
         buff_client=object(),
         complete_purchase_receipt_by_id=lambda *_args: True,
+        delete_refund_cleanup_purchase=lambda *_args: True,
         runtime_state=state,
     )
     assert integration is not None
@@ -1073,7 +1075,9 @@ def test_normal_registration_persists_without_enqueuing_dispatch_authority(monke
             return fresh
 
     bridge = RegisteringBridge()
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_host_row("order-1"))
 
     assert [item["buff_order_id"] for item in bridge.registered] == ["order-1"]
@@ -1889,7 +1893,10 @@ def test_offer_terminated_quarantine_does_not_starve_later_safe_order(monkeypatc
     )
 
     assert outcome.visited_order_ids == ("order-1", "order-2")
-    assert bridge.steps == [("order-2", DeliveryStatus.PENDING_DIRECTION)]
+    assert bridge.steps == [
+        ("order-1", DeliveryStatus.OFFER_TERMINATED),
+        ("order-2", DeliveryStatus.PENDING_DIRECTION),
+    ]
 
 
 def test_delivery_tick_result_unknown_short_circuits_every_order(monkeypatch):
@@ -1953,7 +1960,10 @@ def test_safe_wait_advances_cursor_and_allows_following_order(monkeypatch):
 
     assert outcome.next_cursor == "order-2"
     assert outcome.visited_order_ids == ("order-1", "order-2")
-    assert bridge.steps == [("order-2", DeliveryStatus.PENDING_DIRECTION)]
+    assert bridge.steps == [
+        ("order-1", DeliveryStatus.OFFER_TERMINATED),
+        ("order-2", DeliveryStatus.PENDING_DIRECTION),
+    ]
 
 
 def test_delivery_tick_visits_at_most_eight_and_steps_each_at_most_once(monkeypatch):

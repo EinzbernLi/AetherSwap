@@ -3,6 +3,8 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 from app.auto_offer.adapters import (
+    BuffOrderLifecycle,
+    BuffOrderLifecycleEvidence,
     CompletedTradeItemEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
@@ -443,18 +445,20 @@ def test_offer_terminated_only_accepts_same_exact_terminal_read_without_write():
         item,
         result_for(
             item,
-            PlatformCapability.READ_STEAM_TRADE_OFFER,
-            steam_offer_evidence(
-                is_our_offer=False,
-                lifecycle=SteamTradeOfferLifecycle.DECLINED,
+            PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
+            BuffOrderLifecycleEvidence(
+                buff_order_id=item.snapshot.buff_order_id,
+                lifecycle=BuffOrderLifecycle.PAYING,
+                raw_state="PAYING",
+                raw_state_text="等待付款",
+                page_num=1,
             ),
-            steam_tradeoffer_id="offer-1",
         ),
     )
 
     assert decision.result is AutoOfferResult.WAITING
     assert decision.target is None
-    assert decision.detail == "offer_termination_still_proven"
+    assert decision.detail == "refund_not_proven"
 
 
 @pytest.mark.parametrize(

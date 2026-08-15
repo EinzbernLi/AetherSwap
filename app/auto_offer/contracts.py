@@ -41,6 +41,7 @@ class DeliveryStatus(str, Enum):
     OFFER_ACCEPT_ATTEMPTED = "offer_accept_attempted"
     AWAITING_INVENTORY = "awaiting_inventory"
     OFFER_TERMINATED = "offer_terminated"
+    REFUND_CLEANUP_PENDING = "refund_cleanup_pending"
     RECEIVED = "received"
     RESULT_UNKNOWN = "result_unknown"
     BLOCKED = "blocked"
@@ -82,6 +83,7 @@ NORMAL_DIRECTION_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset
         DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.OFFER_TERMINATED,
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
         DeliveryStatus.RECEIVED,
     }
 )
@@ -104,6 +106,7 @@ _TRADEOFFER_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
         DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
         DeliveryStatus.OFFER_TERMINATED,
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
         DeliveryStatus.RECEIVED,
     }
 )
@@ -289,19 +292,32 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
         if snapshot.received_at is not None:
             raise DeliveryContractError("awaiting_inventory cannot have received_at")
 
-    if status is DeliveryStatus.OFFER_TERMINATED:
+    if status in {
+        DeliveryStatus.OFFER_TERMINATED,
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
+    }:
         if snapshot.steam_tradeoffer_id is None:
-            raise DeliveryContractError("offer_terminated requires a trade offer ID")
+            raise DeliveryContractError(
+                f"{status.value} requires a trade offer ID"
+            )
         if snapshot.received_at is not None or snapshot.assetid is not None:
-            raise DeliveryContractError("offer_terminated cannot have receipt evidence")
+            raise DeliveryContractError(
+                f"{status.value} cannot have receipt evidence"
+            )
         if snapshot.delivery_error != "offer_terminated":
-            raise DeliveryContractError("offer_terminated requires offer_terminated error")
+            raise DeliveryContractError(
+                f"{status.value} requires offer_terminated error"
+            )
         if mode is DeliveryMode.BUYER_SENDS_OFFER:
             if snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None:
-                raise DeliveryContractError("buyer offer_terminated requires buyer timing")
+                raise DeliveryContractError(
+                    f"buyer {status.value} requires buyer timing"
+                )
         elif mode is DeliveryMode.SELLER_SENDS_OFFER:
             if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
-                raise DeliveryContractError("seller offer_terminated cannot have buyer timing")
+                raise DeliveryContractError(
+                    f"seller {status.value} cannot have buyer timing"
+                )
 
     if status is DeliveryStatus.RECEIVED:
         if snapshot.pending_receipt:
@@ -372,6 +388,40 @@ _SELLER_PATH: Final[tuple[DeliveryStatus, ...]] = (
     DeliveryStatus.AWAITING_INVENTORY,
     DeliveryStatus.RECEIVED,
 )
+
+_CLEANUP_FROZEN_FIELDS: Final[tuple[str, ...]] = (
+    "purchase_id",
+    "buff_order_id",
+    "account_id",
+    "recipient_steam_id",
+    "delivery_mode",
+    "steam_tradeoffer_id",
+    "offer_attempted_at",
+    "offer_sent_at",
+    "received_at",
+    "delivery_error",
+    "pending_receipt",
+    "assetid",
+    "counterparty_steam_id",
+)
+
+
+def _validate_cleanup_frozen_fields(
+    current: DeliverySnapshot,
+    target: DeliverySnapshot,
+) -> None:
+    if target.delivery_status not in {
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
+        DeliveryStatus.REFUNDED,
+    }:
+        return
+    if any(
+        getattr(current, field) != getattr(target, field)
+        for field in _CLEANUP_FROZEN_FIELDS
+    ):
+        raise DeliveryContractError(
+            "refund cleanup transitions may change delivery_status only"
+        )
 
 
 def _allows_first_tradeoffer_binding(
@@ -468,10 +518,21 @@ def _transition_statuses(
         raise DeliveryContractError("delivery transition must change status")
     if target is DeliveryStatus.RESULT_UNKNOWN:
         return
+    if target is DeliveryStatus.REFUND_CLEANUP_PENDING:
+        if current is not DeliveryStatus.OFFER_TERMINATED:
+            raise DeliveryContractError(
+                "refund cleanup pending requires offer termination"
+            )
+        return
+    if target is DeliveryStatus.REFUNDED:
+        if current is not DeliveryStatus.REFUND_CLEANUP_PENDING:
+            raise DeliveryContractError(
+                "refunded requires refund cleanup pending"
+            )
+        return
     if target in {
         DeliveryStatus.BLOCKED,
         DeliveryStatus.CANCELLED,
-        DeliveryStatus.REFUNDED,
     }:
         return
     if (
@@ -583,6 +644,7 @@ def validate_delivery_transition(
             raise DeliveryContractError("transition endpoints must use the same form")
         validate_delivery_snapshot(current)
         validate_delivery_snapshot(target)
+        _validate_cleanup_frozen_fields(current, target)
         if (
             current.purchase_id,
             current.buff_order_id,

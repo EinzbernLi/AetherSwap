@@ -429,6 +429,84 @@ def db_complete_purchase_receipt_by_id(
         return False
     finally:
         connection.close()
+
+
+def db_delete_refund_cleanup_purchase(
+    buff_order_id: str,
+    expected_present: bool,
+) -> bool:
+    """Delete one exact pending refund purchase inside one Host transaction."""
+
+    if (
+        type(buff_order_id) is not str
+        or not buff_order_id
+        or buff_order_id.strip() != buff_order_id
+        or any(ord(character) < 32 for character in buff_order_id)
+        or type(expected_present) is not bool
+    ):
+        return False
+
+    from sqlalchemy import text as sa_text
+
+    connection = get_engine().connect()
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            sa_text(
+                "SELECT id, buff_order_id, pending_receipt, assetid "
+                "FROM purchase WHERE buff_order_id = :buff_order_id"
+            ),
+            {"buff_order_id": buff_order_id},
+        ).fetchall()
+        if not expected_present:
+            if rows:
+                connection.rollback()
+                return False
+            connection.commit()
+            return True
+        if len(rows) != 1:
+            connection.rollback()
+            return False
+
+        row = rows[0]
+        if (
+            len(row) != 4
+            or type(row[0]) is not int
+            or row[0] <= 0
+            or row[1] != buff_order_id
+            or row[2] not in (True, 1)
+            or row[3] not in (None, "")
+        ):
+            connection.rollback()
+            return False
+
+        cursor = connection.execute(
+            sa_text(
+                "DELETE FROM purchase "
+                "WHERE id = :db_id AND buff_order_id = :buff_order_id "
+                "AND pending_receipt = 1 "
+                "AND (assetid IS NULL OR assetid = '')"
+            ),
+            {
+                "db_id": row[0],
+                "buff_order_id": buff_order_id,
+            },
+        )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            return False
+        connection.commit()
+        return True
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        connection.close()
+
+
 def db_delete_purchase_by_id(db_id: int) -> bool:
     """按主键 ID 删除，O(1) 操作。"""
     if not db_id:

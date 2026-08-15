@@ -205,6 +205,36 @@ def classify_host_purchases(
     ]
 
 
+def require_purchase_append_allowed(
+    purchase: Mapping[str, object],
+    *,
+    store_path: str | Path | None = None,
+) -> None:
+    """Fence exact BUFF-order reuse without creating Auto Offer state."""
+
+    if not isinstance(purchase, Mapping):
+        raise HostPurchaseMutationBlockedError("AUTO_OFFER_OWNERSHIP_UNSAFE")
+    value = purchase.get("buff_order_id")
+    if value is None or value == "":
+        return
+    order_id = _exact_buff_order_id(value)
+    if order_id is None:
+        raise HostPurchaseMutationBlockedError("AUTO_OFFER_INVALID_BUFF_ORDER_ID")
+    try:
+        stored = AutoOfferStore.inspect_existing_by_buff_order_id(
+            AUTO_OFFER_STORE_PATH if store_path is None else Path(store_path),
+            order_id,
+        )
+    except AutoOfferStoreError as exc:
+        raise HostPurchaseMutationBlockedError(
+            "AUTO_OFFER_OWNERSHIP_UNSAFE"
+        ) from exc
+    if stored is not None:
+        raise HostPurchaseMutationBlockedError(
+            "AUTO_OFFER_BUFF_ORDER_ID_ALREADY_OWNED"
+        )
+
+
 def require_purchase_mutation_allowed(
     purchase: Mapping[str, object],
     *,
@@ -299,6 +329,7 @@ __all__ = [
     "HostPurchaseOwnershipDecision",
     "classify_host_purchase",
     "classify_host_purchases",
+    "require_purchase_append_allowed",
     "require_broad_transaction_mutation_allowed",
     "require_purchase_mutation_allowed",
 ]

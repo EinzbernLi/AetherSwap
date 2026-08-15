@@ -10,6 +10,8 @@ import math
 from dataclasses import dataclass, replace
 
 from .adapters import (
+    BuffOrderLifecycle,
+    BuffOrderLifecycleEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
     OfferStateEvidence,
@@ -201,6 +203,38 @@ def _confirmation_waiting(
     )
 
 
+def _plan_refund_cleanup_lifecycle(
+    delivery: StoredDelivery,
+    platform_result: PlatformResult,
+) -> ReconciliationDecision:
+    request = platform_result.request
+    evidence = platform_result.evidence
+    if (
+        request.capability is not PlatformCapability.READ_BUFF_ORDER_LIFECYCLE
+        or type(evidence) is not BuffOrderLifecycleEvidence
+        or evidence.buff_order_id != delivery.snapshot.buff_order_id
+    ):
+        return _blocked(delivery, "evidence_not_allowed")
+    if evidence.lifecycle is BuffOrderLifecycle.PAYING:
+        return _decision(
+            delivery,
+            None,
+            AutoOfferResult.WAITING,
+            True,
+            "refund_not_proven",
+        )
+    if evidence.lifecycle is BuffOrderLifecycle.REFUNDED:
+        return _propose(
+            delivery,
+            replace(
+                delivery.snapshot,
+                delivery_status=DeliveryStatus.REFUND_CLEANUP_PENDING,
+            ),
+            "refund_proven_cleanup_pending",
+        )
+    return _blocked(delivery, "evidence_not_allowed")
+
+
 def _confirmation_recovered(
     delivery: StoredDelivery,
     lifecycle: SteamTradeOfferLifecycle,
@@ -230,17 +264,6 @@ def _plan_steam_trade_offer_lifecycle(
     snapshot = delivery.snapshot
     status = snapshot.delivery_status
     lifecycle = evidence.lifecycle
-
-    if status is DeliveryStatus.OFFER_TERMINATED:
-        if lifecycle.is_terminal_without_trade:
-            return _decision(
-                delivery,
-                None,
-                AutoOfferResult.WAITING,
-                True,
-                "offer_termination_still_proven",
-            )
-        return _blocked(delivery, "terminated_offer_state_changed")
 
     if lifecycle.is_terminal_without_trade:
         return _propose(
@@ -524,6 +547,9 @@ def plan_read_evidence_transition(
     request = platform_result.request
     evidence = platform_result.evidence
 
+    if snapshot.delivery_status is DeliveryStatus.OFFER_TERMINATED:
+        return _plan_refund_cleanup_lifecycle(delivery, platform_result)
+
     if (
         snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         and snapshot.delivery_status in {
@@ -647,7 +673,6 @@ def plan_read_evidence_transition(
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMED,
         DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
-        DeliveryStatus.OFFER_TERMINATED,
     }:
         safe_evidence = _safe_steam_trade_offer_evidence(delivery, platform_result)
         if type(safe_evidence) is str:

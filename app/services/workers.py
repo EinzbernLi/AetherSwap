@@ -285,6 +285,7 @@ def _run_auto_offer_delivery_tick(
         config=cfg,
         buff_client=buff_client,
         complete_purchase_receipt_by_id=get_state().complete_purchase_receipt_by_id,
+        delete_refund_cleanup_purchase=get_state().delete_refund_cleanup_purchase,
         runtime_state=runtime_state,
     )
     if integration is None:

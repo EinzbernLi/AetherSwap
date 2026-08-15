@@ -191,6 +191,11 @@ def inspect_effective_runtime(
                 stored.snapshot.delivery_status in _PROTECTED_STORE_STATUSES
                 and order_id not in host_order_ids
             ):
+                if (
+                    stored.snapshot.delivery_status
+                    is DeliveryStatus.REFUND_CLEANUP_PENDING
+                ):
+                    continue
                 return _safe_blocked(
                     requested_enabled,
                     0,
@@ -198,6 +203,15 @@ def inspect_effective_runtime(
                 )
 
         active_count = 0
+        active_count += sum(
+            1
+            for order_id, stored in index.items()
+            if (
+                stored.snapshot.delivery_status
+                is DeliveryStatus.REFUND_CLEANUP_PENDING
+                and order_id not in host_order_ids
+            )
+        )
         legacy_pending = False
         blocked_delivery = False
         for purchase, decision in zip(host_rows, decisions):

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import requests
@@ -287,6 +287,35 @@ def _preflight_host_pending_by_order(
             raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
         pending[order_id] = purchase
     return pending
+
+
+def _cleanup_expected_present(
+    host_purchases: object,
+    buff_order_id: str,
+) -> bool:
+    if not isinstance(host_purchases, list):
+        raise HostAutoOfferIntegrationError("invalid_host_purchases")
+    matches: list[Mapping[str, object]] = []
+    for purchase in host_purchases:
+        if not isinstance(purchase, Mapping):
+            raise HostAutoOfferIntegrationError("invalid_host_purchase")
+        value = purchase.get("buff_order_id")
+        if value not in (None, "") and _exact_order_id(value) is None:
+            raise HostAutoOfferIntegrationError("invalid_host_order_identity")
+        if value == buff_order_id:
+            matches.append(purchase)
+    if not matches:
+        return False
+    if len(matches) != 1:
+        raise HostAutoOfferIntegrationError("duplicate_host_order_identity")
+    purchase = matches[0]
+    if (
+        _exact_db_id(purchase.get("_db_id")) is None
+        or purchase.get("pending_receipt") is not True
+        or purchase.get("assetid") not in (None, "")
+    ):
+        raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+    return True
 
 
 def _preflight_validate_stored(
@@ -658,6 +687,15 @@ class _ActiveHostAutoOfferBridge:
                 "accept_result_unknown_recovery_failed"
             ) from None
 
+    def complete_refund_cleanup(self, delivery: StoredDelivery) -> StoredDelivery:
+        self._require_open()
+        try:
+            return self._coordinator.complete_refund_cleanup(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "refund_cleanup_store_advance_failed"
+            ) from None
+
     def read_confirmation_state(self, delivery: StoredDelivery):
         self._require_open()
         try:
@@ -800,6 +838,7 @@ def _build_active_host_auto_offer_bridge(
         adapters = {
             PlatformCapability.READ_DELIVERY_DIRECTION: buff_adapter,
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
+            PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
             PlatformCapability.SEND_OFFER: send_adapter,
@@ -861,6 +900,7 @@ class HostAutoOfferIntegration:
         bridge,
         *,
         complete_purchase_receipt_by_id=None,
+        delete_refund_cleanup_purchase=None,
         canary_permit: CanaryPermit | None = None,
         canary_authority: CanaryAuthority | None = None,
         canary_owner_session: object | None = None,
@@ -875,6 +915,7 @@ class HostAutoOfferIntegration:
         self._account_id = bridge.account_id
         self._recipient_steam_id = bridge.recipient_steam_id
         self._complete_purchase_receipt_by_id = complete_purchase_receipt_by_id
+        self._delete_refund_cleanup_purchase = delete_refund_cleanup_purchase
         self._fresh_deliveries: list[StoredDelivery] = []
         self._closed = False
         self._canary_permit = canary_permit
@@ -1102,6 +1143,20 @@ class HostAutoOfferIntegration:
         return stored_by_order
 
     @staticmethod
+    def _normal_sets_match(
+        host_pending: Mapping[str, Mapping[str, object]],
+        stored_by_order: Mapping[str, StoredDelivery],
+    ) -> bool:
+        if any(order_id not in stored_by_order for order_id in host_pending):
+            return False
+        return all(
+            order_id in host_pending
+            or stored.snapshot.delivery_status
+            is DeliveryStatus.REFUND_CLEANUP_PENDING
+            for order_id, stored in stored_by_order.items()
+        )
+
+    @staticmethod
     def _normal_delivery_policy(stored: StoredDelivery) -> str:
         snapshot = stored.snapshot
         if snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
@@ -1109,7 +1164,9 @@ class HostAutoOfferIntegration:
         if snapshot.delivery_status is DeliveryStatus.RECEIVED:
             return "receipt"
         if snapshot.delivery_status is DeliveryStatus.OFFER_TERMINATED:
-            return "wait"
+            return "read"
+        if snapshot.delivery_status is DeliveryStatus.REFUND_CLEANUP_PENDING:
+            return "cleanup"
         if snapshot.delivery_status is DeliveryStatus.OFFER_ACCEPT_ATTEMPTED:
             return (
                 "read"
@@ -1511,6 +1568,71 @@ class HostAutoOfferIntegration:
         }:
             raise HostAutoOfferIntegrationError("delivery_tick_step_invalid")
         return AutoOfferResult.WAITING
+
+    @staticmethod
+    def _same_refunded_cleanup_target(
+        current: StoredDelivery,
+        candidate: object,
+    ) -> bool:
+        if type(candidate) is not StoredDelivery:
+            return False
+        if candidate.revision != current.revision + 1:
+            return False
+        expected = replace(
+            current.snapshot,
+            delivery_status=DeliveryStatus.REFUNDED,
+        )
+        return candidate.snapshot == expected
+
+    def _step_refund_cleanup_once(
+        self,
+        host_purchases: object,
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        snapshot = current.snapshot
+        if (
+            snapshot.delivery_status
+            is not DeliveryStatus.REFUND_CLEANUP_PENDING
+            or current.revision < 1
+            or snapshot.pending_receipt is not True
+            or snapshot.assetid is not None
+            or snapshot.received_at is not None
+        ):
+            raise HostAutoOfferIntegrationError("refund_cleanup_target_invalid")
+        self._require_runtime_identity()
+        if not self._checkout_is_resolved():
+            return AutoOfferResult.WAITING
+
+        refreshed = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+        if refreshed != current:
+            raise HostAutoOfferIntegrationError("refund_cleanup_store_changed")
+        expected_present = _cleanup_expected_present(
+            host_purchases,
+            snapshot.buff_order_id,
+        )
+        callback = self._delete_refund_cleanup_purchase
+        if not callable(callback):
+            raise HostAutoOfferIntegrationError("refund_cleanup_writer_required")
+        try:
+            deleted = callback(snapshot.buff_order_id, expected_present)
+        except Exception:
+            deleted = False
+        if deleted is True:
+            try:
+                completed = self._bridge.complete_refund_cleanup(current)
+            except Exception:
+                completed = None
+            if type(completed) is StoredDelivery:
+                if not self._same_refunded_cleanup_target(current, completed):
+                    raise HostAutoOfferIntegrationError(
+                        "refund_cleanup_result_invalid"
+                    )
+                return AutoOfferResult.WAITING
+
+        concurrent = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+        if self._same_refunded_cleanup_target(current, concurrent):
+            return AutoOfferResult.WAITING
+        return AutoOfferResult.BLOCKED
 
     @staticmethod
     def _is_c2a_result_unknown(stored: StoredDelivery) -> bool:
@@ -2122,14 +2244,18 @@ class HostAutoOfferIntegration:
             for order_id, stored in recoverable.items()
         }
         stored_by_order = self._normal_store_by_order(host_pending, recoverable)
-        if set(host_pending) != set(stored_by_order):
+        if not self._normal_sets_match(host_pending, stored_by_order):
             return AutoOfferResult.BLOCKED
         if any(
             stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
             for stored in stored_by_order.values()
         ):
             return AutoOfferResult.RESULT_UNKNOWN
-        return AutoOfferResult.WAITING if host_pending else AutoOfferResult.COMPLETE
+        return (
+            AutoOfferResult.WAITING
+            if stored_by_order
+            else AutoOfferResult.COMPLETE
+        )
 
     def _run_normal_delivery_tick(
         self,
@@ -2145,7 +2271,7 @@ class HostAutoOfferIntegration:
             for order_id, stored in recoverable.items()
         }
         stored_by_order = self._normal_store_by_order(host_pending, recoverable)
-        if set(host_pending) != set(stored_by_order):
+        if not self._normal_sets_match(host_pending, stored_by_order):
             return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
         if any(
             stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
@@ -2178,6 +2304,16 @@ class HostAutoOfferIntegration:
                     self._write_back_received(
                         host_pending[order_id],
                         stored_by_order[order_id],
+                    )
+                elif policy == "cleanup":
+                    result = self._step_refund_cleanup_once(
+                        host_purchases,
+                        stored_by_order[order_id],
+                    )
+                    return DeliveryTickOutcome(
+                        result,
+                        order_id,
+                        tuple(visited),
                     )
                 elif policy == "read":
                     result = self._step_normal_read_once(stored_by_order[order_id])
@@ -2356,6 +2492,7 @@ def build_host_auto_offer_integration(
     config: Mapping[str, object] | None,
     buff_client,
     complete_purchase_receipt_by_id=None,
+    delete_refund_cleanup_purchase=None,
     canary_permit: CanaryPermit | None = None,
     canary_authority: CanaryAuthority | None = None,
     runtime_state: AutoOfferRuntimeState | None = None,
@@ -2381,13 +2518,14 @@ def build_host_auto_offer_integration(
             raise HostAutoOfferIntegrationError("runtime_state_mode_not_buildable")
     if canary_authority is not None:
         raise HostAutoOfferIntegrationError("canary_authority_injection_forbidden")
-
     authority = get_canary_authority()
     if type(authority) is not CanaryAuthority:
         raise HostAutoOfferIntegrationError("canary_authority_invalid")
     account_id, account_steam_id = _exact_current_account()
     if not callable(complete_purchase_receipt_by_id):
         raise HostAutoOfferIntegrationError("receipt_writer_required")
+    if canary_permit is None and not callable(delete_refund_cleanup_purchase):
+        raise HostAutoOfferIntegrationError("refund_cleanup_writer_required")
     owner_session = None
     if canary_permit is not None:
         if type(canary_permit) is not CanaryPermit:
@@ -2420,6 +2558,7 @@ def build_host_auto_offer_integration(
     return HostAutoOfferIntegration(
         bridge,
         complete_purchase_receipt_by_id=complete_purchase_receipt_by_id,
+        delete_refund_cleanup_purchase=delete_refund_cleanup_purchase,
         canary_permit=canary_permit,
         canary_owner_session=owner_session,
         registration_enabled=registration_enabled,

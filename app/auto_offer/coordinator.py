@@ -62,6 +62,7 @@ _READ_CAPABILITIES = frozenset(
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.READ_INVENTORY_STATE,
+        PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
     }
@@ -356,6 +357,8 @@ def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
             return PlatformCapability.READ_STEAM_TRADE_OFFER
     if status is DeliveryStatus.AWAITING_INVENTORY:
         return PlatformCapability.READ_STEAM_COMPLETED_TRADE
+    if status is DeliveryStatus.OFFER_TERMINATED:
+        return PlatformCapability.READ_BUFF_ORDER_LIFECYCLE
     if status is DeliveryStatus.OFFER_RECEIVED:
         if mode is DeliveryMode.SELLER_SENDS_OFFER:
             return PlatformCapability.READ_STEAM_TRADE_OFFER
@@ -374,7 +377,6 @@ def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
             return PlatformCapability.READ_STEAM_TRADE_OFFER
     if status in {
         DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
-        DeliveryStatus.OFFER_TERMINATED,
     }:
         if mode in {
             DeliveryMode.SELLER_SENDS_OFFER,
@@ -845,6 +847,22 @@ class DeliveryCoordinator:
             raise ReadOnlyCoordinatorError("store_read_failed") from exc
         if type(persisted) is not StoredDelivery or persisted != delivery:
             raise ReadOnlyCoordinatorConflictError("persisted_delivery_mismatch")
+
+    def complete_refund_cleanup(self, delivery: StoredDelivery) -> StoredDelivery:
+        """Advance one exact cleanup-pending delivery to its tombstone."""
+
+        _validate_delivery(delivery)
+        self._read_current(delivery)
+        if (
+            delivery.snapshot.delivery_status
+            is not DeliveryStatus.REFUND_CLEANUP_PENDING
+        ):
+            raise ReadOnlyCoordinatorBlockedError("refund_cleanup_not_pending")
+        target = replace(
+            delivery.snapshot,
+            delivery_status=DeliveryStatus.REFUNDED,
+        )
+        return self._advance(delivery, target)
 
     @staticmethod
     def _confirmation_proof_key(delivery: StoredDelivery) -> tuple[str, str, int, str]:
