@@ -26,11 +26,13 @@ from app.auto_offer.contracts import (
 from app.auto_offer.coordinator import DeliveryCoordinator
 from app.auto_offer.host_ownership import (
     HostPurchaseMutationBlockedError,
+    HostPurchaseOwnership,
     require_purchase_append_allowed,
+    require_purchase_mutation_allowed,
 )
 from app.auto_offer.reconciliation import plan_read_evidence_transition
 from app.auto_offer.runtime_lifecycle import inspect_effective_runtime
-from app.auto_offer.store import StoredDelivery
+from app.auto_offer.store import AutoOfferStoreError, StoredDelivery
 
 
 def _delivery(status: DeliveryStatus = DeliveryStatus.OFFER_TERMINATED) -> StoredDelivery:
@@ -184,6 +186,98 @@ def test_append_fence_rejects_exact_store_reuse(monkeypatch):
     )
     with pytest.raises(HostPurchaseMutationBlockedError, match="ALREADY_OWNED"):
         require_purchase_append_allowed({"buff_order_id": "ORDER_A"})
+
+
+def test_unowned_update_rebind_fence_closes_cleanup_pending_aba(monkeypatch):
+    calls = []
+
+    def inspect(path, order_id):
+        calls.append((path, order_id))
+        return _delivery(DeliveryStatus.REFUND_CLEANUP_PENDING)
+
+    monkeypatch.setattr(
+        "app.auto_offer.host_ownership.AutoOfferStore.inspect_existing_by_buff_order_id",
+        inspect,
+    )
+    with pytest.raises(HostPurchaseMutationBlockedError, match="ALREADY_OWNED"):
+        require_purchase_mutation_allowed(
+            {"buff_order_id": None, "pending_receipt": True, "assetid": None},
+            operation="update",
+            data={"buff_order_id": "ORDER_A", "pending_receipt": True, "assetid": None},
+        )
+    assert calls and calls[-1][1] == "ORDER_A"
+
+
+@pytest.mark.parametrize("target", [" ORDER_A", "ORDER_A\n", 7])
+def test_unowned_update_rebind_rejects_malformed_nonempty_target(target):
+    with pytest.raises(HostPurchaseMutationBlockedError, match="INVALID_BUFF_ORDER_ID"):
+        require_purchase_mutation_allowed(
+            {"buff_order_id": None},
+            operation="update",
+            data={"buff_order_id": target},
+        )
+
+
+def test_unowned_update_rebind_missing_target_preserves_legacy_behavior(monkeypatch):
+    calls = []
+    initialized = []
+
+    def inspect(path, order_id):
+        calls.append((path, order_id))
+        return None
+
+    monkeypatch.setattr(
+        "app.auto_offer.host_ownership.AutoOfferStore.inspect_existing_by_buff_order_id",
+        inspect,
+    )
+    monkeypatch.setattr(
+        "app.auto_offer.host_ownership.AutoOfferStore.initialize",
+        lambda *_args, **_kwargs: initialized.append(True),
+    )
+    decision = require_purchase_mutation_allowed(
+        {"buff_order_id": None},
+        operation="update",
+        data={"buff_order_id": "ORDER_B", "pending_receipt": True, "assetid": None},
+    )
+    assert decision.ownership is HostPurchaseOwnership.UNOWNED
+    assert calls and calls[-1][1] == "ORDER_B"
+    assert initialized == []
+
+
+def test_unowned_update_noop_and_legacy_empty_do_not_lookup_store(monkeypatch):
+    def unexpected_lookup(*_args, **_kwargs):
+        pytest.fail("no-op or legacy empty update must not inspect Store")
+
+    monkeypatch.setattr(
+        "app.auto_offer.host_ownership.AutoOfferStore.inspect_existing_by_buff_order_id",
+        unexpected_lookup,
+    )
+    assert require_purchase_mutation_allowed(
+        {"buff_order_id": None},
+        operation="update",
+        data={"buff_order_id": None},
+    ).ownership is HostPurchaseOwnership.UNOWNED
+    assert require_purchase_mutation_allowed(
+        {"buff_order_id": None},
+        operation="update",
+        data={"buff_order_id": ""},
+    ).ownership is HostPurchaseOwnership.UNOWNED
+
+
+def test_unowned_update_rebind_store_unreadable_fails_closed(monkeypatch):
+    def unreadable(*_args, **_kwargs):
+        raise AutoOfferStoreError("store unreadable")
+
+    monkeypatch.setattr(
+        "app.auto_offer.host_ownership.AutoOfferStore.inspect_existing_by_buff_order_id",
+        unreadable,
+    )
+    with pytest.raises(HostPurchaseMutationBlockedError, match="OWNERSHIP_UNSAFE"):
+        require_purchase_mutation_allowed(
+            {"buff_order_id": None},
+            operation="update",
+            data={"buff_order_id": "ORDER_B"},
+        )
 
 
 def test_cleanup_orphan_is_the_only_protected_store_without_host_exception(monkeypatch):

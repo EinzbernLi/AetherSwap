@@ -264,6 +264,22 @@ def require_purchase_mutation_allowed(
         raise HostPurchaseMutationBlockedError(
             "AUTO_OFFER_DELIVERY_IDENTITY_IMMUTABLE"
         )
+    if (
+        decision.ownership is HostPurchaseOwnership.UNOWNED
+        and operation == "update"
+        and data is not None
+        and "buff_order_id" in data
+    ):
+        current_value = purchase.get("buff_order_id")
+        target_value = data.get("buff_order_id")
+        if target_value == current_value:
+            return decision
+        if target_value is None or target_value == "":
+            return decision
+        require_purchase_append_allowed(
+            {"buff_order_id": target_value},
+            store_path=store_path,
+        )
     return decision
 
 
