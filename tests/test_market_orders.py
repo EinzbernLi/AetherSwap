@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
@@ -307,6 +309,77 @@ def test_新版_orderbook_action_按精确名称拉取目标变体(monkeypatch):
     assert requested["params"]["q"] == "Load"
     assert json.loads(requested["params"]["qp"]) == [730, target]
     assert requested["headers"]["x-valve-request-type"] == "queryAction"
+
+
+def _run_action_orderbook_payload(monkeypatch, payload):
+    from steam import market_orders
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    class DummySession:
+        def get(self, *args, **kwargs):
+            return DummyResponse()
+
+    monkeypatch.setattr(
+        market_orders,
+        "get_proxy_manager",
+        lambda: type("PM", (), {"get_proxies_for_request": lambda self, failed=False: None})(),
+    )
+    return market_orders._fetch_action_orderbook_cny(
+        DummySession(),
+        "Glock-18 | Umbral Rabbit (Battle-Scarred)",
+        730,
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "data": {
+                "success": True,
+                "eCurrency": 23,
+                "data": {
+                    "eCurrency": 23,
+                    "amtMinSellOrder": 890,
+                    "rgCompactSellOrders": [890, 1, 900, 2, 930, 4],
+                },
+            },
+        },
+        {
+            "data": {
+                "eCurrency": 23,
+                "amtMinSellOrder": 890,
+                "rgCompactSellOrders": [890, 1, 900, 2, 930, 4],
+            },
+        },
+    ],
+    ids=["nested-success", "direct-wrapper"],
+)
+def test_新版_orderbook_action兼容嵌套和direct响应(monkeypatch, payload):
+    result, error = _run_action_orderbook_payload(monkeypatch, payload)
+
+    assert error is None
+    assert result == {"lowest_price": 8.9, "sell_orders": [(8.9, 1), (9.0, 2), (9.3, 4)]}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": False, "data": {"rgCompactSellOrders": [890, 1]}},
+        {"data": {"success": False, "data": {"rgCompactSellOrders": [890, 1]}}},
+    ],
+    ids=["outer-failure", "nested-failure"],
+)
+def test_新版_orderbook_action显式失败不得误解包(monkeypatch, payload):
+    result, error = _run_action_orderbook_payload(monkeypatch, payload)
+
+    assert result is None
+    assert "返回失败" in error
 
 
 def test_get_sell_orders_cny_ssr预取错变体时回退新版_orderbook_action(monkeypatch):
