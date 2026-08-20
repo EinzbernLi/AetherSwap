@@ -2,6 +2,7 @@
 from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
+from app.auto_offer.host_ownership import HostPurchaseMutationBlockedError
 from app.state import (
     append_purchase,
     delete_purchase,
@@ -24,6 +25,19 @@ from app.config_loader import (
 from app.shared_market import get_steam_smart_price_cny, batch_fetch_prices
 router = APIRouter()
 STEAM_FEE_FACTOR = 1.15
+
+
+def _auto_offer_mutation_error(exc: HostPurchaseMutationBlockedError) -> dict:
+    messages = {
+        "AUTO_OFFER_PURCHASE_MANAGED": "该购买记录仍由 Auto Offer 管理，当前不可修改或删除",
+        "AUTO_OFFER_OWNERSHIP_UNSAFE": "Auto Offer 所有权状态不安全，已拒绝修改；请先恢复一致状态",
+        "AUTO_OFFER_DELIVERY_IDENTITY_IMMUTABLE": "Auto Offer 已完成交付，该记录的交付身份字段不可修改",
+    }
+    return {
+        "ok": False,
+        "error": messages.get(exc.code, "Auto Offer 所有权检查失败"),
+        "code": exc.code,
+    }
 
 
 class AddPurchaseBody(BaseModel):
@@ -170,12 +184,15 @@ def api_transactions(enrich_current_price: bool = False):
     return {"transactions": out, "resell_ratio": resell_ratio}
 @router.delete("/api/transaction")
 def api_delete_transaction(type: str = "purchase", idx: int = 0, db_id: int = 0):
-    if type == "purchase":
-        ok = delete_purchase_by_id(db_id) if db_id else delete_purchase(idx)
-    elif type == "sale":
-        ok = delete_sale_by_id(db_id) if db_id else delete_sale(idx)
-    else:
-        return {"ok": False, "error": "type 须为 purchase 或 sale"}
+    try:
+        if type == "purchase":
+            ok = delete_purchase_by_id(db_id) if db_id else delete_purchase(idx)
+        elif type == "sale":
+            ok = delete_sale_by_id(db_id) if db_id else delete_sale(idx)
+        else:
+            return {"ok": False, "error": "type 须为 purchase 或 sale"}
+    except HostPurchaseMutationBlockedError as exc:
+        return _auto_offer_mutation_error(exc)
     return {"ok": ok, "error": None if ok else "记录不存在或索引无效"} if ok else {"ok": False, "error": "记录不存在或索引无效"}
 @router.put("/api/transaction")
 def api_update_transaction(body: TransactionUpdateBody):
@@ -217,12 +234,15 @@ def api_update_transaction(body: TransactionUpdateBody):
         if not body.listing:
             data["listing_status"] = None
     ok = False
-    if body.type == "purchase":
-        ok = update_purchase_by_id(body.db_id, data) if body.db_id else update_purchase(body.idx, data)
-    elif body.type == "sale":
-        ok = update_sale(body.idx, data)  
-    else:
-        return {"ok": False, "error": "type 须为 purchase 或 sale"}
+    try:
+        if body.type == "purchase":
+            ok = update_purchase_by_id(body.db_id, data) if body.db_id else update_purchase(body.idx, data)
+        elif body.type == "sale":
+            ok = update_sale(body.idx, data)
+        else:
+            return {"ok": False, "error": "type 须为 purchase 或 sale"}
+    except HostPurchaseMutationBlockedError as exc:
+        return _auto_offer_mutation_error(exc)
     return {"ok": ok, "error": None if ok else "更新失败（记录不存在或无效）"} if ok else {"ok": False, "error": "更新失败"}
 @router.get("/api/stats")
 def api_stats():

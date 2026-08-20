@@ -2,6 +2,10 @@
 from pathlib import Path
 from fastapi import APIRouter
 from app.config_loader import load_app_config_validated
+from app.auto_offer.runtime_lifecycle import (
+    get_effective_runtime_state,
+    runtime_state_payload,
+)
 from app.state import (
     clear_log,
     confirm_payment,
@@ -26,6 +30,9 @@ def api_status():
     st = get_status()
     buff_creds = get_buff()
     st["buff_no_cookie"] = not bool((buff_creds.get("cookies") or "").strip())
+    st["auto_offer_runtime"] = runtime_state_payload(
+        get_effective_runtime_state()
+    )
     return st
 
 @router.get("/api/log")

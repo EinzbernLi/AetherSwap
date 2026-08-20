@@ -5,13 +5,16 @@ one Coordinator registry, one Steam session, and the reviewed exact SEND and
 mobile-confirmation adapters. Platform work is synchronous and bounded; no
 worker, retry loop, scheduler, or background Auto Offer executor is created.
 
-TASK-036 adds an optional canary-only exact-target authority. Normal Auto Offer
-behavior remains unchanged when no canary permit is supplied.
+TASK-036 adds an optional canary-only exact-target authority. TASK-042 keeps
+that canary path separate while normal admission and worker progression use
+distinct bounded façades.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import requests
@@ -37,8 +40,16 @@ from app.auto_offer.contracts import (
     DeliveryMode,
     DeliverySnapshot,
     DeliveryStatus,
+    validate_delivery_snapshot,
 )
-from app.auto_offer.coordinator import DeliveryCoordinator
+from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
+from app.auto_offer.coordinator import (
+    AcceptOfferStepResult,
+    ConfirmationAuthorityReadResult,
+    DeliveryCoordinator,
+    SellerAcceptAuthorityReadResult,
+)
+from app.auto_offer.platform_accept import SteamIncomingOfferAcceptAdapter
 from app.auto_offer.platform_confirmation import SteamTradeOfferConfirmationAdapter
 from app.auto_offer.platform_readonly import (
     BuffReadOnlyAdapter,
@@ -48,6 +59,9 @@ from app.auto_offer.platform_readonly import (
 from app.auto_offer.platform_write import BuffBuyerSendOfferAdapter
 from app.auto_offer.steam_confirmation_transport import (
     SteamTradeOfferConfirmationTransport,
+)
+from app.auto_offer.steam_accept_transport import (
+    SteamIncomingOfferAcceptTransport,
 )
 from app.auto_offer.steam_readonly_transport import (
     SteamCompletedTradeHttpReader,
@@ -60,7 +74,15 @@ from app.services.buff_checkout_guard import get_unresolved_checkout
 
 _STORE_PATH = Path(__file__).resolve().parents[2] / "config" / "auto_offer.db"
 _TIMEOUT_SECONDS = 15.0
-_MAX_RECOVERY_STEPS_PER_DELIVERY = 6
+MAX_DELIVERY_ORDERS_PER_TICK = 8
+_MAX_CANARY_RECOVERY_STEPS_PER_DELIVERY = 6
+
+
+@dataclass(frozen=True)
+class DeliveryTickOutcome:
+    result: AutoOfferResult
+    next_cursor: str | None
+    visited_order_ids: tuple[str, ...]
 
 
 class HostAutoOfferIntegrationError(RuntimeError):
@@ -130,6 +152,12 @@ def _exact_assetid(value: object) -> str | None:
 
 
 def _exact_db_id(value: object) -> int | None:
+    if type(value) is not int or value <= 0:
+        return None
+    return value
+
+
+def _exact_goods_id(value: object) -> int | None:
     if type(value) is not int or value <= 0:
         return None
     return value
@@ -259,6 +287,35 @@ def _preflight_host_pending_by_order(
             raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
         pending[order_id] = purchase
     return pending
+
+
+def _cleanup_expected_present(
+    host_purchases: object,
+    buff_order_id: str,
+) -> bool:
+    if not isinstance(host_purchases, list):
+        raise HostAutoOfferIntegrationError("invalid_host_purchases")
+    matches: list[Mapping[str, object]] = []
+    for purchase in host_purchases:
+        if not isinstance(purchase, Mapping):
+            raise HostAutoOfferIntegrationError("invalid_host_purchase")
+        value = purchase.get("buff_order_id")
+        if value not in (None, "") and _exact_order_id(value) is None:
+            raise HostAutoOfferIntegrationError("invalid_host_order_identity")
+        if value == buff_order_id:
+            matches.append(purchase)
+    if not matches:
+        return False
+    if len(matches) != 1:
+        raise HostAutoOfferIntegrationError("duplicate_host_order_identity")
+    purchase = matches[0]
+    if (
+        _exact_db_id(purchase.get("_db_id")) is None
+        or purchase.get("pending_receipt") is not True
+        or purchase.get("assetid") not in (None, "")
+    ):
+        raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+    return True
 
 
 def _preflight_validate_stored(
@@ -533,6 +590,112 @@ class _ActiveHostAutoOfferBridge:
         except Exception:
             raise HostAutoOfferIntegrationError("auto_offer_step_failed") from None
 
+    def read_send_authority(self, delivery: StoredDelivery):
+        self._require_open()
+        try:
+            return self._coordinator.read_send_authority(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError("send_authority_read_failed") from None
+
+    def send_offer_with_authority(self, delivery: StoredDelivery, proof: object):
+        self._require_open()
+        try:
+            return self._coordinator.send_offer_with_authority(delivery, proof)
+        except Exception:
+            raise HostAutoOfferIntegrationError("send_execution_failed") from None
+
+    def recover_result_unknown_readonly(self, delivery: StoredDelivery):
+        self._require_open()
+        try:
+            return self._coordinator.recover_result_unknown_readonly(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError("result_unknown_recovery_failed") from None
+
+    def read_confirmation_authority(self, delivery: StoredDelivery):
+        self._require_open()
+        try:
+            return self._coordinator.read_confirmation_authority(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "confirmation_authority_read_failed"
+            ) from None
+
+    def confirm_offer_with_authority(self, delivery: StoredDelivery, proof: object):
+        self._require_open()
+        try:
+            return self._coordinator.confirm_offer_with_authority(delivery, proof)
+        except Exception:
+            raise HostAutoOfferIntegrationError("confirmation_execution_failed") from None
+
+    def recover_confirmation_result_unknown_readonly(
+        self,
+        delivery: StoredDelivery,
+    ):
+        self._require_open()
+        try:
+            return self._coordinator.recover_confirmation_result_unknown_readonly(
+                delivery
+            )
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "confirmation_result_unknown_recovery_failed"
+            ) from None
+
+    def read_seller_accept_authority(
+        self,
+        delivery: StoredDelivery,
+        host_goods_id: int,
+    ):
+        self._require_open()
+        try:
+            return self._coordinator.read_seller_accept_authority(
+                delivery,
+                host_goods_id,
+            )
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "seller_accept_authority_read_failed"
+            ) from None
+
+    def accept_offer_with_authority(
+        self,
+        delivery: StoredDelivery,
+        proof: object,
+    ):
+        self._require_open()
+        try:
+            return self._coordinator.accept_offer_with_authority(
+                delivery,
+                proof,
+            )
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "seller_accept_execution_failed"
+            ) from None
+
+    def recover_accept_result_unknown_readonly(
+        self,
+        delivery: StoredDelivery,
+    ):
+        self._require_open()
+        try:
+            return self._coordinator.recover_accept_result_unknown_readonly(
+                delivery
+            )
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "accept_result_unknown_recovery_failed"
+            ) from None
+
+    def complete_refund_cleanup(self, delivery: StoredDelivery) -> StoredDelivery:
+        self._require_open()
+        try:
+            return self._coordinator.complete_refund_cleanup(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "refund_cleanup_store_advance_failed"
+            ) from None
+
     def read_confirmation_state(self, delivery: StoredDelivery):
         self._require_open()
         try:
@@ -557,6 +720,8 @@ def _coordinator_write_guard(
 ):
     if request.capability is PlatformCapability.SEND_OFFER:
         action = "auto_offer_send"
+    elif request.capability is PlatformCapability.ACCEPT_OFFER:
+        action = "auto_offer_accept"
     elif request.capability is PlatformCapability.CONFIRM_OFFER:
         action = "auto_offer_confirm"
     else:
@@ -631,10 +796,20 @@ def _build_active_host_auto_offer_bridge(
             session=session,
             timeout=timeout,
         )
+        accept_transport = None
+        if canary_permit is None:
+            accept_transport = SteamIncomingOfferAcceptTransport(
+                cookie_string,
+                session=session,
+            )
         if (
             trade_offer_reader.bound_account_steam_id != recipient
             or completed_trade_reader.bound_account_steam_id != recipient
             or confirmation_transport.bound_account_steam_id != recipient
+            or (
+                accept_transport is not None
+                and accept_transport.bound_account_steam_id != recipient
+            )
         ):
             raise HostAutoOfferIntegrationError("steam_identity_mismatch")
 
@@ -663,17 +838,28 @@ def _build_active_host_auto_offer_bridge(
         adapters = {
             PlatformCapability.READ_DELIVERY_DIRECTION: buff_adapter,
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
+            PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
             PlatformCapability.SEND_OFFER: send_adapter,
             PlatformCapability.CONFIRM_OFFER: confirmation_adapter,
         }
+        if accept_transport is not None:
+            adapters[PlatformCapability.READ_SELLER_OFFER_ITEM] = buff_adapter
+            adapters[PlatformCapability.ACCEPT_OFFER] = (
+                SteamIncomingOfferAcceptAdapter(
+                    accept_transport,
+                    account_id=account,
+                    recipient_steam_id=recipient,
+                )
+            )
         coordinator = DeliveryCoordinator(
             store,
             adapters,
             timeout_seconds=_TIMEOUT_SECONDS,
             allow_writes=True,
             allow_confirmation_writes=True,
+            allow_accept_writes=accept_transport is not None,
             write_guard=lambda request: _coordinator_write_guard(
                 authority,
                 canary_owner_session,
@@ -707,16 +893,18 @@ def _build_active_host_auto_offer_bridge(
 
 
 class HostAutoOfferIntegration:
-    """Host-owned first-send, bounded recovery, and next-purchase gate seam."""
+    """Host-owned admission and bounded delivery-tick façade."""
 
     def __init__(
         self,
         bridge,
         *,
         complete_purchase_receipt_by_id=None,
+        delete_refund_cleanup_purchase=None,
         canary_permit: CanaryPermit | None = None,
         canary_authority: CanaryAuthority | None = None,
         canary_owner_session: object | None = None,
+        registration_enabled: bool = True,
     ) -> None:
         if canary_authority is not None:
             raise HostAutoOfferIntegrationError("canary_authority_injection_forbidden")
@@ -727,6 +915,7 @@ class HostAutoOfferIntegration:
         self._account_id = bridge.account_id
         self._recipient_steam_id = bridge.recipient_steam_id
         self._complete_purchase_receipt_by_id = complete_purchase_receipt_by_id
+        self._delete_refund_cleanup_purchase = delete_refund_cleanup_purchase
         self._fresh_deliveries: list[StoredDelivery] = []
         self._closed = False
         self._canary_permit = canary_permit
@@ -734,6 +923,9 @@ class HostAutoOfferIntegration:
         self._canary_owner_session = canary_owner_session
         self._canary_preflight_consumed = False
         self._canary_completed = False
+        if type(registration_enabled) is not bool:
+            raise HostAutoOfferIntegrationError("registration_enabled_invalid")
+        self._registration_enabled = registration_enabled
         if canary_permit is not None:
             if type(canary_permit) is not CanaryPermit:
                 raise HostAutoOfferIntegrationError("canary_permit_invalid")
@@ -763,10 +955,18 @@ class HostAutoOfferIntegration:
         return self._canary_permit is not None
 
     @property
+    def registration_enabled(self) -> bool:
+        return self._registration_enabled
+
+    @property
     def canary_completed(self) -> bool:
         return self._canary_completed
 
     def register_committed_purchase(self, purchase: Mapping[str, object]) -> None:
+        if not self._registration_enabled:
+            raise HostAutoOfferIntegrationError(
+                "auto_offer_registration_disabled_during_draining"
+            )
         if self.is_canary:
             raise HostAutoOfferIntegrationError("canary_new_purchase_forbidden")
         try:
@@ -788,7 +988,6 @@ class HostAutoOfferIntegration:
                 or snapshot.recipient_steam_id != self._recipient_steam_id
             ):
                 raise HostAutoOfferIntegrationError("auto_offer_registration_invalid")
-            self._fresh_deliveries.append(fresh)
 
     @staticmethod
     def _checkout_is_resolved() -> bool:
@@ -820,8 +1019,12 @@ class HostAutoOfferIntegration:
             raise HostAutoOfferIntegrationError("canary_duplicate_fresh_delivery")
 
     def _dispatch_fresh_deliveries(self) -> set[str]:
+        """Execute the separately fenced canary fresh-delivery path only."""
+
         if not self._fresh_deliveries:
             return set()
+        if not self.is_canary:
+            raise HostAutoOfferIntegrationError("normal_fresh_delivery_forbidden")
         self._validate_canary_fresh_set()
         deferred_order_ids = {
             item.snapshot.buff_order_id for item in self._fresh_deliveries
@@ -859,14 +1062,7 @@ class HostAutoOfferIntegration:
                 raise HostAutoOfferIntegrationError("send_step_invalid")
 
             if current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
-                if self.is_canary:
-                    return deferred_order_ids
-                recovery_step = self._bridge.step(current)
-                current = getattr(recovery_step, "after", None)
-                if type(current) is not StoredDelivery:
-                    raise HostAutoOfferIntegrationError("recovery_step_invalid")
-                if current.snapshot.delivery_status is not DeliveryStatus.OFFER_SENT:
-                    return deferred_order_ids
+                return deferred_order_ids
             elif current.snapshot.delivery_status is not DeliveryStatus.OFFER_SENT:
                 raise HostAutoOfferIntegrationError("send_step_invalid")
         return deferred_order_ids
@@ -897,6 +1093,118 @@ class HostAutoOfferIntegration:
                 raise HostAutoOfferIntegrationError("invalid_store_order_identity")
             recoverable[order_id] = self._validate_store_delivery(stored, order_id)
         return recoverable
+
+    def _validate_normal_store_state(
+        self,
+        stored: object,
+        order_id: str,
+    ) -> StoredDelivery:
+        stored = self._validate_store_delivery(stored, order_id)
+        if type(stored.revision) is not int or stored.revision < 1:
+            raise HostAutoOfferIntegrationError("invalid_store_revision")
+        try:
+            validate_delivery_snapshot(stored.snapshot)
+        except Exception:
+            raise HostAutoOfferIntegrationError("invalid_store_delivery") from None
+        snapshot = stored.snapshot
+        if snapshot.delivery_status is DeliveryStatus.RECEIVED:
+            if snapshot.pending_receipt is not False or _exact_assetid(snapshot.assetid) is None:
+                raise HostAutoOfferIntegrationError("store_receipt_not_proven")
+            return stored
+        if snapshot.pending_receipt is not True or snapshot.assetid is not None:
+            raise HostAutoOfferIntegrationError("invalid_store_delivery")
+        if snapshot.delivery_status in {
+            DeliveryStatus.BLOCKED,
+            DeliveryStatus.CANCELLED,
+            DeliveryStatus.REFUNDED,
+        }:
+            raise HostAutoOfferIntegrationError("unsafe_store_terminal_state")
+        return stored
+
+    def _normal_store_by_order(
+        self,
+        host_pending: Mapping[str, Mapping[str, object]],
+        recoverable: Mapping[str, StoredDelivery],
+    ) -> dict[str, StoredDelivery]:
+        stored_by_order = {
+            order_id: self._validate_normal_store_state(stored, order_id)
+            for order_id, stored in recoverable.items()
+        }
+        for order_id in host_pending:
+            if order_id in stored_by_order:
+                continue
+            stored = self._bridge.get_by_purchase_id(f"buff:{order_id}")
+            if stored is None:
+                raise HostAutoOfferIntegrationError("host_store_set_mismatch")
+            stored = self._validate_normal_store_state(stored, order_id)
+            if stored.snapshot.delivery_status is not DeliveryStatus.RECEIVED:
+                raise HostAutoOfferIntegrationError("host_store_set_mismatch")
+            stored_by_order[order_id] = stored
+        return stored_by_order
+
+    @staticmethod
+    def _normal_sets_match(
+        host_pending: Mapping[str, Mapping[str, object]],
+        stored_by_order: Mapping[str, StoredDelivery],
+    ) -> bool:
+        if any(order_id not in stored_by_order for order_id in host_pending):
+            return False
+        return all(
+            order_id in host_pending
+            or stored.snapshot.delivery_status
+            is DeliveryStatus.REFUND_CLEANUP_PENDING
+            for order_id, stored in stored_by_order.items()
+        )
+
+    @staticmethod
+    def _normal_delivery_policy(stored: StoredDelivery) -> str:
+        snapshot = stored.snapshot
+        if snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+            return "result_unknown"
+        if snapshot.delivery_status is DeliveryStatus.RECEIVED:
+            return "receipt"
+        if snapshot.delivery_status is DeliveryStatus.OFFER_TERMINATED:
+            return "read"
+        if snapshot.delivery_status is DeliveryStatus.REFUND_CLEANUP_PENDING:
+            return "cleanup"
+        if snapshot.delivery_status is DeliveryStatus.OFFER_ACCEPT_ATTEMPTED:
+            return (
+                "read"
+                if snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER
+                else "block"
+            )
+        if (
+            snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+            and snapshot.delivery_status
+            is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+        ):
+            return "confirm"
+        if (
+            snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER
+            and snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+        ):
+            return "accept"
+        if (
+            snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+            and snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
+        ):
+            return "send"
+        policy = _persisted_recovery_policy(stored)
+        return "block" if policy == "confirm" else policy
+
+    @staticmethod
+    def _visit_order_ids(
+        order_ids: Sequence[str],
+        cursor: str | None,
+    ) -> tuple[str, ...]:
+        ordered = tuple(sorted(order_ids))
+        if not ordered:
+            return ()
+        start = 0 if cursor is None else bisect_right(ordered, cursor)
+        if start == len(ordered):
+            start = 0
+        count = min(MAX_DELIVERY_ORDERS_PER_TICK, len(ordered))
+        return tuple(ordered[(start + offset) % len(ordered)] for offset in range(count))
 
     def _validate_canary_host_target(
         self,
@@ -1048,7 +1356,7 @@ class HostAutoOfferIntegration:
         if completed is not True:
             raise HostAutoOfferIntegrationError("host_receipt_write_failed")
 
-    def _sync_terminal_received(
+    def _sync_canary_terminal_received(
         self,
         host_pending: dict[str, Mapping[str, object]],
         recoverable: Mapping[str, StoredDelivery],
@@ -1119,7 +1427,7 @@ class HostAutoOfferIntegration:
             return AutoOfferResult.BLOCKED, current, False
         return AutoOfferResult.WAITING, current, True
 
-    def _recover_persisted_delivery(
+    def _recover_canary_persisted_delivery(
         self,
         delivery: StoredDelivery,
     ) -> tuple[AutoOfferResult, StoredDelivery]:
@@ -1129,7 +1437,7 @@ class HostAutoOfferIntegration:
             and current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
         ):
             return AutoOfferResult.RESULT_UNKNOWN, current
-        for _step_index in range(_MAX_RECOVERY_STEPS_PER_DELIVERY):
+        for _step_index in range(_MAX_CANARY_RECOVERY_STEPS_PER_DELIVERY):
             policy = _persisted_recovery_policy(current)
             if policy == "wait":
                 return AutoOfferResult.WAITING, current
@@ -1226,6 +1534,826 @@ class HostAutoOfferIntegration:
 
         return AutoOfferResult.BLOCKED, current
 
+    def _step_normal_read_once(self, current: StoredDelivery) -> AutoOfferResult:
+        step_result = self._bridge.step(current)
+        after = getattr(step_result, "after", None)
+        persisted = getattr(step_result, "persisted", None)
+        decision = getattr(step_result, "decision", None)
+        decision_result = getattr(decision, "result", None)
+        if (
+            type(after) is not StoredDelivery
+            or type(persisted) is not bool
+            or type(decision_result) is not AutoOfferResult
+        ):
+            raise HostAutoOfferIntegrationError("delivery_tick_step_invalid")
+        if decision_result is AutoOfferResult.BLOCKED:
+            return AutoOfferResult.BLOCKED
+        if not persisted:
+            if after != current or decision_result is not AutoOfferResult.WAITING:
+                raise HostAutoOfferIntegrationError("delivery_tick_step_invalid")
+            return AutoOfferResult.WAITING
+        if after.revision != current.revision + 1 or after.snapshot == current.snapshot:
+            raise HostAutoOfferIntegrationError("delivery_tick_step_invalid")
+        after = self._validate_normal_store_state(
+            after,
+            current.snapshot.buff_order_id,
+        )
+        if after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+            return AutoOfferResult.RESULT_UNKNOWN
+        if decision_result is AutoOfferResult.RESULT_UNKNOWN:
+            raise HostAutoOfferIntegrationError("delivery_tick_step_invalid")
+        if decision_result not in {
+            AutoOfferResult.WAITING,
+            AutoOfferResult.COMPLETE,
+        }:
+            raise HostAutoOfferIntegrationError("delivery_tick_step_invalid")
+        return AutoOfferResult.WAITING
+
+    @staticmethod
+    def _same_refunded_cleanup_target(
+        current: StoredDelivery,
+        candidate: object,
+    ) -> bool:
+        if type(candidate) is not StoredDelivery:
+            return False
+        if candidate.revision != current.revision + 1:
+            return False
+        expected = replace(
+            current.snapshot,
+            delivery_status=DeliveryStatus.REFUNDED,
+        )
+        return candidate.snapshot == expected
+
+    def _step_refund_cleanup_once(
+        self,
+        host_purchases: object,
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        snapshot = current.snapshot
+        if (
+            snapshot.delivery_status
+            is not DeliveryStatus.REFUND_CLEANUP_PENDING
+            or current.revision < 1
+            or snapshot.pending_receipt is not True
+            or snapshot.assetid is not None
+            or snapshot.received_at is not None
+        ):
+            raise HostAutoOfferIntegrationError("refund_cleanup_target_invalid")
+        self._require_runtime_identity()
+        if not self._checkout_is_resolved():
+            return AutoOfferResult.WAITING
+
+        refreshed = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+        if refreshed != current:
+            raise HostAutoOfferIntegrationError("refund_cleanup_store_changed")
+        expected_present = _cleanup_expected_present(
+            host_purchases,
+            snapshot.buff_order_id,
+        )
+        callback = self._delete_refund_cleanup_purchase
+        if not callable(callback):
+            raise HostAutoOfferIntegrationError("refund_cleanup_writer_required")
+        try:
+            deleted = callback(snapshot.buff_order_id, expected_present)
+        except Exception:
+            deleted = False
+        if deleted is True:
+            try:
+                completed = self._bridge.complete_refund_cleanup(current)
+            except Exception:
+                completed = None
+            if type(completed) is StoredDelivery:
+                if not self._same_refunded_cleanup_target(current, completed):
+                    raise HostAutoOfferIntegrationError(
+                        "refund_cleanup_result_invalid"
+                    )
+                return AutoOfferResult.WAITING
+
+        concurrent = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+        if self._same_refunded_cleanup_target(current, concurrent):
+            return AutoOfferResult.WAITING
+        return AutoOfferResult.BLOCKED
+
+    @staticmethod
+    def _is_c2a_result_unknown(stored: StoredDelivery) -> bool:
+        snapshot = stored.snapshot
+        return (
+            snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+            and snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+            and snapshot.offer_attempted_at is not None
+            and snapshot.steam_tradeoffer_id is None
+            and snapshot.counterparty_steam_id is None
+        )
+
+    @staticmethod
+    def _is_c2b_result_unknown(stored: StoredDelivery) -> bool:
+        snapshot = stored.snapshot
+        return (
+            snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+            and snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+            and snapshot.offer_attempted_at is not None
+            and snapshot.offer_sent_at is not None
+            and snapshot.steam_tradeoffer_id is not None
+            and snapshot.counterparty_steam_id is not None
+        )
+
+    @staticmethod
+    def _is_c3_accept_result_unknown(stored: StoredDelivery) -> bool:
+        snapshot = stored.snapshot
+        return (
+            snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER
+            and snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+            and snapshot.offer_attempted_at is None
+            and snapshot.offer_sent_at is None
+            and snapshot.steam_tradeoffer_id is not None
+            and snapshot.counterparty_steam_id is not None
+        )
+
+    def _step_normal_send_once(
+        self,
+        host_purchase: Mapping[str, object],
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        snapshot = current.snapshot
+        db_id = _exact_db_id(host_purchase.get("_db_id"))
+        if (
+            db_id is None
+            or host_purchase.get("buff_order_id") != snapshot.buff_order_id
+            or host_purchase.get("pending_receipt") is not True
+            or host_purchase.get("assetid") not in (None, "")
+            or snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
+            or snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
+            or snapshot.steam_tradeoffer_id is not None
+            or snapshot.counterparty_steam_id is not None
+        ):
+            raise HostAutoOfferIntegrationError("normal_send_target_invalid")
+        target = CanaryWriteTarget(
+            action="auto_offer_send",
+            purchase_id=snapshot.purchase_id,
+            buff_order_id=snapshot.buff_order_id,
+            account_id=snapshot.account_id,
+            recipient_steam_id=snapshot.recipient_steam_id,
+            host_db_id=db_id,
+        )
+        with self._canary_authority.normal_delivery_write_guard(target):
+            refreshed = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+            refreshed = self._validate_normal_store_state(
+                refreshed,
+                snapshot.buff_order_id,
+            )
+            if refreshed != current:
+                raise HostAutoOfferIntegrationError("normal_send_store_changed")
+            proof = self._bridge.read_send_authority(refreshed)
+            send_result = self._bridge.send_offer_with_authority(refreshed, proof)
+
+            before = getattr(send_result, "before", None)
+            attempted = getattr(send_result, "attempted", None)
+            after = getattr(send_result, "after", None)
+            platform_result = getattr(send_result, "platform_result", None)
+            if (
+                before != refreshed
+                or type(attempted) is not StoredDelivery
+                or type(after) is not StoredDelivery
+                or type(platform_result) is not PlatformResult
+                or attempted.revision != refreshed.revision + 1
+                or after.revision != attempted.revision + 1
+                or attempted.snapshot.delivery_status
+                is not DeliveryStatus.OFFER_ATTEMPTED
+                or after.snapshot.delivery_status is not DeliveryStatus.RESULT_UNKNOWN
+                or after.snapshot.delivery_error != "write_result_unknown"
+                or attempted.snapshot.steam_tradeoffer_id is not None
+                or attempted.snapshot.counterparty_steam_id is not None
+                or after.snapshot.steam_tradeoffer_id is not None
+                or after.snapshot.counterparty_steam_id is not None
+                or platform_result.request.capability
+                is not PlatformCapability.SEND_OFFER
+                or platform_result.request.revision != attempted.revision
+                or platform_result.request.purchase_id != snapshot.purchase_id
+                or platform_result.request.buff_order_id != snapshot.buff_order_id
+                or platform_result.request.account_id != snapshot.account_id
+                or platform_result.request.recipient_steam_id
+                != snapshot.recipient_steam_id
+            ):
+                raise HostAutoOfferIntegrationError("normal_send_result_invalid")
+        return AutoOfferResult.RESULT_UNKNOWN
+
+    def _step_normal_confirm_once(
+        self,
+        host_purchase: Mapping[str, object],
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        snapshot = current.snapshot
+        db_id = _exact_db_id(host_purchase.get("_db_id"))
+        if (
+            db_id is None
+            or host_purchase.get("buff_order_id") != snapshot.buff_order_id
+            or host_purchase.get("pending_receipt") is not True
+            or host_purchase.get("assetid") not in (None, "")
+            or snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
+            or snapshot.delivery_status
+            is not DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+            or snapshot.steam_tradeoffer_id is None
+            or snapshot.counterparty_steam_id is None
+        ):
+            raise HostAutoOfferIntegrationError("normal_confirm_target_invalid")
+        target = CanaryWriteTarget(
+            action="auto_offer_confirm",
+            purchase_id=snapshot.purchase_id,
+            buff_order_id=snapshot.buff_order_id,
+            account_id=snapshot.account_id,
+            recipient_steam_id=snapshot.recipient_steam_id,
+            host_db_id=db_id,
+        )
+        with self._canary_authority.normal_delivery_write_guard(target):
+            refreshed = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+            refreshed = self._validate_normal_store_state(
+                refreshed,
+                snapshot.buff_order_id,
+            )
+            if refreshed != current:
+                raise HostAutoOfferIntegrationError("normal_confirm_store_changed")
+            authority_result = self._bridge.read_confirmation_authority(refreshed)
+            if (
+                type(authority_result) is not ConfirmationAuthorityReadResult
+                or authority_result.before != refreshed
+            ):
+                raise HostAutoOfferIntegrationError(
+                    "normal_confirmation_authority_invalid"
+                )
+            steam_result = authority_result.steam_result
+            proof = authority_result.proof
+            if steam_result is None:
+                if proof is not None:
+                    raise HostAutoOfferIntegrationError(
+                        "normal_confirmation_authority_invalid"
+                    )
+                return AutoOfferResult.WAITING
+            decision_result = steam_result.decision.result
+            if decision_result is AutoOfferResult.BLOCKED:
+                if steam_result.persisted or steam_result.after != refreshed or proof is not None:
+                    raise HostAutoOfferIntegrationError(
+                        "normal_confirmation_authority_invalid"
+                    )
+                return AutoOfferResult.BLOCKED
+            if steam_result.persisted:
+                after = steam_result.after
+                if (
+                    proof is not None
+                    or decision_result is not AutoOfferResult.WAITING
+                    or after.revision != refreshed.revision + 1
+                    or after.snapshot.delivery_status not in {
+                        DeliveryStatus.OFFER_CONFIRMED,
+                        DeliveryStatus.OFFER_TERMINATED,
+                    }
+                    or after.snapshot.steam_tradeoffer_id
+                    != refreshed.snapshot.steam_tradeoffer_id
+                    or after.snapshot.counterparty_steam_id
+                    != refreshed.snapshot.counterparty_steam_id
+                ):
+                    raise HostAutoOfferIntegrationError(
+                        "normal_confirmation_authority_invalid"
+                    )
+                return AutoOfferResult.WAITING
+            if (
+                steam_result.after != refreshed
+                or decision_result is not AutoOfferResult.WAITING
+            ):
+                raise HostAutoOfferIntegrationError(
+                    "normal_confirmation_authority_invalid"
+                )
+            if proof is None:
+                return AutoOfferResult.WAITING
+
+            confirm_result = self._bridge.confirm_offer_with_authority(
+                refreshed,
+                proof,
+            )
+            before = getattr(confirm_result, "before", None)
+            attempted = getattr(confirm_result, "attempted", None)
+            after = getattr(confirm_result, "after", None)
+            platform_result = getattr(confirm_result, "platform_result", None)
+            if (
+                before != refreshed
+                or type(attempted) is not StoredDelivery
+                or type(after) is not StoredDelivery
+                or type(platform_result) is not PlatformResult
+                or attempted.revision != refreshed.revision + 1
+                or attempted.snapshot.delivery_status
+                is not DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED
+                or attempted.snapshot.steam_tradeoffer_id
+                != snapshot.steam_tradeoffer_id
+                or attempted.snapshot.counterparty_steam_id
+                != snapshot.counterparty_steam_id
+                or platform_result.request.capability
+                is not PlatformCapability.CONFIRM_OFFER
+                or platform_result.request.revision != attempted.revision
+                or platform_result.request.purchase_id != snapshot.purchase_id
+                or platform_result.request.buff_order_id != snapshot.buff_order_id
+                or platform_result.request.account_id != snapshot.account_id
+                or platform_result.request.recipient_steam_id
+                != snapshot.recipient_steam_id
+                or platform_result.request.steam_tradeoffer_id
+                != snapshot.steam_tradeoffer_id
+            ):
+                raise HostAutoOfferIntegrationError("normal_confirm_result_invalid")
+            if platform_result.status is PlatformResultStatus.SUCCESS:
+                if (
+                    after.revision != attempted.revision + 1
+                    or after.snapshot.delivery_status
+                    is not DeliveryStatus.OFFER_CONFIRMED
+                ):
+                    raise HostAutoOfferIntegrationError("normal_confirm_result_invalid")
+            elif platform_result.status is PlatformResultStatus.RESULT_UNKNOWN:
+                if (
+                    after.revision != attempted.revision + 1
+                    or after.snapshot.delivery_status is not DeliveryStatus.RESULT_UNKNOWN
+                    or after.snapshot.delivery_error != "write_result_unknown"
+                ):
+                    raise HostAutoOfferIntegrationError("normal_confirm_result_invalid")
+                return AutoOfferResult.RESULT_UNKNOWN
+            elif after != attempted:
+                raise HostAutoOfferIntegrationError("normal_confirm_result_invalid")
+        return AutoOfferResult.WAITING
+
+    def _step_normal_accept_once(
+        self,
+        host_purchase: Mapping[str, object],
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        snapshot = current.snapshot
+        db_id = _exact_db_id(host_purchase.get("_db_id"))
+        goods_id = _exact_goods_id(host_purchase.get("goods_id"))
+        if (
+            db_id is None
+            or goods_id is None
+            or host_purchase.get("buff_order_id") != snapshot.buff_order_id
+            or host_purchase.get("pending_receipt") is not True
+            or host_purchase.get("assetid") not in (None, "")
+            or snapshot.delivery_mode is not DeliveryMode.SELLER_SENDS_OFFER
+            or snapshot.delivery_status is not DeliveryStatus.OFFER_CONFIRMED
+            or snapshot.steam_tradeoffer_id is None
+            or snapshot.counterparty_steam_id is None
+            or snapshot.offer_attempted_at is not None
+            or snapshot.offer_sent_at is not None
+        ):
+            raise HostAutoOfferIntegrationError("normal_accept_target_invalid")
+        target = CanaryWriteTarget(
+            action="auto_offer_accept",
+            purchase_id=snapshot.purchase_id,
+            buff_order_id=snapshot.buff_order_id,
+            account_id=snapshot.account_id,
+            recipient_steam_id=snapshot.recipient_steam_id,
+            host_db_id=db_id,
+            host_goods_id=goods_id,
+        )
+        with self._canary_authority.normal_delivery_write_guard(target):
+            refreshed = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+            refreshed = self._validate_normal_store_state(
+                refreshed,
+                snapshot.buff_order_id,
+            )
+            if refreshed != current:
+                raise HostAutoOfferIntegrationError("normal_accept_store_changed")
+            authority_result = self._bridge.read_seller_accept_authority(
+                refreshed,
+                goods_id,
+            )
+            if (
+                type(authority_result) is not SellerAcceptAuthorityReadResult
+                or authority_result.before != refreshed
+                or authority_result.host_goods_id != goods_id
+            ):
+                raise HostAutoOfferIntegrationError(
+                    "normal_accept_authority_invalid"
+                )
+            steam_result = authority_result.steam_result
+            proof = authority_result.proof
+            if steam_result is None:
+                if proof is not None:
+                    raise HostAutoOfferIntegrationError(
+                        "normal_accept_authority_invalid"
+                    )
+                return AutoOfferResult.WAITING
+            decision_result = steam_result.decision.result
+            if decision_result is AutoOfferResult.BLOCKED:
+                if steam_result.persisted or steam_result.after != refreshed or proof is not None:
+                    raise HostAutoOfferIntegrationError(
+                        "normal_accept_authority_invalid"
+                    )
+                return AutoOfferResult.BLOCKED
+            if steam_result.persisted:
+                after = steam_result.after
+                if (
+                    proof is not None
+                    or decision_result is not AutoOfferResult.WAITING
+                    or after.revision != refreshed.revision + 1
+                    or after.snapshot.delivery_status not in {
+                        DeliveryStatus.AWAITING_INVENTORY,
+                        DeliveryStatus.OFFER_TERMINATED,
+                    }
+                    or after.snapshot.steam_tradeoffer_id
+                    != refreshed.snapshot.steam_tradeoffer_id
+                    or after.snapshot.counterparty_steam_id
+                    != refreshed.snapshot.counterparty_steam_id
+                ):
+                    raise HostAutoOfferIntegrationError(
+                        "normal_accept_authority_invalid"
+                    )
+                return AutoOfferResult.WAITING
+            if (
+                steam_result.after != refreshed
+                or decision_result is not AutoOfferResult.WAITING
+            ):
+                raise HostAutoOfferIntegrationError(
+                    "normal_accept_authority_invalid"
+                )
+            if proof is None:
+                return AutoOfferResult.WAITING
+
+            final_current = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+            final_current = self._validate_normal_store_state(
+                final_current,
+                snapshot.buff_order_id,
+            )
+            if final_current != refreshed:
+                raise HostAutoOfferIntegrationError(
+                    "normal_accept_store_changed"
+                )
+            accept_result = self._bridge.accept_offer_with_authority(
+                final_current,
+                proof,
+            )
+            if type(accept_result) is not AcceptOfferStepResult:
+                raise HostAutoOfferIntegrationError("normal_accept_result_invalid")
+            before = accept_result.before
+            attempted = accept_result.attempted
+            after = accept_result.after
+            platform_result = accept_result.platform_result
+            request = platform_result.request
+            if (
+                before != final_current
+                or attempted.revision != final_current.revision + 1
+                or attempted.snapshot.delivery_status
+                is not DeliveryStatus.OFFER_ACCEPT_ATTEMPTED
+                or attempted.snapshot.steam_tradeoffer_id
+                != snapshot.steam_tradeoffer_id
+                or attempted.snapshot.counterparty_steam_id
+                != snapshot.counterparty_steam_id
+                or request.capability is not PlatformCapability.ACCEPT_OFFER
+                or request.revision != attempted.revision
+                or request.purchase_id != snapshot.purchase_id
+                or request.buff_order_id != snapshot.buff_order_id
+                or request.account_id != snapshot.account_id
+                or request.recipient_steam_id != snapshot.recipient_steam_id
+                or request.steam_tradeoffer_id != snapshot.steam_tradeoffer_id
+                or request.counterparty_steam_id
+                != snapshot.counterparty_steam_id
+                or request.host_goods_id is not None
+            ):
+                raise HostAutoOfferIntegrationError("normal_accept_result_invalid")
+            if (
+                platform_result.status is PlatformResultStatus.FAILURE
+                and platform_result.detail == "write_preflight_failed"
+            ):
+                if after != attempted:
+                    raise HostAutoOfferIntegrationError(
+                        "normal_accept_result_invalid"
+                    )
+                return AutoOfferResult.WAITING
+            if (
+                after.revision != attempted.revision + 1
+                or after.snapshot.delivery_status is not DeliveryStatus.RESULT_UNKNOWN
+                or after.snapshot.delivery_error != "write_result_unknown"
+            ):
+                raise HostAutoOfferIntegrationError("normal_accept_result_invalid")
+        return AutoOfferResult.RESULT_UNKNOWN
+
+    def _step_result_unknown_readonly_once(
+        self,
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        result = self._bridge.recover_result_unknown_readonly(current)
+        after = getattr(result, "after", None)
+        persisted = getattr(result, "persisted", None)
+        decision = getattr(result, "decision", None)
+        decision_result = getattr(decision, "result", None)
+        if (
+            type(after) is not StoredDelivery
+            or type(persisted) is not bool
+            or type(decision_result) is not AutoOfferResult
+        ):
+            raise HostAutoOfferIntegrationError("result_unknown_recovery_invalid")
+        if decision_result is AutoOfferResult.BLOCKED:
+            if persisted or after != current:
+                raise HostAutoOfferIntegrationError("result_unknown_recovery_invalid")
+            return AutoOfferResult.BLOCKED
+        if not persisted:
+            if after != current or decision_result is not AutoOfferResult.WAITING:
+                raise HostAutoOfferIntegrationError("result_unknown_recovery_invalid")
+            return AutoOfferResult.RESULT_UNKNOWN
+        snapshot = after.snapshot
+        if (
+            decision_result is not AutoOfferResult.WAITING
+            or after.revision != current.revision + 1
+            or snapshot.delivery_status is not DeliveryStatus.OFFER_SENT
+            or snapshot.delivery_error is not None
+            or snapshot.steam_tradeoffer_id is None
+            or snapshot.counterparty_steam_id is None
+            or snapshot.purchase_id != current.snapshot.purchase_id
+            or snapshot.buff_order_id != current.snapshot.buff_order_id
+            or snapshot.account_id != current.snapshot.account_id
+            or snapshot.recipient_steam_id
+            != current.snapshot.recipient_steam_id
+        ):
+            raise HostAutoOfferIntegrationError("result_unknown_recovery_invalid")
+        return AutoOfferResult.WAITING
+
+    def _step_confirmation_result_unknown_readonly_once(
+        self,
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        result = self._bridge.recover_confirmation_result_unknown_readonly(current)
+        after = getattr(result, "after", None)
+        persisted = getattr(result, "persisted", None)
+        decision = getattr(result, "decision", None)
+        decision_result = getattr(decision, "result", None)
+        if (
+            type(after) is not StoredDelivery
+            or type(persisted) is not bool
+            or type(decision_result) is not AutoOfferResult
+        ):
+            raise HostAutoOfferIntegrationError(
+                "confirmation_result_unknown_recovery_invalid"
+            )
+        if decision_result is AutoOfferResult.BLOCKED:
+            if persisted or after != current:
+                raise HostAutoOfferIntegrationError(
+                    "confirmation_result_unknown_recovery_invalid"
+                )
+            return AutoOfferResult.BLOCKED
+        if not persisted:
+            if after != current or decision_result is not AutoOfferResult.WAITING:
+                raise HostAutoOfferIntegrationError(
+                    "confirmation_result_unknown_recovery_invalid"
+                )
+            return AutoOfferResult.RESULT_UNKNOWN
+        snapshot = after.snapshot
+        if (
+            decision_result is not AutoOfferResult.WAITING
+            or after.revision != current.revision + 1
+            or snapshot.delivery_status not in {
+                DeliveryStatus.OFFER_CONFIRMED,
+                DeliveryStatus.OFFER_TERMINATED,
+            }
+            or snapshot.steam_tradeoffer_id
+            != current.snapshot.steam_tradeoffer_id
+            or snapshot.counterparty_steam_id
+            != current.snapshot.counterparty_steam_id
+            or snapshot.purchase_id != current.snapshot.purchase_id
+            or snapshot.buff_order_id != current.snapshot.buff_order_id
+            or snapshot.account_id != current.snapshot.account_id
+            or snapshot.recipient_steam_id
+            != current.snapshot.recipient_steam_id
+            or (
+                snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+                and snapshot.delivery_error is not None
+            )
+        ):
+            raise HostAutoOfferIntegrationError(
+                "confirmation_result_unknown_recovery_invalid"
+            )
+        return AutoOfferResult.WAITING
+
+    def _step_accept_result_unknown_readonly_once(
+        self,
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        result = self._bridge.recover_accept_result_unknown_readonly(current)
+        after = getattr(result, "after", None)
+        persisted = getattr(result, "persisted", None)
+        decision = getattr(result, "decision", None)
+        decision_result = getattr(decision, "result", None)
+        if (
+            type(after) is not StoredDelivery
+            or type(persisted) is not bool
+            or type(decision_result) is not AutoOfferResult
+        ):
+            raise HostAutoOfferIntegrationError(
+                "accept_result_unknown_recovery_invalid"
+            )
+        if decision_result is AutoOfferResult.BLOCKED:
+            if persisted or after != current:
+                raise HostAutoOfferIntegrationError(
+                    "accept_result_unknown_recovery_invalid"
+                )
+            return AutoOfferResult.BLOCKED
+        if not persisted:
+            if after != current or decision_result is not AutoOfferResult.WAITING:
+                raise HostAutoOfferIntegrationError(
+                    "accept_result_unknown_recovery_invalid"
+                )
+            return AutoOfferResult.RESULT_UNKNOWN
+        snapshot = after.snapshot
+        if (
+            decision_result is not AutoOfferResult.WAITING
+            or after.revision != current.revision + 1
+            or snapshot.delivery_status not in {
+                DeliveryStatus.AWAITING_INVENTORY,
+                DeliveryStatus.OFFER_TERMINATED,
+            }
+            or snapshot.steam_tradeoffer_id
+            != current.snapshot.steam_tradeoffer_id
+            or snapshot.counterparty_steam_id
+            != current.snapshot.counterparty_steam_id
+            or snapshot.purchase_id != current.snapshot.purchase_id
+            or snapshot.buff_order_id != current.snapshot.buff_order_id
+            or snapshot.account_id != current.snapshot.account_id
+            or snapshot.recipient_steam_id
+            != current.snapshot.recipient_steam_id
+            or (
+                snapshot.delivery_status is DeliveryStatus.AWAITING_INVENTORY
+                and snapshot.delivery_error is not None
+            )
+            or (
+                snapshot.delivery_status is DeliveryStatus.OFFER_TERMINATED
+                and snapshot.delivery_error != "offer_terminated"
+            )
+        ):
+            raise HostAutoOfferIntegrationError(
+                "accept_result_unknown_recovery_invalid"
+            )
+        return AutoOfferResult.WAITING
+
+    def _run_result_unknown_recovery_tick(
+        self,
+        recoverable: Mapping[str, StoredDelivery],
+        *,
+        cursor: str | None,
+    ) -> DeliveryTickOutcome:
+        unknown_order_ids = {
+            order_id
+            for order_id, stored in recoverable.items()
+            if stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+        }
+        eligible = {
+            order_id: stored
+            for order_id, stored in recoverable.items()
+            if self._is_c2a_result_unknown(stored)
+            or self._is_c2b_result_unknown(stored)
+            or self._is_c3_accept_result_unknown(stored)
+        }
+        if set(eligible) != unknown_order_ids:
+            return DeliveryTickOutcome(AutoOfferResult.RESULT_UNKNOWN, cursor, ())
+        visited: list[str] = []
+        for order_id in self._visit_order_ids(tuple(eligible), cursor):
+            visited.append(order_id)
+            stored = eligible[order_id]
+            if self._is_c2a_result_unknown(stored):
+                result = self._step_result_unknown_readonly_once(stored)
+            elif self._is_c2b_result_unknown(stored):
+                result = self._step_confirmation_result_unknown_readonly_once(stored)
+            else:
+                result = self._step_accept_result_unknown_readonly_once(stored)
+            if result is AutoOfferResult.BLOCKED:
+                return DeliveryTickOutcome(
+                    AutoOfferResult.BLOCKED,
+                    order_id,
+                    tuple(visited),
+                )
+        refreshed = self._recoverable_by_order()
+        outcome = (
+            AutoOfferResult.RESULT_UNKNOWN
+            if any(
+                stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+                for stored in refreshed.values()
+            )
+            else AutoOfferResult.WAITING
+        )
+        return DeliveryTickOutcome(
+            outcome,
+            visited[-1] if visited else cursor,
+            tuple(visited),
+        )
+
+    def _normal_admission_result(self, host_purchases: object) -> AutoOfferResult:
+        self._require_runtime_identity()
+        host_pending = self._host_pending_by_order(host_purchases)
+        recoverable = self._recoverable_by_order()
+        recoverable = {
+            order_id: self._validate_normal_store_state(stored, order_id)
+            for order_id, stored in recoverable.items()
+        }
+        stored_by_order = self._normal_store_by_order(host_pending, recoverable)
+        if not self._normal_sets_match(host_pending, stored_by_order):
+            return AutoOfferResult.BLOCKED
+        if any(
+            stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+            for stored in stored_by_order.values()
+        ):
+            return AutoOfferResult.RESULT_UNKNOWN
+        return (
+            AutoOfferResult.WAITING
+            if stored_by_order
+            else AutoOfferResult.COMPLETE
+        )
+
+    def _run_normal_delivery_tick(
+        self,
+        host_purchases: object,
+        *,
+        cursor: str | None,
+    ) -> DeliveryTickOutcome:
+        self._require_runtime_identity()
+        host_pending = self._host_pending_by_order(host_purchases)
+        recoverable = self._recoverable_by_order()
+        recoverable = {
+            order_id: self._validate_normal_store_state(stored, order_id)
+            for order_id, stored in recoverable.items()
+        }
+        stored_by_order = self._normal_store_by_order(host_pending, recoverable)
+        if not self._normal_sets_match(host_pending, stored_by_order):
+            return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
+        if any(
+            stored.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+            for stored in stored_by_order.values()
+        ):
+            if not self._checkout_is_resolved():
+                return DeliveryTickOutcome(AutoOfferResult.RESULT_UNKNOWN, cursor, ())
+            return self._run_result_unknown_recovery_tick(
+                stored_by_order,
+                cursor=cursor,
+            )
+
+        policies = {
+            order_id: self._normal_delivery_policy(stored)
+            for order_id, stored in stored_by_order.items()
+        }
+        if any(policy == "block" for policy in policies.values()):
+            return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
+        if not stored_by_order:
+            return DeliveryTickOutcome(AutoOfferResult.COMPLETE, None, ())
+        if not self._checkout_is_resolved():
+            return DeliveryTickOutcome(AutoOfferResult.WAITING, cursor, ())
+
+        visited: list[str] = []
+        for order_id in self._visit_order_ids(tuple(stored_by_order), cursor):
+            visited.append(order_id)
+            try:
+                policy = policies[order_id]
+                if policy == "receipt":
+                    self._write_back_received(
+                        host_pending[order_id],
+                        stored_by_order[order_id],
+                    )
+                elif policy == "cleanup":
+                    result = self._step_refund_cleanup_once(
+                        host_purchases,
+                        stored_by_order[order_id],
+                    )
+                    return DeliveryTickOutcome(
+                        result,
+                        order_id,
+                        tuple(visited),
+                    )
+                elif policy == "read":
+                    result = self._step_normal_read_once(stored_by_order[order_id])
+                    if result in {
+                        AutoOfferResult.BLOCKED,
+                        AutoOfferResult.RESULT_UNKNOWN,
+                    }:
+                        return DeliveryTickOutcome(result, order_id, tuple(visited))
+                elif policy == "send":
+                    result = self._step_normal_send_once(
+                        host_pending[order_id],
+                        stored_by_order[order_id],
+                    )
+                    return DeliveryTickOutcome(result, order_id, tuple(visited))
+                elif policy == "confirm":
+                    result = self._step_normal_confirm_once(
+                        host_pending[order_id],
+                        stored_by_order[order_id],
+                    )
+                    return DeliveryTickOutcome(result, order_id, tuple(visited))
+                elif policy == "accept":
+                    result = self._step_normal_accept_once(
+                        host_pending[order_id],
+                        stored_by_order[order_id],
+                    )
+                    return DeliveryTickOutcome(result, order_id, tuple(visited))
+                elif policy != "wait":
+                    raise HostAutoOfferIntegrationError("delivery_tick_policy_invalid")
+            except Exception:
+                return DeliveryTickOutcome(
+                    AutoOfferResult.BLOCKED,
+                    order_id,
+                    tuple(visited),
+                )
+        return DeliveryTickOutcome(
+            AutoOfferResult.WAITING,
+            visited[-1],
+            tuple(visited),
+        )
+
     def _next_purchase_result_canary(self, host_purchases: object) -> AutoOfferResult:
         if self._canary_completed:
             return AutoOfferResult.COMPLETE
@@ -1241,7 +2369,7 @@ class HostAutoOfferIntegration:
         ):
             return AutoOfferResult.RESULT_UNKNOWN
         if not recoverable:
-            self._sync_terminal_received(host_pending, recoverable)
+            self._sync_canary_terminal_received(host_pending, recoverable)
             if not host_pending:
                 if self._canary_owner_session is None:
                     raise HostAutoOfferIntegrationError("canary_owner_session_required")
@@ -1255,7 +2383,7 @@ class HostAutoOfferIntegration:
         host_pending = self._host_pending_by_order(host_purchases)
         recoverable = self._recoverable_by_order()
         if not recoverable:
-            self._sync_terminal_received(host_pending, recoverable)
+            self._sync_canary_terminal_received(host_pending, recoverable)
             if not host_pending:
                 if self._canary_owner_session is None:
                     raise HostAutoOfferIntegrationError("canary_owner_session_required")
@@ -1266,7 +2394,7 @@ class HostAutoOfferIntegration:
         self._validate_canary_current_sets(host_pending, recoverable)
         if recoverable[target].snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
             return AutoOfferResult.RESULT_UNKNOWN
-        self._sync_terminal_received(host_pending, recoverable)
+        self._sync_canary_terminal_received(host_pending, recoverable)
         if not host_pending:
             if self._canary_owner_session is None:
                 raise HostAutoOfferIntegrationError("canary_owner_session_required")
@@ -1278,7 +2406,7 @@ class HostAutoOfferIntegration:
 
         stored = recoverable[target]
         if target not in deferred_fresh:
-            result, current = self._recover_persisted_delivery(stored)
+            result, current = self._recover_canary_persisted_delivery(stored)
             if result in {
                 AutoOfferResult.BLOCKED,
                 AutoOfferResult.RESULT_UNKNOWN,
@@ -1312,67 +2440,51 @@ class HostAutoOfferIntegration:
             with guard:
                 if self.is_canary:
                     return self._next_purchase_result_canary(host_purchases)
-
-                deferred_fresh = self._dispatch_fresh_deliveries()
-                self._require_runtime_identity()
-                host_pending = self._host_pending_by_order(host_purchases)
-                recoverable = self._recoverable_by_order()
-                self._sync_terminal_received(host_pending, recoverable)
-                if set(host_pending) != set(recoverable):
-                    return AutoOfferResult.BLOCKED
-
-                for order_id, stored in tuple(recoverable.items()):
-                    if order_id in deferred_fresh:
-                        continue
-                    result, current = self._recover_persisted_delivery(stored)
-                    if result in {
-                        AutoOfferResult.BLOCKED,
-                        AutoOfferResult.RESULT_UNKNOWN,
-                    }:
-                        return result
-                    if current.snapshot.delivery_status is DeliveryStatus.RECEIVED:
-                        purchase = host_pending.get(order_id)
-                        if purchase is None:
-                            return AutoOfferResult.BLOCKED
-                        self._write_back_received(purchase, current)
-                        del host_pending[order_id]
-
-                refreshed = self._recoverable_by_order()
-                if set(host_pending) != set(refreshed):
-                    return AutoOfferResult.BLOCKED
-                if not host_pending:
-                    return AutoOfferResult.COMPLETE
-                return AutoOfferResult.WAITING
+                return self._normal_admission_result(host_purchases)
         except (HostAutoOfferIntegrationError, CanaryAuthorityError):
             return AutoOfferResult.BLOCKED
         except Exception:
             return AutoOfferResult.BLOCKED
 
+    def run_delivery_tick(
+        self,
+        host_purchases: object,
+        *,
+        cursor: str | None = None,
+    ) -> DeliveryTickOutcome:
+        """Visit at most eight exact normal deliveries with one action each."""
+
+        if self.is_canary or (cursor is not None and _exact_order_id(cursor) is None):
+            return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
+        try:
+            with self._canary_authority.runtime_guard():
+                return self._run_normal_delivery_tick(
+                    host_purchases,
+                    cursor=cursor,
+                )
+        except (HostAutoOfferIntegrationError, CanaryAuthorityError):
+            return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
+        except Exception:
+            return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
+
     def close(self) -> None:
         if self._closed:
             return
-        dispatch_error: Exception | None = None
-        if not self.is_canary:
-            try:
-                with self._canary_authority.runtime_guard():
-                    self._dispatch_fresh_deliveries()
-            except Exception as exc:
-                dispatch_error = exc
         self._closed = True
+        close_error: Exception | None = None
         try:
             self._bridge.close()
         except Exception as exc:
-            if dispatch_error is None:
-                dispatch_error = exc
+            close_error = exc
         finally:
             if self.is_canary and self._canary_owner_session is not None:
                 try:
                     self._canary_owner_session.release_keep_fence()
                 except Exception as exc:
-                    if dispatch_error is None:
-                        dispatch_error = exc
-        if dispatch_error is not None:
-            raise HostAutoOfferIntegrationError("auto_offer_close_failed") from dispatch_error
+                    if close_error is None:
+                        close_error = exc
+        if close_error is not None:
+            raise HostAutoOfferIntegrationError("auto_offer_close_failed") from close_error
 
 
 def build_host_auto_offer_integration(
@@ -1380,20 +2492,40 @@ def build_host_auto_offer_integration(
     config: Mapping[str, object] | None,
     buff_client,
     complete_purchase_receipt_by_id=None,
+    delete_refund_cleanup_purchase=None,
     canary_permit: CanaryPermit | None = None,
     canary_authority: CanaryAuthority | None = None,
+    runtime_state: AutoOfferRuntimeState | None = None,
 ) -> HostAutoOfferIntegration | None:
-    if not is_auto_offer_enabled(config):
-        return None
+    config_enabled = is_auto_offer_enabled(config)
+    registration_enabled = True
+    if runtime_state is None:
+        if not config_enabled:
+            return None
+    else:
+        if type(runtime_state) is not AutoOfferRuntimeState:
+            raise HostAutoOfferIntegrationError("runtime_state_invalid")
+        if runtime_state.requested_enabled is not config_enabled:
+            raise HostAutoOfferIntegrationError("runtime_state_config_mismatch")
+        if runtime_state.mode is AutoOfferRuntimeMode.ON:
+            if not runtime_state.requested_enabled:
+                raise HostAutoOfferIntegrationError("runtime_state_invalid")
+        elif runtime_state.mode is AutoOfferRuntimeMode.DRAINING:
+            if runtime_state.requested_enabled or runtime_state.active_delivery_count <= 0:
+                raise HostAutoOfferIntegrationError("runtime_state_invalid")
+            registration_enabled = False
+        else:
+            raise HostAutoOfferIntegrationError("runtime_state_mode_not_buildable")
     if canary_authority is not None:
         raise HostAutoOfferIntegrationError("canary_authority_injection_forbidden")
-
     authority = get_canary_authority()
     if type(authority) is not CanaryAuthority:
         raise HostAutoOfferIntegrationError("canary_authority_invalid")
     account_id, account_steam_id = _exact_current_account()
     if not callable(complete_purchase_receipt_by_id):
         raise HostAutoOfferIntegrationError("receipt_writer_required")
+    if canary_permit is None and not callable(delete_refund_cleanup_purchase):
+        raise HostAutoOfferIntegrationError("refund_cleanup_writer_required")
     owner_session = None
     if canary_permit is not None:
         if type(canary_permit) is not CanaryPermit:
@@ -1426,14 +2558,18 @@ def build_host_auto_offer_integration(
     return HostAutoOfferIntegration(
         bridge,
         complete_purchase_receipt_by_id=complete_purchase_receipt_by_id,
+        delete_refund_cleanup_purchase=delete_refund_cleanup_purchase,
         canary_permit=canary_permit,
         canary_owner_session=owner_session,
+        registration_enabled=registration_enabled,
     )
 
 
 __all__ = [
+    "DeliveryTickOutcome",
     "HostAutoOfferIntegration",
     "HostAutoOfferIntegrationError",
+    "MAX_DELIVERY_ORDERS_PER_TICK",
     "build_host_auto_offer_integration",
     "is_auto_offer_enabled",
     "preflight_canary_permit",

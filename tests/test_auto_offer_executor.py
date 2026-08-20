@@ -37,7 +37,7 @@ def stored(**changes):
     return StoredDelivery(snapshot=snapshot(**changes), revision=revision)
 
 
-def test_executor_is_abstract_and_mock_accepts_stored_delivery():
+def test_executor_is_abstract_and_mock_waiting_is_per_delivery_not_global_block():
     with pytest.raises(TypeError):
         DeliveryExecutor()
 
@@ -45,7 +45,7 @@ def test_executor_is_abstract_and_mock_accepts_stored_delivery():
     result = MockDeliveryExecutor().execute(delivery)
     assert result.delivery is delivery
     assert result.result is AutoOfferResult.WAITING
-    assert result.blocks_next_purchase is True
+    assert result.blocks_next_purchase is False
 
 
 def test_completed_delivery_returns_nonblocking_complete_result():

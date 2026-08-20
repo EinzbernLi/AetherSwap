@@ -2,7 +2,7 @@
 
 This module owns no delivery state. It owns one user-scoped OS lock, a
 secret-free one-shot generation record, an opaque Host-owned process capability,
-and the final Host DB exclusion used immediately before Auto Offer SEND/CONFIRM.
+and the final Host DB exclusions used immediately before Auto Offer writes.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ _MAX_USED_PERMIT_IDS = 128
 _PRODUCTION_HOST_DB_PATH = Path(__file__).resolve().parents[2] / "config" / "app.db"
 _ACTIVE_PHASES = frozenset({"armed", "completed"})
 _ALLOWED_OWNER_ACTIONS = frozenset({"auto_offer_send", "auto_offer_confirm", "host_receipt"})
+_NORMAL_ONLY_ACTIONS = frozenset({"auto_offer_accept"})
 _DENIED_DURING_CANARY_ACTIONS = frozenset({
     "buff_purchase",
     "host_transaction_mutation",
@@ -34,7 +35,11 @@ _DENIED_DURING_CANARY_ACTIONS = frozenset({
     "steam_gift_cart",
     "steam_gift_checkout",
 })
-_ALL_ACTIONS = _ALLOWED_OWNER_ACTIONS | _DENIED_DURING_CANARY_ACTIONS
+_ALL_ACTIONS = (
+    _ALLOWED_OWNER_ACTIONS
+    | _NORMAL_ONLY_ACTIONS
+    | _DENIED_DURING_CANARY_ACTIONS
+)
 
 
 class CanaryAuthorityError(RuntimeError):
@@ -181,6 +186,7 @@ class CanaryWriteTarget:
     account_id: str | None = None
     recipient_steam_id: str | None = None
     host_db_id: int | None = None
+    host_goods_id: int | None = None
     assetid: str | None = None
 
     def __post_init__(self) -> None:
@@ -192,6 +198,8 @@ class CanaryWriteTarget:
                 _exact_text(value, field=field)
         if self.host_db_id is not None:
             _exact_positive_int(self.host_db_id, field="host_db_id")
+        if self.host_goods_id is not None:
+            _exact_positive_int(self.host_goods_id, field="host_goods_id")
 
 
 def _production_root() -> Path:
@@ -346,6 +354,10 @@ class CanaryAuthority:
         self._owner_active_write: CanaryWriteTarget | None = None
         self._owner_receipt_refinement_consumed = False
         self._normal_guard_depth = 0
+        self._normal_runtime_guard_depth = 0
+        self._normal_external_write_depth = 0
+        self._normal_active_write: CanaryWriteTarget | None = None
+        self._normal_write_refinement_consumed = False
         self._thread_lock = threading.RLock()
 
     @property
@@ -614,6 +626,96 @@ class CanaryAuthority:
                     pass
                 connection.close()
 
+    @staticmethod
+    def _require_normal_delivery_target(target: CanaryWriteTarget) -> None:
+        if (
+            target.action not in {
+                "auto_offer_send",
+                "auto_offer_confirm",
+                "auto_offer_accept",
+            }
+            or target.purchase_id is None
+            or target.buff_order_id is None
+            or target.purchase_id != f"buff:{target.buff_order_id}"
+            or target.account_id is None
+            or target.recipient_steam_id is None
+            or target.host_db_id is None
+            or target.assetid is not None
+            or (
+                target.action == "auto_offer_accept"
+                and target.host_goods_id is None
+            )
+            or (
+                target.action != "auto_offer_accept"
+                and target.host_goods_id is not None
+            )
+        ):
+            detail = {
+                "auto_offer_send": "normal_send_target_invalid",
+                "auto_offer_confirm": "normal_confirm_target_invalid",
+                "auto_offer_accept": "normal_accept_target_invalid",
+            }.get(target.action, "normal_write_target_invalid")
+            raise CanaryWriteBlockedError(detail)
+        _exact_steam_id(
+            target.recipient_steam_id,
+            field="recipient_steam_id",
+        )
+
+    @contextmanager
+    def _normal_host_db_write_barrier(
+        self,
+        target: CanaryWriteTarget,
+    ) -> Iterator[None]:
+        if self._host_db_path is None:
+            raise CanaryWriteBlockedError("normal_host_db_barrier_required")
+        connection = None
+        try:
+            connection = sqlite3.connect(
+                str(self._host_db_path),
+                timeout=0.0,
+                isolation_level=None,
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            if target.action == "auto_offer_accept":
+                row = connection.execute(
+                    "SELECT id, buff_order_id, goods_id, pending_receipt, assetid "
+                    "FROM purchase WHERE id = ?",
+                    (target.host_db_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT id, buff_order_id, pending_receipt, assetid "
+                    "FROM purchase WHERE id = ?",
+                    (target.host_db_id,),
+                ).fetchone()
+            if row is None:
+                raise CanaryWriteBlockedError("normal_host_target_missing")
+            if target.action == "auto_offer_accept":
+                db_id, order_id, goods_id, pending_receipt, assetid = row
+            else:
+                db_id, order_id, pending_receipt, assetid = row
+                goods_id = None
+            if (
+                db_id != target.host_db_id
+                or order_id != target.buff_order_id
+                or goods_id != target.host_goods_id
+                or pending_receipt not in (1, True)
+                or assetid not in (None, "")
+            ):
+                raise CanaryWriteBlockedError("normal_host_target_mismatch")
+            yield
+        except CanaryWriteBlockedError:
+            raise
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            raise CanaryWriteBlockedError("normal_host_db_barrier_failed") from None
+        finally:
+            if connection is not None:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
+                connection.close()
+
     def _require_no_pending_host_rows_for_completion(self) -> None:
         if self._host_db_path is None:
             return
@@ -671,9 +773,11 @@ class CanaryAuthority:
                 raise CanaryAuthorityBusyError("canary_authority_active")
             if self._normal_guard_depth:
                 self._normal_guard_depth += 1
+                self._normal_runtime_guard_depth += 1
                 try:
                     yield
                 finally:
+                    self._normal_runtime_guard_depth -= 1
                     self._normal_guard_depth -= 1
                 return
             handle = self._open_lock_handle()
@@ -684,9 +788,11 @@ class CanaryAuthority:
                 if self._active_record(self._read_record()):
                     raise CanaryAuthorityStaleError("canary_authority_fenced")
                 self._normal_guard_depth = 1
+                self._normal_runtime_guard_depth = 1
                 try:
                     yield
                 finally:
+                    self._normal_runtime_guard_depth = 0
                     self._normal_guard_depth = 0
             finally:
                 _unlock_file(handle)
@@ -705,6 +811,57 @@ class CanaryAuthority:
             and target.host_db_id == permit.host_db_id
             and target.assetid == outer.assetid
         )
+
+    def _nested_normal_write_refinement_allowed(
+        self,
+        target: CanaryWriteTarget,
+    ) -> bool:
+        outer = self._normal_active_write
+        if outer is None or outer.action not in {
+            "auto_offer_send",
+            "auto_offer_confirm",
+            "auto_offer_accept",
+        }:
+            return False
+        return (
+            target.action == outer.action
+            and target.purchase_id == outer.purchase_id
+            and target.buff_order_id == outer.buff_order_id
+            and target.account_id == outer.account_id
+            and target.recipient_steam_id == outer.recipient_steam_id
+            and target.host_db_id is None
+            and target.host_goods_id is None
+            and target.assetid is None
+        )
+
+    @contextmanager
+    def normal_delivery_write_guard(
+        self,
+        target: CanaryWriteTarget,
+    ) -> Iterator[None]:
+        """Hold one exact normal Host row barrier across one buyer write."""
+
+        if type(target) is not CanaryWriteTarget:
+            raise CanaryAuthorityError("invalid_write_target")
+        CanaryWriteTarget.__post_init__(target)
+        self._require_normal_delivery_target(target)
+        with self._thread_lock:
+            if self._owner_handle is not None:
+                raise CanaryWriteBlockedError("canary_authority_active")
+            if self._normal_runtime_guard_depth < 1:
+                raise CanaryWriteBlockedError("normal_runtime_guard_required")
+            if self._normal_external_write_depth:
+                raise CanaryWriteBlockedError("normal_write_reentry_forbidden")
+            if self._normal_active_write is not None:
+                raise CanaryWriteBlockedError("normal_write_reentry_forbidden")
+            self._normal_active_write = target
+            self._normal_write_refinement_consumed = False
+            try:
+                with self._normal_host_db_write_barrier(target):
+                    yield
+            finally:
+                self._normal_active_write = None
+                self._normal_write_refinement_consumed = False
 
     @contextmanager
     def _owner_session_external_write_guard(self, capability: object, target: CanaryWriteTarget) -> Iterator[None]:
@@ -739,11 +896,36 @@ class CanaryAuthority:
                     yield
                     return
                 raise CanaryWriteBlockedError("canary_owner_session_required")
+            if self._normal_active_write is not None:
+                if not self._nested_normal_write_refinement_allowed(target):
+                    raise CanaryWriteBlockedError("normal_write_refinement_mismatch")
+                if self._normal_write_refinement_consumed:
+                    detail = (
+                        "normal_send_already_consumed"
+                        if target.action == "auto_offer_send"
+                        else (
+                            "normal_confirm_already_consumed"
+                            if target.action == "auto_offer_confirm"
+                            else "normal_accept_already_consumed"
+                        )
+                    )
+                    raise CanaryWriteBlockedError(detail)
+                self._normal_write_refinement_consumed = True
+                yield
+                return
+            if target.action in {
+                "auto_offer_send",
+                "auto_offer_confirm",
+                "auto_offer_accept",
+            }:
+                raise CanaryWriteBlockedError("normal_write_barrier_required")
             if self._normal_guard_depth:
                 self._normal_guard_depth += 1
+                self._normal_external_write_depth += 1
                 try:
                     yield
                 finally:
+                    self._normal_external_write_depth -= 1
                     self._normal_guard_depth -= 1
                 return
             handle = self._open_lock_handle()
@@ -754,9 +936,11 @@ class CanaryAuthority:
                 if self._active_record(self._read_record()):
                     raise CanaryWriteBlockedError("canary_authority_fenced")
                 self._normal_guard_depth = 1
+                self._normal_external_write_depth = 1
                 try:
                     yield
                 finally:
+                    self._normal_external_write_depth = 0
                     self._normal_guard_depth = 0
             finally:
                 _unlock_file(handle)

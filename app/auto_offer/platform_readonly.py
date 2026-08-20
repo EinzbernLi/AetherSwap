@@ -7,12 +7,15 @@ state, retry, or execute platform mutations.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
 
 from app.auto_offer.adapters import (
     CompletedTradeItemEvidence,
+    BuffOrderLifecycle,
+    BuffOrderLifecycleEvidence,
     DeliveryDirectionEvidence,
     InventoryStateEvidence,
     OfferStateEvidence,
@@ -24,10 +27,23 @@ from app.auto_offer.adapters import (
     PlatformResult,
     PlatformResultStatus,
     RecipientInventoryItemEvidence,
+    SellerOrderItemEvidence,
     SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
+)
+from app.auto_offer.buff_order_evidence import (
+    BuffOrderEvidenceError,
+    normalize_exact_seller_buff_item,
+)
+from app.auto_offer.counterparty_evidence import (
+    CounterpartyEvidenceError,
+    seller_counterparty_from_exact_buff_record,
+)
+from app.auto_offer.steam_lifecycle import (
+    SteamLifecycleEvidenceError,
+    map_exact_steam_lifecycle,
 )
 
 
@@ -35,6 +51,8 @@ BUFF_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_OFFER_STATE,
+        PlatformCapability.READ_SELLER_OFFER_ITEM,
+        PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
     }
 )
 STEAM_INVENTORY_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
@@ -48,6 +66,10 @@ STEAM_COMPLETED_TRADE_CAPABILITIES: Final[frozenset[PlatformCapability]] = froze
 )
 
 _ORDER_FIELDS: Final[tuple[str, ...]] = ("buff_order_id", "bill_order_id")
+_TRADE_OFFER_FIELDS: Final[tuple[str, ...]] = (
+    "tradeofferid",
+    "trade_offer_id",
+)
 _RECIPIENT_FIELDS: Final[tuple[str, ...]] = (
     "recipient_steam_id",
     "recipient_steamid",
@@ -76,6 +98,14 @@ _PENDING_STATES: Final[frozenset[object]] = frozenset(
         "waiting_for_offer",
         "to_receive",
     }
+)
+_MAX_BUFF_LIFECYCLE_PAGES: Final[int] = 3
+_BUFF_HISTORY_PAGE_SIZE: Final[int] = 10
+_REFUNDED_TIMEOUT_FIELDS: Final[tuple[str, ...]] = (
+    "pay_expire_timeout",
+    "deliver_expire_timeout",
+    "receive_expire_timeout",
+    "buyer_send_offer_timeout",
 )
 
 
@@ -119,9 +149,11 @@ def _result(
     detail: str,
     evidence: DeliveryDirectionEvidence
     | OfferStateEvidence
+    | SellerOrderItemEvidence
     | InventoryStateEvidence
     | SteamTradeOfferEvidence
     | SteamCompletedTradeEvidence
+    | BuffOrderLifecycleEvidence
     | None = None,
 ) -> PlatformResult:
     return PlatformResult(
@@ -144,6 +176,31 @@ def _normalize_identifier(value: object) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _canonical_raw_identifier(value: object) -> str | None:
+    if type(value) not in (str, int):
+        return None
+    normalized = str(value)
+    if not normalized or normalized.strip() != normalized:
+        return None
+    return normalized
+
+
+def _canonical_positive_decimal_text(value: object) -> str | None:
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or not value.isascii()
+        or not value.isdecimal()
+        or value[0] == "0"
+    ):
+        return None
+    number = int(value)
+    if number <= 0 or str(number) != value:
+        return None
+    return value
 
 
 def _require_identifier(value: object, field: str) -> str:
@@ -175,6 +232,133 @@ def _call_read(operation: Callable[[], object]) -> object | _ReadFailure:
         return _ReadFailure(PlatformResultStatus.FAILURE, detail)
 
 
+def _call_lifecycle_read(operation: Callable[[], object]) -> object | _ReadFailure:
+    try:
+        return operation()
+    except (PlatformAdapterTimeoutError, TimeoutError):
+        return _ReadFailure(PlatformResultStatus.TIMEOUT, "timeout")
+    except Exception as error:
+        name = type(error).__name__.casefold()
+        if _is_auth_error(error):
+            detail = "auth_failed"
+        elif "verification" in name or "captcha" in name:
+            detail = "verification_required"
+        elif "rate" in name and "limit" in name:
+            detail = "rate_limited"
+        elif "risk" in name:
+            detail = "risk_control"
+        else:
+            detail = "network_failure"
+        return _ReadFailure(PlatformResultStatus.FAILURE, detail)
+
+
+@dataclass(frozen=True)
+class _BuffHistoryPage:
+    page_num: int
+    total_page: int
+    items: tuple[Mapping[str, Any], ...]
+
+
+def _parse_buff_history_page(
+    payload: object,
+    *,
+    expected_page_num: int,
+) -> _BuffHistoryPage | _ReadFailure:
+    if not isinstance(payload, Mapping):
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    if payload.get("code") != "OK":
+        return _ReadFailure(PlatformResultStatus.RESULT_UNKNOWN, "history_non_ok")
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    page_num = data.get("page_num")
+    page_size = data.get("page_size")
+    total_page = data.get("total_page")
+    items = data.get("items")
+    if (
+        type(page_num) is not int
+        or page_num != expected_page_num
+        or type(page_size) is not int
+        or page_size != _BUFF_HISTORY_PAGE_SIZE
+        or type(total_page) is not int
+        or total_page < page_num
+        or not isinstance(items, list)
+        or len(items) > _BUFF_HISTORY_PAGE_SIZE
+        or any(not isinstance(item, Mapping) for item in items)
+    ):
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    for item in items:
+        if _canonical_raw_identifier(item.get("id")) is None:
+            return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    return _BuffHistoryPage(page_num, total_page, tuple(items))
+
+
+def _finite_number(value: object) -> float | None:
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _classify_exact_buff_history_item(
+    item: Mapping[str, Any],
+    *,
+    buff_order_id: str,
+    page_num: int,
+) -> BuffOrderLifecycleEvidence | _ReadFailure:
+    if _canonical_raw_identifier(item.get("id")) != buff_order_id:
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "identity_mismatch")
+    state = item.get("state")
+    state_text = item.get("state_text")
+    if type(state) is not str or type(state_text) is not str:
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+
+    if state == "PAYING" and state_text == "等待付款":
+        expires = _finite_number(item.get("pay_expire_timeout"))
+        if expires is None or expires <= 0:
+            return _ReadFailure(
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_state_unproven",
+            )
+        return BuffOrderLifecycleEvidence(
+            buff_order_id=buff_order_id,
+            lifecycle=BuffOrderLifecycle.PAYING,
+            raw_state=state,
+            raw_state_text=state_text,
+            page_num=page_num,
+        )
+
+    if state == "FAIL" and state_text == "购买失败-已退款":
+        for field in _REFUNDED_TIMEOUT_FIELDS:
+            value = _finite_number(item.get(field))
+            if value is None or value != -1:
+                return _ReadFailure(
+                    PlatformResultStatus.RESULT_UNKNOWN,
+                    "order_state_unproven",
+                )
+        if (
+            "tradeofferid" not in item
+            or "trade_offer_url" not in item
+            or item.get("tradeofferid") is not None
+            or item.get("trade_offer_url") is not None
+        ):
+            return _ReadFailure(
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_state_unproven",
+            )
+        return BuffOrderLifecycleEvidence(
+            buff_order_id=buff_order_id,
+            lifecycle=BuffOrderLifecycle.REFUNDED,
+            raw_state=state,
+            raw_state_text=state_text,
+            page_num=page_num,
+        )
+
+    return _ReadFailure(
+        PlatformResultStatus.RESULT_UNKNOWN,
+        "order_state_unproven",
+    )
+
+
 def _records_from_payload(payload: object) -> list[Mapping[str, Any]] | PlatformResultStatus:
     if payload is None:
         return PlatformResultStatus.RESULT_UNKNOWN
@@ -185,16 +369,24 @@ def _records_from_payload(payload: object) -> list[Mapping[str, Any]] | Platform
     return payload
 
 
-def _canonical_order_values(record: Mapping[str, Any]) -> tuple[str, ...] | None:
+def _canonical_alias_values(
+    record: Mapping[str, Any], fields: tuple[str, ...]
+) -> tuple[str, ...] | None:
     values: list[str] = []
-    for field in _ORDER_FIELDS:
+    for field in fields:
         if field not in record:
             continue
-        value = _normalize_identifier(record[field])
+        value = _canonical_raw_identifier(record[field])
         if value is None:
             return None
         values.append(value)
+    if len(set(values)) > 1:
+        return None
     return tuple(values)
+
+
+def _canonical_order_values(record: Mapping[str, Any]) -> tuple[str, ...] | None:
+    return _canonical_alias_values(record, _ORDER_FIELDS)
 
 
 def _exact_order_matches(
@@ -218,8 +410,8 @@ def _exact_wait_send_order_matches(
         value = record.get("id")
         if isinstance(value, bool) or type(value) not in (str, int):
             return None
-        normalized = str(value).strip()
-        if not normalized:
+        normalized = str(value)
+        if not normalized or normalized.strip() != normalized:
             return None
         if normalized == order_id:
             matches.append(record)
@@ -275,16 +467,6 @@ def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
     return bool(seller_values)
 
 
-def _trade_offer_id(record: Mapping[str, Any]) -> str | None:
-    for field in ("tradeofferid", "trade_offer_id"):
-        if field in record:
-            value = _normalize_identifier(record[field])
-            if value is None:
-                return None
-            return value
-    return None
-
-
 class BuffReadOnlyAdapter:
     """Map one injected BUFF trade reader into the normalized result contract."""
 
@@ -309,6 +491,9 @@ class BuffReadOnlyAdapter:
         if request.account_id != self._account_id:
             return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
 
+        if request.capability is PlatformCapability.READ_BUFF_ORDER_LIFECYCLE:
+            return self._execute_order_lifecycle(request)
+
         raw = _call_read(self._client.get_steam_trades)
         if isinstance(raw, _ReadFailure):
             return _result(request, raw.status, raw.detail)
@@ -319,6 +504,9 @@ class BuffReadOnlyAdapter:
                     return self._execute_buyer_wait_send(request)
                 return _result(request, parsed, "order_not_proven")
             return _result(request, parsed, "malformed_payload")
+
+        if request.capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
+            return self._execute_seller_offer_item(request, parsed)
 
         matches = _exact_order_matches(parsed, request.buff_order_id)
         if matches is None:
@@ -350,18 +538,49 @@ class BuffReadOnlyAdapter:
                 )
             if not proven:
                 return self._execute_buyer_wait_send(request)
+            try:
+                counterparty = seller_counterparty_from_exact_buff_record(
+                    record
+                ).steam_id
+            except CounterpartyEvidenceError:
+                return _result(
+                    request, PlatformResultStatus.MALFORMED, "malformed_payload"
+                )
+            if counterparty == request.recipient_steam_id:
+                return _result(
+                    request, PlatformResultStatus.FAILURE, "identity_mismatch"
+                )
             return _result(
                 request,
                 PlatformResultStatus.SUCCESS,
                 "seller_sends_offer",
-                DeliveryDirectionEvidence(),
+                DeliveryDirectionEvidence(
+                    "seller_sends_offer", counterparty
+                ),
             )
 
-        offer_id = _trade_offer_id(record)
-        if offer_id is None:
+        offer_values = _canonical_alias_values(record, _TRADE_OFFER_FIELDS)
+        if offer_values is None:
+            return _result(
+                request, PlatformResultStatus.MALFORMED, "malformed_payload"
+            )
+        if not offer_values:
             return _result(
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
+        offer_id = offer_values[0]
+        try:
+            counterparty = seller_counterparty_from_exact_buff_record(record).steam_id
+        except CounterpartyEvidenceError as exc:
+            if str(exc) == "seller_steam_id_not_proven":
+                return _result(
+                    request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+                )
+            return _result(
+                request, PlatformResultStatus.MALFORMED, "malformed_payload"
+            )
+        if counterparty == request.recipient_steam_id:
+            return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
         state = record.get("state")
         if state not in _PENDING_STATES:
             return _result(
@@ -371,7 +590,63 @@ class BuffReadOnlyAdapter:
             request,
             PlatformResultStatus.SUCCESS,
             "offer_pending",
-            OfferStateEvidence(offer_id),
+            OfferStateEvidence(offer_id, counterparty),
+        )
+
+    def _execute_seller_offer_item(
+        self,
+        request: PlatformRequest,
+        records: list[Mapping[str, Any]],
+    ) -> PlatformResult:
+        matches = _exact_order_matches(records, request.buff_order_id)
+        if matches is None:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "malformed_payload",
+            )
+        if not matches:
+            return _result(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_not_proven",
+            )
+        if len(matches) > 1:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "ambiguous_order",
+            )
+        try:
+            evidence = normalize_exact_seller_buff_item(
+                records,
+                buff_order_id=request.buff_order_id,
+                recipient_steam_id=request.recipient_steam_id,
+                host_goods_id=request.host_goods_id,
+            )
+        except BuffOrderEvidenceError:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "seller_item_not_proven",
+            )
+        if (
+            evidence.buff_order_id != request.buff_order_id
+            or evidence.steam_tradeoffer_id != request.steam_tradeoffer_id
+            or evidence.recipient_steam_id != request.recipient_steam_id
+            or evidence.counterparty_steam_id != request.counterparty_steam_id
+            or evidence.goods_id != request.host_goods_id
+        ):
+            return _result(
+                request,
+                PlatformResultStatus.FAILURE,
+                "identity_mismatch",
+            )
+        return _result(
+            request,
+            PlatformResultStatus.SUCCESS,
+            "seller_offer_item_proven",
+            evidence,
         )
 
     def _execute_buyer_wait_send(self, request: PlatformRequest) -> PlatformResult:
@@ -409,7 +684,7 @@ class BuffReadOnlyAdapter:
             return _result(
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
-        buyer_steam_id = _normalize_identifier(record["buyer_steamid"])
+        buyer_steam_id = _canonical_positive_decimal_text(record["buyer_steamid"])
         if buyer_steam_id is None:
             return _result(request, PlatformResultStatus.MALFORMED, "malformed_payload")
         if buyer_steam_id != request.recipient_steam_id:
@@ -423,6 +698,63 @@ class BuffReadOnlyAdapter:
             PlatformResultStatus.SUCCESS,
             "buyer_sends_offer",
             DeliveryDirectionEvidence("buyer_sends_offer"),
+        )
+
+    def _execute_order_lifecycle(self, request: PlatformRequest) -> PlatformResult:
+        reader = getattr(self._client, "get_buy_order_history_page", None)
+        if not callable(reader):
+            return _result(
+                request,
+                PlatformResultStatus.UNSUPPORTED,
+                "history_reader_not_available",
+            )
+
+        for page_num in range(1, _MAX_BUFF_LIFECYCLE_PAGES + 1):
+            raw = _call_lifecycle_read(
+                lambda page_num=page_num: reader(page_num, "csgo")
+            )
+            if isinstance(raw, _ReadFailure):
+                return _result(request, raw.status, raw.detail)
+            parsed = _parse_buff_history_page(
+                raw,
+                expected_page_num=page_num,
+            )
+            if isinstance(parsed, _ReadFailure):
+                return _result(request, parsed.status, parsed.detail)
+
+            matches = [
+                item
+                for item in parsed.items
+                if _canonical_raw_identifier(item.get("id"))
+                == request.buff_order_id
+            ]
+            if len(matches) > 1:
+                return _result(
+                    request,
+                    PlatformResultStatus.MALFORMED,
+                    "ambiguous_order",
+                )
+            if len(matches) == 1:
+                classified = _classify_exact_buff_history_item(
+                    matches[0],
+                    buff_order_id=request.buff_order_id,
+                    page_num=page_num,
+                )
+                if isinstance(classified, _ReadFailure):
+                    return _result(request, classified.status, classified.detail)
+                return _result(
+                    request,
+                    PlatformResultStatus.SUCCESS,
+                    classified.lifecycle.value,
+                    classified,
+                )
+            if page_num >= parsed.total_page:
+                break
+
+        return _result(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "order_not_proven",
         )
 
 
@@ -627,17 +959,15 @@ def _steam_trade_offer_evidence(
             PlatformResultStatus.RESULT_UNKNOWN,
             "trade_offer_state_not_proven",
         )
-    lifecycle_value = {
-        "active": SteamTradeOfferLifecycle.ACTIVE,
-        "accepted": SteamTradeOfferLifecycle.ACCEPTED,
-        "created_needs_confirmation": SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION,
-    }.get(lifecycle)
-    if lifecycle_value is None:
+    try:
+        lifecycle_evidence = map_exact_steam_lifecycle(lifecycle)
+    except SteamLifecycleEvidenceError:
         return _result(
             request,
             PlatformResultStatus.RESULT_UNKNOWN,
             "trade_offer_state_not_proven",
         )
+    lifecycle_value = lifecycle_evidence.lifecycle
 
     try:
         evidence = SteamTradeOfferEvidence(
@@ -653,15 +983,8 @@ def _steam_trade_offer_evidence(
         return _result(
             request, PlatformResultStatus.MALFORMED, "malformed_payload"
         )
-    detail = {
-        SteamTradeOfferLifecycle.ACTIVE: "trade_offer_active",
-        SteamTradeOfferLifecycle.ACCEPTED: "trade_offer_accepted",
-        SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION: (
-            "trade_offer_created_needs_confirmation"
-        ),
-    }[lifecycle_value]
     return _result(
-        request, PlatformResultStatus.SUCCESS, detail, evidence
+        request, PlatformResultStatus.SUCCESS, lifecycle_evidence.detail, evidence
     )
 
 

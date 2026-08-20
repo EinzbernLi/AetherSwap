@@ -18,6 +18,7 @@ from app.auto_offer.adapters import (
     PlatformResult,
     PlatformResultStatus,
     RecipientInventoryItemEvidence,
+    SellerOrderItemEvidence,
     SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
@@ -33,6 +34,8 @@ from app.auto_offer.platform_readonly import (
     SteamTradeOfferReadOnlyAdapter,
 )
 
+WAITING_BUYER_STEAM_ID = "76561198000000001"
+
 
 def request(**changes):
     value = PlatformRequest(
@@ -45,6 +48,13 @@ def request(**changes):
         timeout_seconds=5.0,
     )
     return replace(value, **changes)
+
+
+def wait_send_request():
+    return request(
+        capability=PlatformCapability.READ_DELIVERY_DIRECTION,
+        recipient_steam_id=WAITING_BUYER_STEAM_ID,
+    )
 
 
 class BuffStub:
@@ -111,7 +121,7 @@ class CompletedTradeReaderStub:
 def buff_record(**changes):
     value = {
         "buff_order_id": "buff-order-1",
-        "seller_steam_id": "seller-1",
+        "seller_steam_id": "76561198000000002",
         "buyer_steam_id": "steam-1",
         "state": 1,
         "tradeofferid": "offer-1",
@@ -123,7 +133,7 @@ def buff_record(**changes):
 def wait_send_record(**changes):
     value = {
         "id": "buff-order-1",
-        "buyer_steamid": "steam-1",
+        "buyer_steamid": WAITING_BUYER_STEAM_ID,
         "state_text": "等待你发起报价",
     }
     value.update(changes)
@@ -169,6 +179,126 @@ def steam_trade_offer_payload(**changes):
     }
     value.update(changes)
     return value
+
+
+def seller_item_request(**changes):
+    value = request(
+        capability=PlatformCapability.READ_SELLER_OFFER_ITEM,
+        recipient_steam_id="76561198000000001",
+        steam_tradeoffer_id="offer-1",
+        counterparty_steam_id="76561198000000002",
+        host_goods_id=73001,
+    )
+    return replace(value, **changes)
+
+
+def seller_item_record(**changes):
+    value = {
+        "buff_order_id": "buff-order-1",
+        "tradeofferid": "offer-1",
+        "buyer_steam_id": "76561198000000001",
+        "seller_steam_id": "76561198000000002",
+        "items_to_trade": [{"assetid": "asset-1", "goods_id": 73001}],
+    }
+    value.update(changes)
+    return value
+
+
+def test_exact_buff_seller_item_read_uses_one_existing_read_and_no_fallback():
+    client = BuffStub(
+        [seller_item_record()],
+        wait_payload=[wait_send_record()],
+    )
+    item = seller_item_request()
+
+    result = buff_adapter(client).execute(item)
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.request is item
+    assert result.evidence == SellerOrderItemEvidence(
+        buff_order_id="buff-order-1",
+        steam_tradeoffer_id="offer-1",
+        recipient_steam_id="76561198000000001",
+        counterparty_steam_id="76561198000000002",
+        goods_id=73001,
+        seller_assetid="asset-1",
+    )
+    assert client.calls == 1
+    assert client.wait_calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [seller_item_record(buff_order_id="other-order")],
+        [seller_item_record(), seller_item_record(tradeofferid="offer-2")],
+        [
+            seller_item_record(),
+            seller_item_record(buff_order_id="other-order"),
+        ],
+        [
+            seller_item_record(
+                items_to_trade=[
+                    {"assetid": "asset-1", "goods_id": 73001},
+                    {"assetid": "asset-2", "goods_id": 73001},
+                ]
+            )
+        ],
+        [seller_item_record(buyer_steam_id="76561198000000003")],
+    ],
+)
+def test_seller_item_absent_ambiguous_shared_multi_or_recipient_never_succeeds(
+    payload,
+):
+    client = BuffStub(payload, wait_payload=[wait_send_record()])
+
+    result = buff_adapter(client).execute(seller_item_request())
+
+    assert result.status is not PlatformResultStatus.SUCCESS
+    assert result.evidence is None
+    assert client.calls == 1
+    assert client.wait_calls == []
+
+
+@pytest.mark.parametrize(
+    "request_changes",
+    [
+        {"steam_tradeoffer_id": "offer-2"},
+        {"counterparty_steam_id": "76561198000000003"},
+        {"host_goods_id": 73002},
+    ],
+)
+def test_seller_item_offer_counterparty_or_goods_mismatch_never_succeeds(
+    request_changes,
+):
+    result = buff_adapter(BuffStub([seller_item_record()])).execute(
+        seller_item_request(**request_changes)
+    )
+    assert result.status is not PlatformResultStatus.SUCCESS
+    assert result.evidence is None
+
+
+def test_seller_item_names_cannot_replace_goods_or_asset_identity():
+    payload = seller_item_record(
+        items_to_trade=[
+            {
+                "name": "asset-1",
+                "market_hash_name": "asset-1",
+            }
+        ],
+        goods_infos={
+            "73001": {
+                "name": "asset-1",
+                "market_hash_name": "asset-1",
+            }
+        },
+    )
+
+    result = buff_adapter(BuffStub([payload])).execute(seller_item_request())
+
+    assert result.status is not PlatformResultStatus.SUCCESS
+    assert result.evidence is None
 
 
 def steam_completed_trade_adapter(reader):
@@ -307,13 +437,200 @@ def test_buff_multiple_exact_matches_are_malformed():
     assert result.detail == "ambiguous_order"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        buff_record(
+            buff_order_id="buff-order-1",
+            bill_order_id="other-order",
+        ),
+        buff_record(
+            bill_order_id="buff-order-1",
+            buff_order_id="other-order",
+        ),
+    ],
+)
+def test_conflicting_order_aliases_are_malformed_without_buyer_fallback(payload):
+    client = BuffStub([payload], wait_payload=[wait_send_record()])
+
+    result = buff_adapter(client).execute(
+        wait_send_request()
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.wait_calls == []
+
+
+def test_identical_order_aliases_preserve_exact_direction_success():
+    result = buff_adapter(
+        BuffStub(
+            [
+                buff_record(
+                    buff_order_id="buff-order-1",
+                    bill_order_id="buff-order-1",
+                )
+            ]
+        )
+    ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "seller_sends_offer"
+    assert result.evidence == DeliveryDirectionEvidence(
+        counterparty_steam_id="76561198000000002"
+    )
+
+
+def test_malformed_present_order_alias_is_malformed_without_buyer_fallback():
+    client = BuffStub(
+        [buff_record(bill_order_id=None)],
+        wait_payload=[wait_send_record()],
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.wait_calls == []
+
+
+@pytest.mark.parametrize("field", ("buff_order_id", "bill_order_id"))
+@pytest.mark.parametrize(
+    "invalid_value",
+    (
+        "",
+        " buff-order-1",
+        "buff-order-1 ",
+        True,
+        1.0,
+        [],
+        {},
+    ),
+)
+def test_order_aliases_reject_noncanonical_raw_identifiers_without_buyer_fallback(
+    field, invalid_value
+):
+    client = BuffStub(
+        [buff_record(**{field: invalid_value})],
+        wait_payload=[wait_send_record()],
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.wait_calls == []
+
+
+def test_integer_order_alias_preserves_exact_canonical_success():
+    result = buff_adapter(
+        BuffStub([buff_record(buff_order_id=123)])
+    ).execute(
+        request(
+            buff_order_id="123",
+            capability=PlatformCapability.READ_DELIVERY_DIRECTION,
+        )
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == DeliveryDirectionEvidence(
+        counterparty_steam_id="76561198000000002"
+    )
+
+
+def test_conflicting_trade_offer_aliases_are_malformed_without_evidence():
+    result = buff_adapter(
+        BuffStub([buff_record(trade_offer_id="offer-2")])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_identical_trade_offer_aliases_preserve_exact_offer_success():
+    result = buff_adapter(
+        BuffStub([buff_record(trade_offer_id="offer-1")])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "offer_pending"
+    assert result.evidence == OfferStateEvidence("offer-1", "76561198000000002")
+
+
+def test_malformed_present_trade_offer_alias_is_malformed_without_evidence():
+    result = buff_adapter(
+        BuffStub([buff_record(trade_offer_id=None)])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+@pytest.mark.parametrize("field", ("tradeofferid", "trade_offer_id"))
+@pytest.mark.parametrize(
+    "invalid_value",
+    (
+        "",
+        " offer-1",
+        "offer-1 ",
+        True,
+        1.0,
+        [],
+        {},
+    ),
+)
+def test_trade_offer_aliases_reject_noncanonical_raw_identifiers(
+    field, invalid_value
+):
+    result = buff_adapter(
+        BuffStub([buff_record(**{field: invalid_value})])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_integer_trade_offer_alias_preserves_exact_canonical_success():
+    result = buff_adapter(
+        BuffStub([buff_record(tradeofferid=123)])
+    ).execute(request(capability=PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == OfferStateEvidence("123", "76561198000000002")
+
+
+def test_absent_trade_offer_aliases_preserve_order_not_proven():
+    payload = buff_record()
+    del payload["tradeofferid"]
+
+    result = buff_adapter(BuffStub([payload])).execute(
+        request(capability=PlatformCapability.READ_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_not_proven"
+    assert result.evidence is None
+
+
 def test_buff_unique_direction_requires_recipient_and_proves_seller_send():
     result = buff_adapter(
         BuffStub([buff_record()])
     ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "seller_sends_offer"
-    assert result.evidence == DeliveryDirectionEvidence()
+    assert result.evidence == DeliveryDirectionEvidence(
+        counterparty_steam_id="76561198000000002"
+    )
 
     mismatch = buff_adapter(
         BuffStub([buff_record(buyer_steam_id="other-steam")])
@@ -341,9 +658,7 @@ def test_buyer_fallback_uses_exact_wait_send_id_identity_and_state():
         payload=[],
         wait_payload=[wait_send_record()],
     )
-    result = buff_adapter(client).execute(
-        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
-    )
+    result = buff_adapter(client).execute(wait_send_request())
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "buyer_sends_offer"
     assert result.evidence == DeliveryDirectionEvidence("buyer_sends_offer")
@@ -352,12 +667,22 @@ def test_buyer_fallback_uses_exact_wait_send_id_identity_and_state():
 
 @pytest.mark.parametrize(
     "seller_payload",
-    [None, [], [{"id": "buff-order-1"}], [buff_record(direction="buyer_sends_offer")]],
+    [
+        None,
+        [],
+        [{"id": "buff-order-1"}],
+        [
+            buff_record(
+                buyer_steam_id=WAITING_BUYER_STEAM_ID,
+                direction="buyer_sends_offer",
+            )
+        ],
+    ],
 )
 def test_buyer_fallback_only_follows_unknown_seller_result(seller_payload):
     client = BuffStub(seller_payload, wait_payload=[wait_send_record()])
     result = buff_adapter(client).execute(
-        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+        wait_send_request()
     )
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "buyer_sends_offer"
@@ -384,9 +709,9 @@ def test_seller_safety_failure_is_not_masked_by_buyer_fallback(error):
         ([wait_send_record(), wait_send_record()], PlatformResultStatus.MALFORMED, "ambiguous_order"),
         ([wait_send_record(id="other")], PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"),
         ([wait_send_record(state_text="等待卖家发货")], PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"),
-        ([wait_send_record(buyer_steamid="other-steam")], PlatformResultStatus.FAILURE, "identity_mismatch"),
+        ([wait_send_record(buyer_steamid="76561198000000003")], PlatformResultStatus.FAILURE, "identity_mismatch"),
         ([wait_send_record(buyer_steamid=None)], PlatformResultStatus.MALFORMED, "malformed_payload"),
-        ([{"id": "buff-order-1", "buyer_steamid": "steam-1", "state_text": "等待你发起报价"}], PlatformResultStatus.SUCCESS, "buyer_sends_offer"),
+        ([wait_send_record()], PlatformResultStatus.SUCCESS, "buyer_sends_offer"),
     ],
 )
 def test_buyer_wait_send_outcomes_are_exact_and_fail_closed(
@@ -394,7 +719,7 @@ def test_buyer_wait_send_outcomes_are_exact_and_fail_closed(
 ):
     client = BuffStub([], wait_payload=wait_payload)
     result = buff_adapter(client).execute(
-        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+        wait_send_request()
     )
     assert result.status is expected_status
     assert result.detail == expected_detail
@@ -405,18 +730,61 @@ def test_buyer_wait_send_outcomes_are_exact_and_fail_closed(
 @pytest.mark.parametrize(
     "record",
     [
-        {"buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
-        {"id": "", "buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
-        {"id": True, "buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
-        {"id": ["buff-order-1"], "buyer_steamid": "steam-1", "state_text": "等待你发起报价"},
+        {"buyer_steamid": WAITING_BUYER_STEAM_ID, "state_text": "等待你发起报价"},
+        {"id": "", "buyer_steamid": WAITING_BUYER_STEAM_ID, "state_text": "等待你发起报价"},
+        {"id": " buff-order-1 ", "buyer_steamid": WAITING_BUYER_STEAM_ID, "state_text": "等待你发起报价"},
+        {"id": True, "buyer_steamid": WAITING_BUYER_STEAM_ID, "state_text": "等待你发起报价"},
+        {"id": 1.0, "buyer_steamid": WAITING_BUYER_STEAM_ID, "state_text": "等待你发起报价"},
+        {"id": ["buff-order-1"], "buyer_steamid": WAITING_BUYER_STEAM_ID, "state_text": "等待你发起报价"},
+        {"id": {"value": "buff-order-1"}, "buyer_steamid": WAITING_BUYER_STEAM_ID, "state_text": "等待你发起报价"},
     ],
 )
 def test_buyer_wait_send_invalid_order_id_fails_closed(record):
     result = buff_adapter(BuffStub([], wait_payload=[record])).execute(
-        request(capability=PlatformCapability.READ_DELIVERY_DIRECTION)
+        wait_send_request()
     )
     assert result.status is PlatformResultStatus.MALFORMED
     assert result.evidence is None
+
+
+@pytest.mark.parametrize(
+    "buyer_steamid",
+    [
+        "",
+        "0",
+        "076561198000000001",
+        " 76561198000000001",
+        "76561198000000001 ",
+        "７６５６１１９８００００００１",
+        76561198000000001,
+        True,
+        76561198000000001.0,
+        ["76561198000000001"],
+        {"value": "76561198000000001"},
+    ],
+)
+def test_buyer_wait_send_requires_canonical_decimal_text_buyer_steamid(
+    buyer_steamid,
+):
+    result = buff_adapter(
+        BuffStub([], wait_payload=[wait_send_record(buyer_steamid=buyer_steamid)])
+    ).execute(wait_send_request())
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_buyer_wait_send_accepts_integer_order_id_by_exact_string_conversion():
+    exact_request = replace(
+        wait_send_request(),
+        purchase_id="purchase-7",
+        buff_order_id="7",
+    )
+    result = buff_adapter(
+        BuffStub([], wait_payload=[wait_send_record(id=7)])
+    ).execute(exact_request)
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == DeliveryDirectionEvidence("buyer_sends_offer")
 
 
 def test_buyer_wait_send_requires_exact_buyer_steamid_field_without_aliases():
@@ -426,12 +794,12 @@ def test_buyer_wait_send_requires_exact_buyer_steamid_field_without_aliases():
             wait_payload=[
                 {
                     "id": "buff-order-1",
-                    "buyer_steam_id": "steam-1",
+                    "buyer_steam_id": WAITING_BUYER_STEAM_ID,
                     "state_text": "等待你发起报价",
                 }
             ],
         )
-    ).execute(request(capability=PlatformCapability.READ_DELIVERY_DIRECTION))
+    ).execute(wait_send_request())
     assert result.status is PlatformResultStatus.RESULT_UNKNOWN
     assert result.detail == "order_not_proven"
 
@@ -440,15 +808,99 @@ def test_buff_offer_state_requires_exact_order_trade_offer_and_known_pending_sta
     result = buff_adapter(BuffStub([buff_record()])).execute(request())
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "offer_pending"
-    assert result.evidence == OfferStateEvidence("offer-1")
+    assert result.evidence == OfferStateEvidence("offer-1", "76561198000000002")
 
-    for record in (
-        buff_record(tradeofferid=None),
-        buff_record(state="unknown"),
-    ):
-        result = buff_adapter(BuffStub([record])).execute(request())
-        assert result.status is PlatformResultStatus.RESULT_UNKNOWN
-        assert result.is_success is False
+    malformed = buff_adapter(
+        BuffStub([buff_record(tradeofferid=None)])
+    ).execute(request())
+    assert malformed.status is PlatformResultStatus.MALFORMED
+    assert malformed.detail == "malformed_payload"
+    assert malformed.evidence is None
+
+    unknown_state = buff_adapter(
+        BuffStub([buff_record(state="unknown")])
+    ).execute(request())
+    assert unknown_state.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert unknown_state.detail == "order_not_proven"
+    assert unknown_state.evidence is None
+
+
+def test_buff_offer_state_success_carries_exact_offer_and_same_record_seller():
+    result = buff_adapter(BuffStub([buff_record()])).execute(request())
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence.steam_tradeoffer_id == "offer-1"
+    assert result.evidence.counterparty_steam_id == "76561198000000002"
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {key: value for key, value in buff_record().items() if key != "seller_steam_id"},
+            {
+                **{
+                    key: value
+                    for key, value in buff_record().items()
+                    if key not in {"seller_steam_id", "seller_steamid"}
+                },
+                "seller": "76561198000000002",
+            },
+    ],
+)
+def test_buff_offer_state_missing_exact_seller_is_unknown_without_authority(record):
+    result = buff_adapter(BuffStub([record])).execute(request())
+
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_not_proven"
+    assert result.evidence is None
+
+
+@pytest.mark.parametrize(
+    "seller_fields",
+    [
+        {"seller_steam_id": "seller-1"},
+        {
+            "seller_steam_id": "76561198000000002",
+            "seller_steamid": "76561198000000003",
+        },
+    ],
+)
+def test_buff_offer_state_malformed_or_conflicting_seller_is_malformed(seller_fields):
+    result = buff_adapter(BuffStub([{**buff_record(), **seller_fields}])).execute(
+        request()
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_buff_offer_state_malformed_seller_is_not_hidden_by_unknown_state():
+    result = buff_adapter(
+        BuffStub([buff_record(state="unknown", seller_steam_id="seller-1")])
+    ).execute(request())
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+
+
+def test_buff_offer_state_never_borrows_offer_from_another_order_record():
+    exact_order_without_offer = buff_record()
+    del exact_order_without_offer["tradeofferid"]
+    unrelated = {
+        "buff_order_id": "other-order",
+        "tradeofferid": "offer-1",
+        "seller_steam_id": "76561198000000002",
+    }
+
+    result = buff_adapter(BuffStub([exact_order_without_offer, unrelated])).execute(
+        request()
+    )
+
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_not_proven"
+    assert result.evidence is None
 
 
 @pytest.mark.parametrize("payload", [None, {"code": "OK", "data": []}, ["not-a-record"]])
@@ -529,7 +981,7 @@ def test_injected_platform_result_is_untrusted_raw_payload():
                 item,
                 PlatformResultStatus.SUCCESS,
                 "forged",
-                OfferStateEvidence("offer-1"),
+                OfferStateEvidence("offer-1", "76561198000000002"),
             )
         )
     ).execute(item)
@@ -807,17 +1259,32 @@ def test_steam_trade_offer_identity_mismatch_is_failure(field, value):
 
 
 @pytest.mark.parametrize(
-    "lifecycle",
+    ("lifecycle", "expected"),
     [
-        "confirmation_need",
-        "countered",
-        "expired",
-        "canceled",
-        "declined",
-        "invalid_items",
-        42,
+        ("countered", SteamTradeOfferLifecycle.COUNTERED),
+        ("expired", SteamTradeOfferLifecycle.EXPIRED),
+        ("canceled", SteamTradeOfferLifecycle.CANCELED),
+        ("cancelled", SteamTradeOfferLifecycle.CANCELED),
+        ("declined", SteamTradeOfferLifecycle.DECLINED),
+        ("invalid_items", SteamTradeOfferLifecycle.INVALID_ITEMS),
+        (
+            "canceled_by_second_factor",
+            SteamTradeOfferLifecycle.CANCELED_BY_SECOND_FACTOR,
+        ),
+        ("in_escrow", SteamTradeOfferLifecycle.IN_ESCROW),
     ],
 )
+def test_extended_trade_offer_lifecycle_is_canonical(lifecycle, expected):
+    result = steam_trade_offer_adapter(
+        TradeOfferReaderStub(steam_trade_offer_payload(lifecycle=lifecycle))
+    ).execute(steam_trade_offer_request())
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == f"trade_offer_{expected.value}"
+    assert result.evidence.lifecycle is expected
+
+
+@pytest.mark.parametrize("lifecycle", ["confirmation_need", "unknown", 42])
 def test_unknown_trade_offer_lifecycle_is_not_success(lifecycle):
     result = steam_trade_offer_adapter(
         TradeOfferReaderStub(steam_trade_offer_payload(lifecycle=lifecycle))
@@ -1148,7 +1615,7 @@ def test_completed_trade_adapter_has_no_state_or_platform_write_dependencies():
         "PUT",
         "PATCH",
         "DELETE",
-        "accept_offer",
-        "send_offer",
+            "accept_offer(",
+            "send_offer(",
     ):
         assert banned not in text

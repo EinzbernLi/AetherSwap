@@ -212,6 +212,14 @@ class FreshUnknownBridge:
             )
         raise AssertionError(f"unexpected step from {status}")
 
+    def recover_result_unknown_readonly(self, delivery):
+        self.events.append("recovery_read")
+        return SimpleNamespace(
+            after=delivery,
+            persisted=False,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
     def close(self):
         pass
 
@@ -372,16 +380,15 @@ def test_canary_confirmation_result_unknown_stops_all_later_active_progression(
     owner_session.release_keep_fence()
 
 
-def test_normal_fresh_send_result_unknown_keeps_historical_immediate_read_recovery(
+def test_normal_result_unknown_uses_only_read_recovery_and_never_resends(
     monkeypatch,
 ):
     bridge = FreshUnknownBridge()
-    bridge.current = _delivery(DeliveryStatus.PENDING_DIRECTION, revision=1)
+    bridge.current = _delivery(DeliveryStatus.RESULT_UNKNOWN, revision=4)
     integration = host_integration.HostAutoOfferIntegration(
         bridge,
         complete_purchase_receipt_by_id=lambda *_args: True,
     )
-    integration._fresh_deliveries.append(bridge.current)
     monkeypatch.setattr(
         host_integration,
         "_exact_current_account",
@@ -398,6 +405,13 @@ def test_normal_fresh_send_result_unknown_keeps_historical_immediate_read_recove
         staticmethod(lambda: True),
     )
 
-    assert integration._dispatch_fresh_deliveries() == {ORDER_ID}
-    assert bridge.events == ["direction", "send", "recovery"]
-    assert bridge.current.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+    assert integration.next_purchase_result([_host_row()]) is AutoOfferResult.RESULT_UNKNOWN
+    first = integration.run_delivery_tick([_host_row()])
+    second = integration.run_delivery_tick([_host_row()], cursor=first.next_cursor)
+
+    assert first.result is AutoOfferResult.RESULT_UNKNOWN
+    assert second.result is AutoOfferResult.RESULT_UNKNOWN
+    assert first.visited_order_ids == second.visited_order_ids == (ORDER_ID,)
+    assert integration._fresh_deliveries == []
+    assert bridge.events == ["recovery_read", "recovery_read"]
+    assert bridge.current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN

@@ -24,6 +24,7 @@ from app.auto_offer.adapters import (
     PlatformResult,
     PlatformResultStatus,
     RecipientInventoryItemEvidence,
+    SellerOrderItemEvidence,
     SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
@@ -40,6 +41,49 @@ def request(**changes):
         revision=1,
         capability=PlatformCapability.READ_OFFER_STATE,
         timeout_seconds=5.0,
+    )
+    return replace(value, **changes)
+
+
+def seller_item_request(**changes):
+    value = PlatformRequest(
+        purchase_id="purchase-1",
+        buff_order_id="buff-order-1",
+        account_id="account-1",
+        recipient_steam_id="76561198000000001",
+        revision=3,
+        capability=PlatformCapability.READ_SELLER_OFFER_ITEM,
+        timeout_seconds=5.0,
+        steam_tradeoffer_id="offer-1",
+        counterparty_steam_id="76561198000000002",
+        host_goods_id=73001,
+    )
+    return replace(value, **changes)
+
+
+def accept_request(**changes):
+    value = PlatformRequest(
+        purchase_id="purchase-1",
+        buff_order_id="buff-order-1",
+        account_id="account-1",
+        recipient_steam_id="76561198000000001",
+        revision=4,
+        capability=PlatformCapability.ACCEPT_OFFER,
+        timeout_seconds=5.0,
+        steam_tradeoffer_id="offer-1",
+        counterparty_steam_id="76561198000000002",
+    )
+    return replace(value, **changes)
+
+
+def seller_item_evidence(**changes):
+    value = SellerOrderItemEvidence(
+        buff_order_id="buff-order-1",
+        steam_tradeoffer_id="offer-1",
+        recipient_steam_id="76561198000000001",
+        counterparty_steam_id="76561198000000002",
+        goods_id=73001,
+        seller_assetid="asset-1",
     )
     return replace(value, **changes)
 
@@ -96,7 +140,7 @@ def test_request_and_result_are_immutable_and_preserve_exact_identity():
     result = PlatformResult(
         original,
         PlatformResultStatus.SUCCESS,
-        evidence=OfferStateEvidence("offer-1"),
+        evidence=OfferStateEvidence("offer-1", "76561198000000002"),
     )
 
     with pytest.raises(FrozenInstanceError):
@@ -113,6 +157,118 @@ def test_request_and_result_are_immutable_and_preserve_exact_identity():
         result.request.revision,
     ) == ("purchase-1", "buff-order-1", "account-1", "steam-1", 1)
     assert result.is_success is True
+
+
+def test_existing_request_defaults_and_equality_remain_unchanged():
+    first = request()
+    second = request()
+    assert first == second
+    assert first.counterparty_steam_id is None
+    assert first.host_goods_id is None
+
+
+@pytest.mark.parametrize("field", ["counterparty_steam_id", "host_goods_id"])
+def test_seller_specific_fields_are_rejected_on_every_old_capability(field):
+    bound = {
+        PlatformCapability.READ_STEAM_TRADE_OFFER,
+        PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        PlatformCapability.CONFIRM_OFFER,
+    }
+    for capability in PlatformCapability:
+        if capability in {
+            PlatformCapability.READ_SELLER_OFFER_ITEM,
+            PlatformCapability.ACCEPT_OFFER,
+        }:
+            continue
+        changes = {"capability": capability}
+        if capability in bound:
+            changes["steam_tradeoffer_id"] = "offer-1"
+        value = "76561198000000002" if field == "counterparty_steam_id" else 73001
+        with pytest.raises(PlatformAdapterProtocolError):
+            request(**changes, **{field: value})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"steam_tradeoffer_id": None},
+        {"counterparty_steam_id": None},
+        {"counterparty_steam_id": "seller"},
+        {"counterparty_steam_id": "076561198000000002"},
+        {"counterparty_steam_id": "76561198000000001"},
+        {"host_goods_id": 73001},
+    ],
+)
+def test_accept_request_requires_exact_counterparty_and_rejects_host_goods(changes):
+    with pytest.raises(PlatformAdapterProtocolError):
+        accept_request(**changes)
+
+
+def test_accept_request_binds_dynamic_counterparty_without_host_goods():
+    item = accept_request()
+    assert item.counterparty_steam_id == "76561198000000002"
+    assert item.host_goods_id is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"steam_tradeoffer_id": None},
+        {"counterparty_steam_id": None},
+        {"counterparty_steam_id": "seller"},
+        {"counterparty_steam_id": "076561198000000002"},
+        {"counterparty_steam_id": "76561198000000001"},
+        {"host_goods_id": None},
+        {"host_goods_id": True},
+        {"host_goods_id": 0},
+    ],
+)
+def test_seller_item_request_requires_exact_offer_counterparty_and_goods(changes):
+    with pytest.raises(PlatformAdapterProtocolError):
+        seller_item_request(**changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"buff_order_id": ""},
+        {"steam_tradeoffer_id": " offer-1"},
+        {"recipient_steam_id": "recipient"},
+        {"recipient_steam_id": "076561198000000001"},
+        {"counterparty_steam_id": "seller"},
+        {"counterparty_steam_id": "76561198000000001"},
+        {"goods_id": True},
+        {"goods_id": 0},
+        {"seller_assetid": ""},
+    ],
+)
+def test_canonical_seller_item_evidence_rejects_every_invalid_field(changes):
+    with pytest.raises(PlatformAdapterProtocolError):
+        seller_item_evidence(**changes)
+
+
+def test_seller_item_success_evidence_is_exactly_request_bound():
+    item = seller_item_request()
+    result = PlatformResult(
+        item,
+        PlatformResultStatus.SUCCESS,
+        evidence=seller_item_evidence(),
+    )
+    assert result.evidence == seller_item_evidence()
+
+    for changes in (
+        {"buff_order_id": "other-order"},
+        {"steam_tradeoffer_id": "other-offer"},
+        {"recipient_steam_id": "76561198000000003"},
+        {"counterparty_steam_id": "76561198000000003"},
+        {"goods_id": 73002},
+    ):
+        with pytest.raises(PlatformAdapterProtocolError):
+            PlatformResult(
+                item,
+                PlatformResultStatus.SUCCESS,
+                evidence=seller_item_evidence(**changes),
+            )
 
 
 @pytest.mark.parametrize(
@@ -188,7 +344,7 @@ def test_fake_bare_success_fails_closed_for_the_same_exact_request():
     ("capability", "evidence"),
     [
         (PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
-        (PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1")),
+        (PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1", "76561198000000002")),
         (
             PlatformCapability.READ_INVENTORY_STATE,
             InventoryStateEvidence(("asset-2", "asset-1"), 2),
@@ -226,7 +382,7 @@ def test_malformed_and_identity_mismatched_results_fail_closed():
             wrong_identity: PlatformResult(
                 item,
                 PlatformResultStatus.SUCCESS,
-                evidence=OfferStateEvidence("offer-1"),
+                evidence=OfferStateEvidence("offer-1", "76561198000000002"),
             ),
         }
     )
@@ -274,7 +430,7 @@ def test_fake_does_not_import_or_mutate_store_or_delivery_snapshot():
             item: PlatformResult(
                 item,
                 PlatformResultStatus.SUCCESS,
-                evidence=OfferStateEvidence("offer-1"),
+                evidence=OfferStateEvidence("offer-1", "76561198000000002"),
             )
         },
     ).execute(item)
@@ -289,7 +445,7 @@ def test_fake_does_not_import_or_mutate_store_or_delivery_snapshot():
     ("evidence", "capability"),
     [
         (DeliveryDirectionEvidence(), PlatformCapability.READ_OFFER_STATE),
-        (OfferStateEvidence("offer-1"), PlatformCapability.READ_INVENTORY_STATE),
+        (OfferStateEvidence("offer-1", "76561198000000002"), PlatformCapability.READ_INVENTORY_STATE),
         (InventoryStateEvidence(("asset-1",)), PlatformCapability.READ_DELIVERY_DIRECTION),
     ],
 )
@@ -303,13 +459,13 @@ def test_non_success_or_send_offer_cannot_contain_success_evidence():
         PlatformResult(
             request(),
             PlatformResultStatus.RESULT_UNKNOWN,
-            evidence=OfferStateEvidence("offer-1"),
+            evidence=OfferStateEvidence("offer-1", "76561198000000002"),
         )
     with pytest.raises(PlatformAdapterProtocolError):
         PlatformResult(
             request(capability=PlatformCapability.SEND_OFFER),
             PlatformResultStatus.SUCCESS,
-            evidence=OfferStateEvidence("offer-1"),
+            evidence=OfferStateEvidence("offer-1", "76561198000000002"),
         )
 
 
@@ -339,7 +495,13 @@ def test_evidence_values_are_immutable_validated_and_canonical():
         with pytest.raises(PlatformAdapterProtocolError):
             DeliveryDirectionEvidence(direction)
     with pytest.raises(PlatformAdapterProtocolError):
-        OfferStateEvidence(" offer-1")
+        OfferStateEvidence(" offer-1", "76561198000000002")
+
+
+@pytest.mark.parametrize("counterparty", ["seller-1", "0123", True, 76561198000000002])
+def test_offer_state_evidence_requires_canonical_seller_steam_id(counterparty):
+    with pytest.raises(PlatformAdapterProtocolError):
+        OfferStateEvidence("offer-1", counterparty)
     for assetids, total in (
         (["asset-1"], None),
         ((True,), None),
@@ -898,7 +1060,7 @@ def test_send_offer_evidence_is_strict_frozen_and_capability_bound():
         PlatformResult(
             item,
             PlatformResultStatus.SUCCESS,
-            evidence=OfferStateEvidence("offer-99"),
+            evidence=OfferStateEvidence("offer-99", "76561198000000002"),
         )
     with pytest.raises(PlatformAdapterProtocolError):
         PlatformResult(

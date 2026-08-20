@@ -22,7 +22,7 @@ _STORE_SELECT: Final[str] = (
     "id, purchase_id, buff_order_id, account_id, recipient_steam_id, "
     "delivery_mode, delivery_status, steam_tradeoffer_id, "
     "offer_attempted_at, offer_sent_at, received_at, delivery_error, "
-    "pending_receipt, assetid, revision"
+    "pending_receipt, assetid, counterparty_steam_id, revision"
 )
 _STORE_EXPECTED_COLUMNS: Final[tuple[tuple[str, str, int, int], ...]] = (
     ("id", "INTEGER", 0, 1),
@@ -40,6 +40,7 @@ _STORE_EXPECTED_COLUMNS: Final[tuple[tuple[str, str, int, int], ...]] = (
     ("pending_receipt", "INTEGER", 1, 0),
     ("assetid", "TEXT", 0, 0),
     ("revision", "INTEGER", 1, 0),
+    ("counterparty_steam_id", "TEXT", 0, 0),
 )
 _SOURCE_SUFFIXES: Final[tuple[str, ...]] = ("", "-wal", "-shm", "-journal")
 
@@ -70,6 +71,7 @@ class AutoOfferDeliverySnapshot:
     steam_tradeoffer_id: str | None
     pending_receipt: bool
     assetid: str | None
+    counterparty_steam_id: str | None
     revision: int
 
 
@@ -315,11 +317,11 @@ def _validate_store_schema(connection: sqlite3.Connection) -> None:
 
 
 def _store_row(row: tuple[object, ...]) -> AutoOfferDeliverySnapshot:
-    if len(row) != 15 or type(row[0]) is not int or row[0] <= 0:
+    if len(row) != 16 or type(row[0]) is not int or row[0] <= 0:
         raise PreflightSnapshotError("auto_offer_store_row_invalid")
     if type(row[12]) is not int or row[12] not in (0, 1):
         raise PreflightSnapshotError("auto_offer_store_row_invalid")
-    if type(row[14]) is not int or row[14] <= 0:
+    if type(row[15]) is not int or row[15] <= 0:
         raise PreflightSnapshotError("auto_offer_store_row_invalid")
     try:
         mode = None if row[5] is None else DeliveryMode(row[5])
@@ -338,6 +340,7 @@ def _store_row(row: tuple[object, ...]) -> AutoOfferDeliverySnapshot:
             delivery_error=row[11],
             pending_receipt=bool(row[12]),
             assetid=row[13],
+            counterparty_steam_id=row[14],
         )
         validate_delivery_snapshot(snapshot)
     except (DeliveryContractError, TypeError, ValueError):
@@ -353,7 +356,8 @@ def _store_row(row: tuple[object, ...]) -> AutoOfferDeliverySnapshot:
         steam_tradeoffer_id=snapshot.steam_tradeoffer_id,
         pending_receipt=snapshot.pending_receipt,
         assetid=snapshot.assetid,
-        revision=row[14],
+        counterparty_steam_id=snapshot.counterparty_steam_id,
+        revision=row[15],
     )
 
 

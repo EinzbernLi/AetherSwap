@@ -137,6 +137,20 @@ class ScriptedBridge:
             decision=SimpleNamespace(result=AutoOfferResult.WAITING),
         )
 
+    def recover_result_unknown_readonly(self, delivery):
+        self.events.append(
+            (
+                "recover_result_unknown_readonly",
+                delivery.snapshot.buff_order_id,
+                delivery.snapshot.delivery_status,
+            )
+        )
+        return SimpleNamespace(
+            after=delivery,
+            persisted=False,
+            decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+        )
+
     def list_recoverable(self):
         return tuple(
             delivery
@@ -264,17 +278,16 @@ def test_preexisting_duplicate_never_authorizes_first_send(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
     bridge = ScriptedBridge(fresh_orders=())
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
 
     integration.register_committed_purchase(_purchase("order-1"))
     result = integration.next_purchase_result(_host_rows("order-1"))
 
     assert result is AutoOfferResult.WAITING
-    assert bridge.events == [
-        ("register", "order-1"),
-        ("step", "order-1", DeliveryStatus.PENDING_DIRECTION),
-    ]
-    assert all(event[2] is not DeliveryStatus.AWAITING_OFFER for event in bridge.events if event[0] == "step")
+    assert integration._fresh_deliveries == []
+    assert bridge.events == [("register", "order-1")]
 
 
 def test_preexisting_buyer_awaiting_offer_is_never_sent(monkeypatch):
@@ -287,7 +300,9 @@ def test_preexisting_buyer_awaiting_offer_is_never_sent(monkeypatch):
         mode=DeliveryMode.BUYER_SENDS_OFFER,
         revision=2,
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
 
     assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
     assert bridge.events == []
@@ -297,7 +312,9 @@ def test_runtime_identity_mismatch_blocks_before_any_platform_step(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
     bridge = ScriptedBridge(fresh_orders=("order-1",))
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     monkeypatch.setattr(host_integration, "get_current_id", lambda: "account-2")
@@ -332,7 +349,9 @@ def test_batch_registration_finishes_before_any_platform_step(monkeypatch):
         fresh_orders=("order-1", "order-2"),
         transitions=transitions,
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
 
     integration.register_committed_purchase(_purchase("order-1"))
     integration.register_committed_purchase(_purchase("order-2"))
@@ -341,14 +360,19 @@ def test_batch_registration_finishes_before_any_platform_step(monkeypatch):
     result = integration.next_purchase_result(_host_rows("order-1", "order-2"))
 
     assert result is AutoOfferResult.WAITING
-    assert bridge.events[:2] == [("register", "order-1"), ("register", "order-2")]
+    assert integration._fresh_deliveries == []
+    assert bridge.events == [("register", "order-1"), ("register", "order-2")]
+
+    outcome = integration.run_delivery_tick(_host_rows("order-1", "order-2"))
+
+    assert outcome.visited_order_ids == ("order-1", "order-2")
     assert bridge.events[2:] == [
         ("step", "order-1", DeliveryStatus.PENDING_DIRECTION),
         ("step", "order-2", DeliveryStatus.PENDING_DIRECTION),
     ]
 
 
-def test_buyer_first_send_is_one_shot_then_persisted_path_is_read_only(monkeypatch):
+def test_buyer_awaiting_offer_is_not_authorized_to_send_from_persisted_state(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
     transitions = {
@@ -358,41 +382,33 @@ def test_buyer_first_send_is_one_shot_then_persisted_path_is_read_only(monkeypat
             mode=DeliveryMode.BUYER_SENDS_OFFER,
             revision=2,
         ),
-        ("order-1", DeliveryStatus.AWAITING_OFFER): _delivery(
-            "order-1",
-            status=DeliveryStatus.RESULT_UNKNOWN,
-            mode=DeliveryMode.BUYER_SENDS_OFFER,
-            revision=4,
-        ),
-        ("order-1", DeliveryStatus.RESULT_UNKNOWN): _delivery(
-            "order-1",
-            status=DeliveryStatus.OFFER_SENT,
-            mode=DeliveryMode.BUYER_SENDS_OFFER,
-            revision=5,
-        ),
     }
     bridge = ScriptedBridge(fresh_orders=("order-1",), transitions=transitions)
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
-    assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
+    rows = _host_rows("order-1")
+    assert integration.next_purchase_result(rows) is AutoOfferResult.WAITING
+    assert bridge.events == [("register", "order-1")]
+
+    first = integration.run_delivery_tick(rows)
+    assert first.visited_order_ids == ("order-1",)
     assert bridge.events == [
         ("register", "order-1"),
         ("step", "order-1", DeliveryStatus.PENDING_DIRECTION),
-        ("step", "order-1", DeliveryStatus.AWAITING_OFFER),
-        ("step", "order-1", DeliveryStatus.RESULT_UNKNOWN),
     ]
 
-    assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
-    assert bridge.events[-1] == ("step", "order-1", DeliveryStatus.OFFER_SENT)
-    assert len(bridge.events) == 5
-    assert sum(
-        event == ("step", "order-1", DeliveryStatus.AWAITING_OFFER)
-        for event in bridge.events
-    ) == 1
+    second = integration.run_delivery_tick(rows, cursor=first.next_cursor)
+    assert second.visited_order_ids == ("order-1",)
+    assert bridge.events == [
+        ("register", "order-1"),
+        ("step", "order-1", DeliveryStatus.PENDING_DIRECTION),
+    ]
 
 
-def test_seller_direction_never_enters_buyer_send_step(monkeypatch):
+def test_seller_direction_progression_belongs_to_delivery_tick(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
     bridge = ScriptedBridge(
@@ -406,56 +422,53 @@ def test_seller_direction_never_enters_buyer_send_step(monkeypatch):
             )
         },
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
+    assert bridge.events == [("register", "order-1")]
+
+    outcome = integration.run_delivery_tick(_host_rows("order-1"))
+
+    assert outcome.visited_order_ids == ("order-1",)
     assert bridge.events == [
         ("register", "order-1"),
         ("step", "order-1", DeliveryStatus.PENDING_DIRECTION),
     ]
 
 
-def test_unresolved_write_stops_later_fresh_first_sends(monkeypatch):
+def test_result_unknown_globally_stops_normal_runtime_progression(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
-    transitions = {
-        ("order-1", DeliveryStatus.PENDING_DIRECTION): _delivery(
-            "order-1",
-            status=DeliveryStatus.AWAITING_OFFER,
-            mode=DeliveryMode.BUYER_SENDS_OFFER,
-            revision=2,
-        ),
-        ("order-1", DeliveryStatus.AWAITING_OFFER): _delivery(
+    bridge = ScriptedBridge()
+    bridge.current = {
+        "order-1": _delivery(
             "order-1",
             status=DeliveryStatus.RESULT_UNKNOWN,
             mode=DeliveryMode.BUYER_SENDS_OFFER,
             revision=4,
         ),
-        ("order-1", DeliveryStatus.RESULT_UNKNOWN): _delivery(
-            "order-1",
-            status=DeliveryStatus.RESULT_UNKNOWN,
-            mode=DeliveryMode.BUYER_SENDS_OFFER,
-            revision=4,
-        ),
-        ("order-2", DeliveryStatus.PENDING_DIRECTION): _delivery(
-            "order-2",
-            status=DeliveryStatus.AWAITING_OFFER,
-            mode=DeliveryMode.BUYER_SENDS_OFFER,
-            revision=2,
-        ),
+        "order-2": _delivery("order-2"),
     }
-    bridge = ScriptedBridge(
-        fresh_orders=("order-1", "order-2"),
-        transitions=transitions,
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
-    integration.register_committed_purchase(_purchase("order-1"))
-    integration.register_committed_purchase(_purchase("order-2"))
+    rows = _host_rows("order-1", "order-2")
 
-    assert integration.next_purchase_result(_host_rows("order-1", "order-2")) is AutoOfferResult.WAITING
-    assert ("step", "order-2", DeliveryStatus.PENDING_DIRECTION) not in bridge.events
-    assert bridge.events[-1] == ("step", "order-1", DeliveryStatus.RESULT_UNKNOWN)
+    assert integration.next_purchase_result(rows) is AutoOfferResult.RESULT_UNKNOWN
+    outcome = integration.run_delivery_tick(rows)
+
+    assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.events == [
+        (
+            "recover_result_unknown_readonly",
+            "order-1",
+            DeliveryStatus.RESULT_UNKNOWN,
+        )
+    ]
 
 
 def test_unresolved_checkout_defers_all_fresh_platform_steps_and_close_does_not_write(monkeypatch):
@@ -466,7 +479,9 @@ def test_unresolved_checkout_defers_all_fresh_platform_steps_and_close_does_not_
         lambda: {"stage": "batch_partial"},
     )
     bridge = ScriptedBridge(fresh_orders=("order-1",))
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     assert integration.next_purchase_result(_host_rows("order-1")) is AutoOfferResult.WAITING
@@ -476,7 +491,7 @@ def test_unresolved_checkout_defers_all_fresh_platform_steps_and_close_does_not_
     assert bridge.closed is True
 
 
-def test_close_dispatches_final_resolved_checkout_once(monkeypatch):
+def test_close_never_dispatches_even_after_checkout_is_resolved(monkeypatch):
     _patch_identity(monkeypatch)
     monkeypatch.setattr(host_integration, "get_unresolved_checkout", lambda: None)
     bridge = ScriptedBridge(
@@ -490,7 +505,9 @@ def test_close_dispatches_final_resolved_checkout_once(monkeypatch):
             )
         },
     )
-    integration = host_integration.HostAutoOfferIntegration(bridge)
+    integration = host_integration.HostAutoOfferIntegration(
+        bridge, delete_refund_cleanup_purchase=lambda *_args: True
+    )
     integration.register_committed_purchase(_purchase("order-1"))
 
     integration.close()
@@ -498,7 +515,6 @@ def test_close_dispatches_final_resolved_checkout_once(monkeypatch):
 
     assert bridge.events == [
         ("register", "order-1"),
-        ("step", "order-1", DeliveryStatus.PENDING_DIRECTION),
         ("close",),
     ]
 
@@ -644,6 +660,15 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         def confirm(self, *_args, **_kwargs):
             raise AssertionError("builder performed confirmation execution")
 
+    class FakeAcceptTransport:
+        bound_account_steam_id = STEAM_ID
+
+        def __init__(self, cookie, *, session):
+            calls.append(("accept_transport", cookie, session))
+
+        def accept(self, *_args, **_kwargs):
+            raise AssertionError("builder performed accept execution")
+
     class FakeAdapter:
         def __init__(self, *_args, **_kwargs):
             calls.append(("adapter",))
@@ -655,6 +680,10 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     class FakeConfirmationAdapter:
         def __init__(self, transport, **kwargs):
             calls.append(("confirmation_adapter", transport, kwargs))
+
+    class FakeAcceptAdapter:
+        def __init__(self, transport, **kwargs):
+            calls.append(("accept_adapter", transport, kwargs))
 
     class FakeCoordinator:
         def __init__(self, store, adapters, **kwargs):
@@ -677,6 +706,11 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         "SteamTradeOfferConfirmationTransport",
         FakeConfirmationTransport,
     )
+    monkeypatch.setattr(
+        host_integration,
+        "SteamIncomingOfferAcceptTransport",
+        FakeAcceptTransport,
+    )
     monkeypatch.setattr(host_integration, "BuffReadOnlyAdapter", FakeAdapter)
     monkeypatch.setattr(host_integration, "SteamTradeOfferReadOnlyAdapter", FakeAdapter)
     monkeypatch.setattr(host_integration, "SteamCompletedTradeReadOnlyAdapter", FakeAdapter)
@@ -685,6 +719,11 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         host_integration,
         "SteamTradeOfferConfirmationAdapter",
         FakeConfirmationAdapter,
+    )
+    monkeypatch.setattr(
+        host_integration,
+        "SteamIncomingOfferAcceptAdapter",
+        FakeAcceptAdapter,
     )
     monkeypatch.setattr(host_integration, "DeliveryCoordinator", FakeCoordinator)
 
@@ -702,14 +741,18 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     kwargs = coordinator_calls[0][3]
     assert set(registry) == {
         PlatformCapability.READ_DELIVERY_DIRECTION,
+        PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.SEND_OFFER,
         PlatformCapability.CONFIRM_OFFER,
+        PlatformCapability.ACCEPT_OFFER,
     }
     assert kwargs["allow_writes"] is True
     assert kwargs["allow_confirmation_writes"] is True
+    assert kwargs["allow_accept_writes"] is True
 
     send_calls = [call for call in calls if call[0] == "send_adapter"]
     assert len(send_calls) == 1
@@ -726,6 +769,15 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     confirmation_calls = [call for call in calls if call[0] == "confirmation_adapter"]
     assert len(confirmation_calls) == 1
     assert confirmation_calls[0][2] == {
+        "account_id": ACCOUNT_ID,
+        "recipient_steam_id": STEAM_ID,
+    }
+    accept_transport_calls = [call for call in calls if call[0] == "accept_transport"]
+    assert len(accept_transport_calls) == 1
+    assert accept_transport_calls[0][1] == COOKIE
+    accept_calls = [call for call in calls if call[0] == "accept_adapter"]
+    assert len(accept_calls) == 1
+    assert accept_calls[0][2] == {
         "account_id": ACCOUNT_ID,
         "recipient_steam_id": STEAM_ID,
     }

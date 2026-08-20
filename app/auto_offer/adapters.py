@@ -1,8 +1,7 @@
 """Pure, fail-closed platform adapter boundary for Auto Offer delivery.
 
-This module declares values that future Steam or BUFF adapters may implement.
-It deliberately performs no I/O, platform action, persistence, or runtime
-registration.
+This module declares values that Steam or BUFF adapters may implement. It
+performs no I/O, platform action, persistence, or runtime registration.
 """
 
 from __future__ import annotations
@@ -13,6 +12,11 @@ from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import Final, Protocol, TypeAlias, runtime_checkable
+
+from .counterparty_evidence import (
+    CounterpartyEvidenceError,
+    seller_counterparty_from_exact_buff_record,
+)
 
 
 class PlatformAdapterError(RuntimeError):
@@ -32,14 +36,17 @@ class PlatformAdapterProtocolError(PlatformAdapterError):
 
 
 class PlatformCapability(str, Enum):
-    """Explicit operations a future platform adapter may declare."""
+    """Explicit operations a platform adapter may declare."""
 
     READ_DELIVERY_DIRECTION = "read_delivery_direction"
     READ_OFFER_STATE = "read_offer_state"
+    READ_SELLER_OFFER_ITEM = "read_seller_offer_item"
     READ_INVENTORY_STATE = "read_inventory_state"
     READ_STEAM_TRADE_OFFER = "read_steam_trade_offer"
     READ_STEAM_COMPLETED_TRADE = "read_steam_completed_trade"
+    READ_BUFF_ORDER_LIFECYCLE = "read_buff_order_lifecycle"
     SEND_OFFER = "send_offer"
+    ACCEPT_OFFER = "accept_offer"
     CONFIRM_OFFER = "confirm_offer"
 
 
@@ -54,27 +61,122 @@ class PlatformResultStatus(str, Enum):
     MALFORMED = "malformed"
 
 
+class BuffOrderLifecycle(str, Enum):
+    PAYING = "paying"
+    REFUNDED = "refunded"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self is BuffOrderLifecycle.REFUNDED
+
+
+@dataclass(frozen=True)
+class BuffOrderLifecycleEvidence:
+    """Positive lifecycle evidence for one exact canonical BUFF order ID."""
+
+    buff_order_id: str
+    lifecycle: BuffOrderLifecycle
+    raw_state: str
+    raw_state_text: str
+    page_num: int
+
+    def __post_init__(self) -> None:
+        _require_id(self.buff_order_id, "buff_order_id")
+        if type(self.lifecycle) is not BuffOrderLifecycle:
+            raise PlatformAdapterProtocolError(
+                "lifecycle must be a BuffOrderLifecycle"
+            )
+        if type(self.raw_state) is not str or not self.raw_state:
+            raise PlatformAdapterProtocolError("raw_state must be a non-empty string")
+        if type(self.raw_state_text) is not str or not self.raw_state_text:
+            raise PlatformAdapterProtocolError(
+                "raw_state_text must be a non-empty string"
+            )
+        if type(self.page_num) is not int or not 1 <= self.page_num <= 10:
+            raise PlatformAdapterProtocolError("page_num must be between 1 and 10")
+        expected = {
+            BuffOrderLifecycle.PAYING: ("PAYING", "等待付款"),
+            BuffOrderLifecycle.REFUNDED: ("FAIL", "购买失败-已退款"),
+        }[self.lifecycle]
+        if (self.raw_state, self.raw_state_text) != expected:
+            raise PlatformAdapterProtocolError(
+                "lifecycle evidence does not match the proven raw BUFF state"
+            )
+
+
 @dataclass(frozen=True)
 class DeliveryDirectionEvidence:
-    """Proof of the one delivery direction this boundary currently verifies."""
+    """Proof of the exact delivery direction for one canonical order."""
 
     direction: str = "seller_sends_offer"
+    counterparty_steam_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.direction not in {"seller_sends_offer", "buyer_sends_offer"}:
             raise PlatformAdapterProtocolError(
                 "direction evidence must be seller_sends_offer or buyer_sends_offer"
             )
+        if self.counterparty_steam_id is not None:
+            _require_id(self.counterparty_steam_id, "counterparty_steam_id")
+        if (
+            self.direction == "buyer_sends_offer"
+            and self.counterparty_steam_id is not None
+        ):
+            raise PlatformAdapterProtocolError(
+                "buyer direction cannot carry seller counterparty evidence"
+            )
 
 
 @dataclass(frozen=True)
 class OfferStateEvidence:
-    """The exact Steam offer ID proven for one canonical BUFF order."""
+    """The exact Steam offer and seller proven for one canonical BUFF order."""
 
     steam_tradeoffer_id: str
+    counterparty_steam_id: str
 
     def __post_init__(self) -> None:
         _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+        try:
+            seller_counterparty_from_exact_buff_record(
+                {"seller_steam_id": self.counterparty_steam_id}
+            )
+        except CounterpartyEvidenceError as exc:
+            raise PlatformAdapterProtocolError(
+                "counterparty_steam_id must be a canonical positive SteamID"
+            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class SellerOrderItemEvidence:
+    """Exact BUFF seller item bound to one order, offer, and recipient."""
+
+    buff_order_id: str
+    steam_tradeoffer_id: str
+    recipient_steam_id: str
+    counterparty_steam_id: str
+    goods_id: int
+    seller_assetid: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.buff_order_id, "buff_order_id")
+        _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_canonical_positive_decimal(
+            self.recipient_steam_id,
+            "recipient_steam_id",
+        )
+        _require_canonical_positive_decimal(
+            self.counterparty_steam_id,
+            "counterparty_steam_id",
+        )
+        if self.recipient_steam_id == self.counterparty_steam_id:
+            raise PlatformAdapterProtocolError(
+                "recipient and counterparty Steam IDs must differ"
+            )
+        if type(self.goods_id) is not int or self.goods_id <= 0:
+            raise PlatformAdapterProtocolError(
+                "goods_id must be a positive integer"
+            )
+        _require_id(self.seller_assetid, "seller_assetid")
 
 
 @dataclass(frozen=True)
@@ -85,6 +187,18 @@ class SendOfferEvidence:
 
     def __post_init__(self) -> None:
         _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+
+
+@dataclass(frozen=True)
+class AcceptOfferEvidence:
+    """Proof that one exact incoming Steam Trade Offer ACCEPT returned success."""
+
+    steam_tradeoffer_id: str
+    account_steam_id: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_id(self.account_steam_id, "account_steam_id")
 
 
 @dataclass(frozen=True)
@@ -126,11 +240,29 @@ class InventoryStateEvidence:
 
 
 class SteamTradeOfferLifecycle(str, Enum):
-    """Steam Trade Offer states that this task can positively prove."""
+    """Steam Trade Offer states that exact reads can positively prove."""
 
     ACTIVE = "active"
     ACCEPTED = "accepted"
     CREATED_NEEDS_CONFIRMATION = "created_needs_confirmation"
+    COUNTERED = "countered"
+    EXPIRED = "expired"
+    CANCELED = "canceled"
+    DECLINED = "declined"
+    INVALID_ITEMS = "invalid_items"
+    CANCELED_BY_SECOND_FACTOR = "canceled_by_second_factor"
+    IN_ESCROW = "in_escrow"
+
+    @property
+    def is_terminal_without_trade(self) -> bool:
+        return self in {
+            SteamTradeOfferLifecycle.COUNTERED,
+            SteamTradeOfferLifecycle.EXPIRED,
+            SteamTradeOfferLifecycle.CANCELED,
+            SteamTradeOfferLifecycle.DECLINED,
+            SteamTradeOfferLifecycle.INVALID_ITEMS,
+            SteamTradeOfferLifecycle.CANCELED_BY_SECOND_FACTOR,
+        }
 
 
 @dataclass(frozen=True)
@@ -144,15 +276,11 @@ class TradeOfferItemEvidence:
 
     def __post_init__(self) -> None:
         if type(self.appid) is not int or self.appid <= 0:
-            raise PlatformAdapterProtocolError(
-                "appid must be a positive integer"
-            )
+            raise PlatformAdapterProtocolError("appid must be a positive integer")
         _require_id(self.contextid, "contextid")
         _require_id(self.assetid, "assetid")
         if type(self.amount) is not int or self.amount <= 0:
-            raise PlatformAdapterProtocolError(
-                "amount must be a positive integer"
-            )
+            raise PlatformAdapterProtocolError("amount must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -200,17 +328,13 @@ class SteamTradeOfferEvidence:
                     raise PlatformAdapterProtocolError(
                         f"{field} contains malformed item"
                     ) from error
-            identities = [
-                (item.appid, item.contextid, item.assetid) for item in items
-            ]
+            identities = [(item.appid, item.contextid, item.assetid) for item in items]
             if len(set(identities)) != len(identities):
                 raise PlatformAdapterProtocolError(
                     f"{field} contains duplicate item identity"
                 )
         if not self.items_to_give and not self.items_to_receive:
-            raise PlatformAdapterProtocolError(
-                "both item sides cannot be empty"
-            )
+            raise PlatformAdapterProtocolError("both item sides cannot be empty")
         for field in ("items_to_give", "items_to_receive"):
             items = getattr(self, field)
             object.__setattr__(
@@ -299,7 +423,10 @@ class SteamCompletedTradeEvidence:
 PlatformEvidence: TypeAlias = (
     DeliveryDirectionEvidence
     | OfferStateEvidence
+    | SellerOrderItemEvidence
+    | BuffOrderLifecycleEvidence
     | SendOfferEvidence
+    | AcceptOfferEvidence
     | ConfirmOfferEvidence
     | InventoryStateEvidence
     | SteamTradeOfferEvidence
@@ -312,9 +439,24 @@ def _require_id(value: object, field: str) -> None:
         raise PlatformAdapterProtocolError(f"{field} must be a non-whitespace string")
 
 
+def _require_canonical_positive_decimal(value: object, field: str) -> None:
+    if (
+        type(value) is not str
+        or not value
+        or not value.isascii()
+        or not value.isdecimal()
+        or value[0] == "0"
+    ):
+        raise PlatformAdapterProtocolError(
+            f"{field} must be a canonical positive decimal string"
+        )
+
+
 def _require_timeout(value: object) -> None:
     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-        raise PlatformAdapterProtocolError("timeout_seconds must be a finite positive number")
+        raise PlatformAdapterProtocolError(
+            "timeout_seconds must be a finite positive number"
+        )
 
 
 def _validate_completed_trade_item(item: object) -> None:
@@ -325,15 +467,11 @@ def _validate_completed_trade_item(item: object) -> None:
     new_contextid = getattr(item, "new_contextid", _MISSING)
     new_assetid = getattr(item, "new_assetid", _MISSING)
     if type(appid) is not int or appid <= 0:
-        raise PlatformAdapterProtocolError(
-            "appid must be a positive integer"
-        )
+        raise PlatformAdapterProtocolError("appid must be a positive integer")
     _require_id(contextid, "contextid")
     _require_id(assetid, "assetid")
     if type(amount) is not int or amount <= 0:
-        raise PlatformAdapterProtocolError(
-            "amount must be a positive integer"
-        )
+        raise PlatformAdapterProtocolError("amount must be a positive integer")
     _require_id(new_contextid, "new_contextid")
     _require_id(new_assetid, "new_assetid")
 
@@ -344,15 +482,11 @@ def _validate_recipient_inventory_item(item: object) -> None:
     assetid = getattr(item, "assetid", _MISSING)
     amount = getattr(item, "amount", _MISSING)
     if type(appid) is not int or appid <= 0:
-        raise PlatformAdapterProtocolError(
-            "appid must be a positive integer"
-        )
+        raise PlatformAdapterProtocolError("appid must be a positive integer")
     _require_id(contextid, "contextid")
     _require_id(assetid, "assetid")
     if type(amount) is not int or amount <= 0:
-        raise PlatformAdapterProtocolError(
-            "amount must be a positive integer"
-        )
+        raise PlatformAdapterProtocolError("amount must be a positive integer")
 
 
 def _validate_steam_completed_trade_evidence(evidence: object) -> None:
@@ -364,7 +498,9 @@ def _validate_steam_completed_trade_evidence(evidence: object) -> None:
     items_given = getattr(evidence, "items_given", _MISSING)
     items_received = getattr(evidence, "items_received", _MISSING)
     inventory_confirmed_items = getattr(
-        evidence, "inventory_confirmed_items", _MISSING
+        evidence,
+        "inventory_confirmed_items",
+        _MISSING,
     )
 
     _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
@@ -420,9 +556,7 @@ def _validate_steam_completed_trade_evidence(evidence: object) -> None:
         ("items_given", items_given),
         ("items_received", items_received),
     ):
-        source_identities = [
-            (item.appid, item.contextid, item.assetid) for item in items
-        ]
+        source_identities = [(item.appid, item.contextid, item.assetid) for item in items]
         new_identities = [
             (item.appid, item.new_contextid, item.new_assetid) for item in items
         ]
@@ -448,7 +582,12 @@ def _validate_steam_completed_trade_evidence(evidence: object) -> None:
         for item in items_received
     }
     for item in inventory_confirmed_items:
-        if (item.appid, item.contextid, item.assetid, item.amount) not in received_identities:
+        if (
+            item.appid,
+            item.contextid,
+            item.assetid,
+            item.amount,
+        ) not in received_identities:
             raise PlatformAdapterProtocolError(
                 "inventory confirmation must match received post-trade identity"
             )
@@ -493,9 +632,7 @@ _MISSING = object()
 def _request_attribute(request: object, field: str) -> object:
     value = getattr(request, field, _MISSING)
     if value is _MISSING:
-        raise PlatformAdapterProtocolError(
-            f"request is missing {field}"
-        )
+        raise PlatformAdapterProtocolError(f"request is missing {field}")
     return value
 
 
@@ -519,6 +656,56 @@ def _validate_platform_request(request: object) -> None:
         )
     _require_timeout(_request_attribute(request, "timeout_seconds"))
     steam_tradeoffer_id = _request_attribute(request, "steam_tradeoffer_id")
+    counterparty_steam_id = _request_attribute(request, "counterparty_steam_id")
+    host_goods_id = _request_attribute(request, "host_goods_id")
+    if capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
+        _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_canonical_positive_decimal(
+            _request_attribute(request, "recipient_steam_id"),
+            "recipient_steam_id",
+        )
+        _require_canonical_positive_decimal(
+            counterparty_steam_id,
+            "counterparty_steam_id",
+        )
+        if counterparty_steam_id == _request_attribute(
+            request,
+            "recipient_steam_id",
+        ):
+            raise PlatformAdapterProtocolError(
+                "recipient and counterparty Steam IDs must differ"
+            )
+        if type(host_goods_id) is not int or host_goods_id <= 0:
+            raise PlatformAdapterProtocolError(
+                "host_goods_id must be a positive integer"
+            )
+        return
+    if capability is PlatformCapability.ACCEPT_OFFER:
+        _require_id(steam_tradeoffer_id, "steam_tradeoffer_id")
+        _require_canonical_positive_decimal(
+            _request_attribute(request, "recipient_steam_id"),
+            "recipient_steam_id",
+        )
+        _require_canonical_positive_decimal(
+            counterparty_steam_id,
+            "counterparty_steam_id",
+        )
+        if counterparty_steam_id == _request_attribute(
+            request,
+            "recipient_steam_id",
+        ):
+            raise PlatformAdapterProtocolError(
+                "recipient and counterparty Steam IDs must differ"
+            )
+        if host_goods_id is not None:
+            raise PlatformAdapterProtocolError(
+                "host_goods_id is not valid for ACCEPT_OFFER"
+            )
+        return
+    if counterparty_steam_id is not None or host_goods_id is not None:
+        raise PlatformAdapterProtocolError(
+            "seller item fields are only valid for READ_SELLER_OFFER_ITEM"
+        )
     if capability in {
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
@@ -543,6 +730,8 @@ class PlatformRequest:
     capability: PlatformCapability
     timeout_seconds: float
     steam_tradeoffer_id: str | None = None
+    counterparty_steam_id: str | None = None
+    host_goods_id: int | None = None
 
     def __post_init__(self) -> None:
         _validate_platform_request(self)
@@ -559,7 +748,9 @@ class PlatformResult:
 
     def __post_init__(self) -> None:
         if type(self.request) is not PlatformRequest:
-            raise PlatformAdapterProtocolError("result request must be a PlatformRequest")
+            raise PlatformAdapterProtocolError(
+                "result request must be a PlatformRequest"
+            )
         try:
             PlatformRequest.__post_init__(self.request)
         except PlatformAdapterProtocolError:
@@ -569,26 +760,39 @@ class PlatformResult:
                 "result request failed defensive validation"
             ) from error
         if type(self.status) is not PlatformResultStatus:
-            raise PlatformAdapterProtocolError("result status must be a PlatformResultStatus")
+            raise PlatformAdapterProtocolError(
+                "result status must be a PlatformResultStatus"
+            )
         if self.detail is not None and (
-            type(self.detail) is not str or not self.detail or self.detail.strip() != self.detail
+            type(self.detail) is not str
+            or not self.detail
+            or self.detail.strip() != self.detail
         ):
-            raise PlatformAdapterProtocolError("result detail must be a non-whitespace string")
+            raise PlatformAdapterProtocolError(
+                "result detail must be a non-whitespace string"
+            )
         if self.status is not PlatformResultStatus.SUCCESS:
             if self.evidence is not None:
-                raise PlatformAdapterProtocolError("non-success results cannot contain evidence")
+                raise PlatformAdapterProtocolError(
+                    "non-success results cannot contain evidence"
+                )
             return
         expected_evidence = {
             PlatformCapability.READ_DELIVERY_DIRECTION: DeliveryDirectionEvidence,
             PlatformCapability.READ_OFFER_STATE: OfferStateEvidence,
+            PlatformCapability.READ_SELLER_OFFER_ITEM: SellerOrderItemEvidence,
+            PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: BuffOrderLifecycleEvidence,
             PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,
             PlatformCapability.READ_STEAM_TRADE_OFFER: SteamTradeOfferEvidence,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: SteamCompletedTradeEvidence,
             PlatformCapability.SEND_OFFER: SendOfferEvidence,
+            PlatformCapability.ACCEPT_OFFER: AcceptOfferEvidence,
             PlatformCapability.CONFIRM_OFFER: ConfirmOfferEvidence,
         }.get(self.request.capability)
         if expected_evidence is None:
-            raise PlatformAdapterProtocolError("success is not allowed for this capability")
+            raise PlatformAdapterProtocolError(
+                "success is not allowed for this capability"
+            )
         if type(self.evidence) is not expected_evidence:
             raise PlatformAdapterProtocolError(
                 "success results require matching capability evidence"
@@ -604,13 +808,34 @@ class PlatformResult:
         if self.request.capability in {
             PlatformCapability.READ_STEAM_TRADE_OFFER,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            PlatformCapability.ACCEPT_OFFER,
             PlatformCapability.CONFIRM_OFFER,
         }:
             if (
-                self.evidence.steam_tradeoffer_id != self.request.steam_tradeoffer_id
+                self.evidence.steam_tradeoffer_id
+                != self.request.steam_tradeoffer_id
                 or self.evidence.account_steam_id
                 != self.request.recipient_steam_id
             ):
+                raise PlatformAdapterProtocolError(
+                    "success evidence identity does not match request"
+                )
+        elif self.request.capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
+            if (
+                self.evidence.buff_order_id != self.request.buff_order_id
+                or self.evidence.steam_tradeoffer_id
+                != self.request.steam_tradeoffer_id
+                or self.evidence.recipient_steam_id
+                != self.request.recipient_steam_id
+                or self.evidence.counterparty_steam_id
+                != self.request.counterparty_steam_id
+                or self.evidence.goods_id != self.request.host_goods_id
+            ):
+                raise PlatformAdapterProtocolError(
+                    "success evidence identity does not match request"
+                )
+        elif self.request.capability is PlatformCapability.READ_BUFF_ORDER_LIFECYCLE:
+            if self.evidence.buff_order_id != self.request.buff_order_id:
                 raise PlatformAdapterProtocolError(
                     "success evidence identity does not match request"
                 )
@@ -623,7 +848,7 @@ class PlatformResult:
 
 @runtime_checkable
 class PlatformAdapter(Protocol):
-    """Minimal pure boundary that future real adapters may implement."""
+    """Minimal pure boundary that real adapters may implement."""
 
     @property
     def capabilities(self) -> frozenset[PlatformCapability]:
@@ -643,12 +868,7 @@ DEFAULT_PLATFORM_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
 
 
 class FakePlatformAdapter:
-    """Deterministic local adapter used only to exercise the abstract boundary.
-
-    Outcomes are keyed by the complete immutable request.  They may contain
-    status values, normalized results, or exception/value sentinels so tests
-    can prove that every unrecognized outcome remains fail closed.
-    """
+    """Deterministic local adapter used only to exercise the abstract boundary."""
 
     def __init__(
         self,
@@ -658,24 +878,28 @@ class FakePlatformAdapter:
     ) -> None:
         declared = frozenset(capabilities)
         if any(type(item) is not PlatformCapability for item in declared):
-            raise PlatformAdapterProtocolError("capabilities must contain PlatformCapability")
+            raise PlatformAdapterProtocolError(
+                "capabilities must contain PlatformCapability"
+            )
         if outcomes is not None and not isinstance(outcomes, Mapping):
             raise PlatformAdapterProtocolError("outcomes must be a mapping")
         configured = {} if outcomes is None else dict(outcomes)
         if any(type(request) is not PlatformRequest for request in configured):
-            raise PlatformAdapterProtocolError("outcomes must use PlatformRequest keys")
+            raise PlatformAdapterProtocolError(
+                "outcomes must use PlatformRequest keys"
+            )
         self._capabilities = declared
         self._outcomes = MappingProxyType(configured)
 
     @property
     def capabilities(self) -> frozenset[PlatformCapability]:
-        """Return the fixed local capability declaration."""
         return self._capabilities
 
     def execute(self, request: PlatformRequest) -> PlatformResult:
-        """Return a deterministic local outcome without any platform action."""
         if type(request) is not PlatformRequest:
-            raise PlatformAdapterProtocolError("request must be a PlatformRequest")
+            raise PlatformAdapterProtocolError(
+                "request must be a PlatformRequest"
+            )
         PlatformRequest.__post_init__(request)
         if request.capability not in self._capabilities:
             return PlatformResult(
@@ -684,7 +908,10 @@ class FakePlatformAdapter:
                 detail="capability_not_declared",
             )
 
-        configured = self._outcomes.get(request, PlatformResultStatus.RESULT_UNKNOWN)
+        configured = self._outcomes.get(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+        )
         if type(configured) is PlatformResult:
             try:
                 configured_request = configured.request
@@ -715,8 +942,7 @@ class FakePlatformAdapter:
             except PlatformAdapterProtocolError:
                 detail = (
                     "success_evidence_required"
-                    if configured_status
-                    is PlatformResultStatus.SUCCESS
+                    if configured_status is PlatformResultStatus.SUCCESS
                     and configured_evidence is None
                     else "evidence_type_mismatch"
                 )
@@ -765,6 +991,9 @@ class FakePlatformAdapter:
 
 
 __all__ = [
+    "AcceptOfferEvidence",
+    "BuffOrderLifecycle",
+    "BuffOrderLifecycleEvidence",
     "DEFAULT_PLATFORM_CAPABILITIES",
     "CompletedTradeItemEvidence",
     "ConfirmOfferEvidence",
@@ -784,6 +1013,7 @@ __all__ = [
     "PlatformResultStatus",
     "RecipientInventoryItemEvidence",
     "SendOfferEvidence",
+    "SellerOrderItemEvidence",
     "SteamCompletedTradeEvidence",
     "SteamTradeOfferEvidence",
     "SteamTradeOfferLifecycle",

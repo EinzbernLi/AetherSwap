@@ -69,7 +69,7 @@ def test_auto_offer_result_values_are_exact_and_have_no_extras():
     [
         (AutoOfferResult.DISABLED, False),
         (AutoOfferResult.COMPLETE, False),
-        (AutoOfferResult.WAITING, True),
+        (AutoOfferResult.WAITING, False),
         (AutoOfferResult.RESULT_UNKNOWN, True),
         (AutoOfferResult.BLOCKED, True),
     ],
@@ -101,7 +101,10 @@ def test_delivery_status_values_are_exact():
         "offer_confirmation_attempted",
         "offer_received",
         "offer_confirmed",
+        "offer_accept_attempted",
         "awaiting_inventory",
+        "offer_terminated",
+        "refund_cleanup_pending",
         "received",
         "result_unknown",
         "blocked",
@@ -354,6 +357,7 @@ def test_delivery_error_allowlist_is_exact():
         "contract_unknown",
         "write_result_unknown",
         "offer_not_found",
+        "offer_terminated",
         "inventory_reconciliation_failed",
         "module_disabled",
         "module_contract_mismatch",
@@ -459,7 +463,6 @@ def test_exception_targets_reject_non_enum_delivery_mode(
         DeliveryStatus.RESULT_UNKNOWN,
         DeliveryStatus.BLOCKED,
         DeliveryStatus.CANCELLED,
-        DeliveryStatus.REFUNDED,
     ],
 )
 def test_exception_targets_accept_valid_delivery_mode(target: DeliveryStatus):
@@ -687,8 +690,278 @@ def test_legitimate_seller_and_buyer_first_tradeoffer_bindings_are_allowed():
         delivery_status=DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id="trade-1",
         offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
     )
     validate_delivery_transition(buyer_current, buyer_target)
+
+
+def test_buyer_first_offer_binding_requires_offer_and_counterparty_together():
+    buyer_current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+        offer_attempted_at=1.0,
+    )
+    buyer_target = replace(
+        buyer_current,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="trade-1",
+        offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
+    )
+    validate_delivery_transition(buyer_current, buyer_target)
+
+    with pytest.raises(DeliveryContractError, match="requires counterparty"):
+        validate_delivery_transition(
+            buyer_current,
+            replace(buyer_target, counterparty_steam_id=None),
+        )
+
+    unknown_current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    with pytest.raises(DeliveryContractError, match="requires counterparty"):
+        validate_delivery_transition(
+            unknown_current,
+            replace(
+                buyer_target,
+                offer_attempted_at=1.0,
+                offer_sent_at=2.0,
+                counterparty_steam_id=None,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("target_status", "changes"),
+    [
+        (DeliveryStatus.OFFER_CONFIRMATION_REQUIRED, {}),
+        (DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED, {}),
+        (DeliveryStatus.OFFER_CONFIRMED, {}),
+        (DeliveryStatus.AWAITING_INVENTORY, {}),
+        (
+            DeliveryStatus.OFFER_TERMINATED,
+            {"delivery_error": "offer_terminated"},
+        ),
+        (
+            DeliveryStatus.RECEIVED,
+            {
+                "pending_receipt": False,
+                "assetid": "asset-1",
+                "received_at": 3.0,
+            },
+        ),
+    ],
+)
+def test_unbound_buyer_result_unknown_cannot_first_bind_offer_to_later_state(
+    target_status: DeliveryStatus,
+    changes: dict[str, object],
+):
+    current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    target_values: dict[str, object] = {
+        "delivery_status": target_status,
+        "steam_tradeoffer_id": "trade-1",
+        "offer_attempted_at": 1.0,
+        "offer_sent_at": 2.0,
+        "delivery_error": None,
+    }
+    target_values.update(changes)
+    target = replace(current, **target_values)
+
+    with pytest.raises(
+        DeliveryContractError,
+        match="steam trade offer ID cannot be bound on this transition",
+    ):
+        validate_delivery_transition(current, target)
+
+
+def test_bound_buyer_confirmation_result_unknown_recovers_without_counterparty_adoption():
+    current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        steam_tradeoffer_id="trade-1",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+        delivery_error="write_result_unknown",
+    )
+    target = replace(
+        current,
+        delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+        delivery_error=None,
+    )
+
+    validate_delivery_transition(current, target)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [DeliveryMode.BUYER_SENDS_OFFER, DeliveryMode.SELLER_SENDS_OFFER],
+)
+def test_result_unknown_status_allows_terminal_recovery_with_exact_mode(mode):
+    validate_delivery_transition(
+        DeliveryStatus.RESULT_UNKNOWN,
+        DeliveryStatus.OFFER_TERMINATED,
+        mode,
+    )
+
+
+def test_result_unknown_status_terminal_recovery_requires_exact_mode():
+    with pytest.raises(
+        DeliveryContractError,
+        match="result_unknown recovery requires a delivery mode",
+    ):
+        validate_delivery_transition(
+            DeliveryStatus.RESULT_UNKNOWN,
+            DeliveryStatus.OFFER_TERMINATED,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "timing"),
+    [
+        (
+            DeliveryMode.BUYER_SENDS_OFFER,
+            {"offer_attempted_at": 1.0, "offer_sent_at": 2.0},
+        ),
+        (DeliveryMode.SELLER_SENDS_OFFER, {}),
+    ],
+)
+def test_bound_result_unknown_terminal_recovery_preserves_exact_shape(mode, timing):
+    current = snapshot(
+        delivery_mode=mode,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        steam_tradeoffer_id="trade-1",
+        counterparty_steam_id="76561198000000002",
+        delivery_error="write_result_unknown",
+        **timing,
+    )
+    target = replace(
+        current,
+        delivery_status=DeliveryStatus.OFFER_TERMINATED,
+        delivery_error="offer_terminated",
+    )
+
+    validate_delivery_transition(current, target)
+
+
+@pytest.mark.parametrize(
+    "target_status",
+    [
+        DeliveryStatus.OFFER_ATTEMPTED,
+        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+    ],
+)
+def test_result_unknown_terminal_amendment_does_not_allow_write_attempts(
+    target_status,
+):
+    with pytest.raises(DeliveryContractError, match="cannot transition to a write attempt"):
+        validate_delivery_transition(
+            DeliveryStatus.RESULT_UNKNOWN,
+            target_status,
+            DeliveryMode.BUYER_SENDS_OFFER,
+        )
+
+
+@pytest.mark.parametrize(
+    "current_status",
+    [
+        DeliveryStatus.PENDING_DIRECTION,
+        DeliveryStatus.AWAITING_OFFER,
+        DeliveryStatus.OFFER_ATTEMPTED,
+    ],
+)
+def test_prebinding_statuses_remain_unable_to_terminate_offer(current_status):
+    with pytest.raises(
+        DeliveryContractError,
+        match="offer termination requires a bound offer state",
+    ):
+        validate_delivery_transition(
+            current_status,
+            DeliveryStatus.OFFER_TERMINATED,
+            DeliveryMode.BUYER_SENDS_OFFER,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "detail"),
+    [
+        ("steam_tradeoffer_id", "trade-2", "trade offer ID cannot change"),
+        (
+            "counterparty_steam_id",
+            "76561198000000003",
+            "counterparty Steam ID cannot change",
+        ),
+    ],
+)
+def test_bound_result_unknown_terminal_recovery_cannot_change_identity(
+    field,
+    value,
+    detail,
+):
+    current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        steam_tradeoffer_id="trade-1",
+        counterparty_steam_id="76561198000000002",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+        delivery_error="write_result_unknown",
+    )
+    target = replace(
+        current,
+        delivery_status=DeliveryStatus.OFFER_TERMINATED,
+        delivery_error="offer_terminated",
+        **{field: value},
+    )
+
+    with pytest.raises(DeliveryContractError, match=detail):
+        validate_delivery_transition(current, target)
+
+
+def test_bound_result_unknown_terminal_recovery_cannot_adopt_counterparty():
+    current = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.RESULT_UNKNOWN,
+        steam_tradeoffer_id="trade-1",
+        counterparty_steam_id=None,
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+        delivery_error="write_result_unknown",
+    )
+    target = replace(
+        current,
+        delivery_status=DeliveryStatus.OFFER_TERMINATED,
+        counterparty_steam_id="76561198000000002",
+        delivery_error="offer_terminated",
+    )
+
+    with pytest.raises(DeliveryContractError, match="cannot be adopted"):
+        validate_delivery_transition(current, target)
+
+
+def test_historical_unbound_counterparty_cannot_adopt_late():
+    buyer_sent = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="trade-1",
+        offer_attempted_at=1.0,
+        offer_sent_at=2.0,
+    )
+    with pytest.raises(DeliveryContractError, match="cannot be adopted"):
+        validate_delivery_transition(
+            buyer_sent,
+            replace(
+                buyer_sent,
+                delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+                counterparty_steam_id="76561198000000002",
+            ),
+        )
 
 
 def test_bound_tradeoffer_id_is_immutable_across_normal_paths():
@@ -757,7 +1030,6 @@ def test_bound_tradeoffer_id_is_immutable_across_normal_paths():
     [
         DeliveryStatus.BLOCKED,
         DeliveryStatus.CANCELLED,
-        DeliveryStatus.REFUNDED,
     ],
 )
 def test_bound_tradeoffer_id_is_preserved_on_exception_targets(
@@ -807,6 +1079,7 @@ def test_result_unknown_recovery_can_bind_first_tradeoffer_id_for_both_modes():
         steam_tradeoffer_id="trade-buyer",
         offer_attempted_at=1.0,
         offer_sent_at=2.0,
+        counterparty_steam_id="76561198000000002",
         delivery_error=None,
     )
     validate_delivery_transition(buyer_unknown, buyer_sent)

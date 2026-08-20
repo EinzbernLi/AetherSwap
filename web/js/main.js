@@ -107,6 +107,7 @@ function pushLyricLine(text, subText) {
 async function refreshStatus() {
   try {
     const d = await fetchJson(API + "/status");
+    renderAutoOfferRuntime(d);
     if (d.buff_verification_required && _hasAnyAccount) {
       showReloginModal("buff", { reason: "verification_required", error: d.buff_verification_reason });
     } else if (d.buff_auth_expired && _hasAnyAccount) {
@@ -208,6 +209,42 @@ async function refreshStatus() {
     } else set("stat-ratio", "—");
   } catch {
   }
+}
+
+function renderAutoOfferRuntime(status) {
+  const intentEl = el("auto-offer-runtime-intent");
+  const modeEl = el("auto-offer-runtime-mode");
+  const countEl = el("auto-offer-runtime-count");
+  const reasonEl = el("auto-offer-runtime-reason");
+  if (!intentEl || !modeEl || !countEl || !reasonEl) return;
+
+  const runtime = status && typeof status.auto_offer_runtime === "object"
+    ? status.auto_offer_runtime
+    : null;
+  const modeLabels = {
+    off: "关闭",
+    enabling: "开启中",
+    on: "开启",
+    draining: "排空中",
+    blocked: "阻止",
+  };
+  const valid = runtime
+    && typeof runtime.requested_enabled === "boolean"
+    && Object.prototype.hasOwnProperty.call(modeLabels, runtime.mode)
+    && Number.isInteger(runtime.active_delivery_count)
+    && runtime.active_delivery_count >= 0
+    && (runtime.reason === null || typeof runtime.reason === "string");
+  if (!valid) {
+    intentEl.textContent = "意图：未知";
+    modeEl.textContent = "运行态：不可用";
+    countEl.textContent = "进行中：—";
+    reasonEl.textContent = "无法取得后端运行态证据";
+    return;
+  }
+  intentEl.textContent = `意图：${runtime.requested_enabled ? "开启" : "关闭"}`;
+  modeEl.textContent = `运行态：${modeLabels[runtime.mode]}`;
+  countEl.textContent = `进行中：${runtime.active_delivery_count}`;
+  reasonEl.textContent = runtime.reason ? `原因：${runtime.reason}` : "";
 }
 let reloginType = "steam";
 let inventoryRefreshInFlight = false;

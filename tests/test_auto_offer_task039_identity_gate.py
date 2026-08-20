@@ -329,22 +329,24 @@ def test_active_or_accepted_exact_read_recovers_without_confirmation_write():
         assert coordinator._confirmation_identity_proof is None
 
 
-def test_normal_non_canary_confirmation_behavior_remains_backward_compatible():
+def test_normal_non_canary_snapshot_alone_cannot_authorize_confirmation():
     current = _delivery(DeliveryStatus.OFFER_CONFIRMATION_REQUIRED)
-    coordinator, store, _read, confirm = _coordinator(
+    coordinator, store, read, confirm = _coordinator(
         current,
         _evidence(),
         expected=False,
     )
 
-    result = coordinator.step(current)
+    with pytest.raises(
+        ReadOnlyCoordinatorBlockedError,
+        match="normal_confirmation_authority_required",
+    ):
+        coordinator.step(current)
 
-    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
-    assert len(confirm.calls) == 1
-    assert [call[1].delivery_status for call in store.advance_calls] == [
-        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
-        DeliveryStatus.OFFER_CONFIRMED,
-    ]
+    assert store.current == current
+    assert store.advance_calls == []
+    assert read.calls == []
+    assert confirm.calls == []
 
 
 def _permit(

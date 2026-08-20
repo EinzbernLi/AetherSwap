@@ -1,7 +1,7 @@
 """Pure, fail-closed contracts for the native Auto Offer module.
 
-No database, network, BUFF, or Steam code belongs in this module.  It defines
-the values and invariants that a future native runtime may use.
+No database, network, BUFF, or Steam code belongs in this module. It defines
+the values and invariants used by the native delivery runtime.
 """
 
 from __future__ import annotations
@@ -38,7 +38,10 @@ class DeliveryStatus(str, Enum):
     OFFER_CONFIRMATION_ATTEMPTED = "offer_confirmation_attempted"
     OFFER_RECEIVED = "offer_received"
     OFFER_CONFIRMED = "offer_confirmed"
+    OFFER_ACCEPT_ATTEMPTED = "offer_accept_attempted"
     AWAITING_INVENTORY = "awaiting_inventory"
+    OFFER_TERMINATED = "offer_terminated"
+    REFUND_CLEANUP_PENDING = "refund_cleanup_pending"
     RECEIVED = "received"
     RESULT_UNKNOWN = "result_unknown"
     BLOCKED = "blocked"
@@ -52,6 +55,7 @@ DELIVERY_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "contract_unknown",
         "write_result_unknown",
         "offer_not_found",
+        "offer_terminated",
         "inventory_reconciliation_failed",
         "module_disabled",
         "module_contract_mismatch",
@@ -76,7 +80,10 @@ NORMAL_DIRECTION_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
         DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
+        DeliveryStatus.OFFER_TERMINATED,
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
         DeliveryStatus.RECEIVED,
     }
 )
@@ -96,7 +103,10 @@ _TRADEOFFER_REQUIRED_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         DeliveryStatus.OFFER_RECEIVED,
         DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
         DeliveryStatus.AWAITING_INVENTORY,
+        DeliveryStatus.OFFER_TERMINATED,
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
         DeliveryStatus.RECEIVED,
     }
 )
@@ -105,6 +115,7 @@ _WRITE_ATTEMPT_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
     {
         DeliveryStatus.OFFER_ATTEMPTED,
         DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
     }
 )
 
@@ -126,6 +137,7 @@ class DeliverySnapshot:
     delivery_error: str | None
     pending_receipt: bool
     assetid: str | None
+    counterparty_steam_id: str | None = None
 
 
 def _require_enum(value: object, enum_type: type[Enum], field: str) -> None:
@@ -159,6 +171,15 @@ def _validate_snapshot_shape(snapshot: DeliverySnapshot) -> None:
         _require_id(getattr(snapshot, field), field)
     _require_id(snapshot.steam_tradeoffer_id, "steam_tradeoffer_id", optional=True)
     _require_id(snapshot.assetid, "assetid", optional=True)
+    _require_id(
+        snapshot.counterparty_steam_id,
+        "counterparty_steam_id",
+        optional=True,
+    )
+    if snapshot.counterparty_steam_id == snapshot.recipient_steam_id:
+        raise DeliveryContractError(
+            "counterparty_steam_id must differ from recipient_steam_id"
+        )
 
     if type(snapshot.pending_receipt) is not bool:
         raise DeliveryContractError("pending_receipt must be a bool")
@@ -171,17 +192,37 @@ def _validate_snapshot_shape(snapshot: DeliverySnapshot) -> None:
     _require_enum(snapshot.delivery_status, DeliveryStatus, "delivery_status")
 
     if snapshot.delivery_error is not None:
-        if type(snapshot.delivery_error) is not str or snapshot.delivery_error not in DELIVERY_ERROR_CODES:
+        if (
+            type(snapshot.delivery_error) is not str
+            or snapshot.delivery_error not in DELIVERY_ERROR_CODES
+        ):
             raise DeliveryContractError("delivery_error is not an allowed code")
 
 
-def _validate_buyer_bound_offer_state(snapshot: DeliverySnapshot, status_name: str) -> None:
+def _validate_buyer_bound_offer_state(
+    snapshot: DeliverySnapshot,
+    status_name: str,
+) -> None:
     if snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER:
         raise DeliveryContractError(f"{status_name} requires buyer mode")
     if snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None:
         raise DeliveryContractError(f"{status_name} requires buyer timing")
     if snapshot.steam_tradeoffer_id is None:
         raise DeliveryContractError(f"{status_name} requires a trade offer ID")
+    if snapshot.received_at is not None:
+        raise DeliveryContractError(f"{status_name} cannot have received_at")
+
+
+def _validate_seller_bound_offer_state(
+    snapshot: DeliverySnapshot,
+    status_name: str,
+) -> None:
+    if snapshot.delivery_mode is not DeliveryMode.SELLER_SENDS_OFFER:
+        raise DeliveryContractError(f"{status_name} requires seller mode")
+    if snapshot.steam_tradeoffer_id is None:
+        raise DeliveryContractError(f"{status_name} requires a trade offer ID")
+    if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
+        raise DeliveryContractError(f"{status_name} cannot have buyer timing")
     if snapshot.received_at is not None:
         raise DeliveryContractError(f"{status_name} cannot have received_at")
 
@@ -219,15 +260,13 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
         _validate_buyer_bound_offer_state(snapshot, status.value)
         if snapshot.delivery_error is not None:
             raise DeliveryContractError(f"{status.value} cannot have delivery_error")
-    elif status is DeliveryStatus.OFFER_RECEIVED:
-        if mode is not DeliveryMode.SELLER_SENDS_OFFER:
-            raise DeliveryContractError("offer_received requires seller mode")
-        if snapshot.steam_tradeoffer_id is None:
-            raise DeliveryContractError("offer_received requires a trade offer ID")
-        if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
-            raise DeliveryContractError("seller offer_received cannot have buyer timing")
-        if snapshot.received_at is not None:
-            raise DeliveryContractError("offer_received cannot have received_at")
+    elif status in {
+        DeliveryStatus.OFFER_RECEIVED,
+        DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+    }:
+        _validate_seller_bound_offer_state(snapshot, status.value)
+        if snapshot.delivery_error is not None:
+            raise DeliveryContractError(f"{status.value} cannot have delivery_error")
 
     if status is DeliveryStatus.OFFER_CONFIRMED:
         if snapshot.steam_tradeoffer_id is None:
@@ -253,6 +292,33 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
         if snapshot.received_at is not None:
             raise DeliveryContractError("awaiting_inventory cannot have received_at")
 
+    if status in {
+        DeliveryStatus.OFFER_TERMINATED,
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
+    }:
+        if snapshot.steam_tradeoffer_id is None:
+            raise DeliveryContractError(
+                f"{status.value} requires a trade offer ID"
+            )
+        if snapshot.received_at is not None or snapshot.assetid is not None:
+            raise DeliveryContractError(
+                f"{status.value} cannot have receipt evidence"
+            )
+        if snapshot.delivery_error != "offer_terminated":
+            raise DeliveryContractError(
+                f"{status.value} requires offer_terminated error"
+            )
+        if mode is DeliveryMode.BUYER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None:
+                raise DeliveryContractError(
+                    f"buyer {status.value} requires buyer timing"
+                )
+        elif mode is DeliveryMode.SELLER_SENDS_OFFER:
+            if snapshot.offer_attempted_at is not None or snapshot.offer_sent_at is not None:
+                raise DeliveryContractError(
+                    f"seller {status.value} cannot have buyer timing"
+                )
+
     if status is DeliveryStatus.RECEIVED:
         if snapshot.pending_receipt:
             raise DeliveryContractError("received cannot have a pending receipt")
@@ -273,15 +339,10 @@ def validate_delivery_snapshot(snapshot: DeliverySnapshot) -> None:
             raise DeliveryContractError("result_unknown requires write_result_unknown")
         if snapshot.received_at is not None:
             raise DeliveryContractError("result_unknown cannot have received_at")
-        # Keep historical RESULT_UNKNOWN rows readable.  New writes into this
-        # status are tightened at the snapshot transition boundary below.
         if (
             mode is DeliveryMode.BUYER_SENDS_OFFER
             and snapshot.steam_tradeoffer_id is not None
-            and (
-                snapshot.offer_attempted_at is None
-                or snapshot.offer_sent_at is None
-            )
+            and (snapshot.offer_attempted_at is None or snapshot.offer_sent_at is None)
         ):
             raise DeliveryContractError(
                 "buyer confirmation result_unknown requires bound offer timing"
@@ -323,9 +384,44 @@ _SELLER_PATH: Final[tuple[DeliveryStatus, ...]] = (
     DeliveryStatus.AWAITING_OFFER,
     DeliveryStatus.OFFER_RECEIVED,
     DeliveryStatus.OFFER_CONFIRMED,
+    DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
     DeliveryStatus.AWAITING_INVENTORY,
     DeliveryStatus.RECEIVED,
 )
+
+_CLEANUP_FROZEN_FIELDS: Final[tuple[str, ...]] = (
+    "purchase_id",
+    "buff_order_id",
+    "account_id",
+    "recipient_steam_id",
+    "delivery_mode",
+    "steam_tradeoffer_id",
+    "offer_attempted_at",
+    "offer_sent_at",
+    "received_at",
+    "delivery_error",
+    "pending_receipt",
+    "assetid",
+    "counterparty_steam_id",
+)
+
+
+def _validate_cleanup_frozen_fields(
+    current: DeliverySnapshot,
+    target: DeliverySnapshot,
+) -> None:
+    if target.delivery_status not in {
+        DeliveryStatus.REFUND_CLEANUP_PENDING,
+        DeliveryStatus.REFUNDED,
+    }:
+        return
+    if any(
+        getattr(current, field) != getattr(target, field)
+        for field in _CLEANUP_FROZEN_FIELDS
+    ):
+        raise DeliveryContractError(
+            "refund cleanup transitions may change delivery_status only"
+        )
 
 
 def _allows_first_tradeoffer_binding(
@@ -347,8 +443,9 @@ def _allows_first_tradeoffer_binding(
         return True
     if current is not DeliveryStatus.RESULT_UNKNOWN or mode is None:
         return False
-    path = _BUYER_PATH if mode is DeliveryMode.BUYER_SENDS_OFFER else _SELLER_PATH
-    return target in _TRADEOFFER_REQUIRED_STATUSES and target in path
+    if mode is DeliveryMode.BUYER_SENDS_OFFER:
+        return target is DeliveryStatus.OFFER_SENT
+    return target in _TRADEOFFER_REQUIRED_STATUSES and target in _SELLER_PATH
 
 
 def _validate_tradeoffer_binding(
@@ -370,6 +467,44 @@ def _validate_tradeoffer_binding(
         raise DeliveryContractError("steam trade offer ID cannot be bound on this transition")
 
 
+def _validate_counterparty_binding(
+    current: DeliverySnapshot,
+    target: DeliverySnapshot,
+    mode: DeliveryMode | None,
+) -> None:
+    current_id = current.counterparty_steam_id
+    target_id = target.counterparty_steam_id
+    if current_id is not None:
+        if target_id != current_id:
+            raise DeliveryContractError("bound counterparty Steam ID cannot change")
+        return
+    first_buyer_offer_binding = (
+        current.delivery_status
+        in {DeliveryStatus.OFFER_ATTEMPTED, DeliveryStatus.RESULT_UNKNOWN}
+        and target.delivery_status is DeliveryStatus.OFFER_SENT
+        and mode is DeliveryMode.BUYER_SENDS_OFFER
+        and current.steam_tradeoffer_id is None
+        and target.steam_tradeoffer_id is not None
+    )
+    if first_buyer_offer_binding:
+        if target_id is None:
+            raise DeliveryContractError(
+                "buyer offer binding requires counterparty Steam ID"
+            )
+        return
+    if target_id is None:
+        return
+    if (
+        current.delivery_status is DeliveryStatus.PENDING_DIRECTION
+        and target.delivery_status is DeliveryStatus.AWAITING_OFFER
+        and mode is DeliveryMode.SELLER_SENDS_OFFER
+    ):
+        return
+    raise DeliveryContractError(
+        "counterparty Steam ID cannot be adopted after direction binding"
+    )
+
+
 def _transition_statuses(
     current: DeliveryStatus,
     target: DeliveryStatus,
@@ -381,21 +516,39 @@ def _transition_statuses(
         raise DeliveryContractError("terminal delivery status cannot transition")
     if current is target:
         raise DeliveryContractError("delivery transition must change status")
-
-    # Status-only callers retain the historical exception-target contract.
-    # Snapshot transitions tighten write-unknown authority below.
     if target is DeliveryStatus.RESULT_UNKNOWN:
+        return
+    if target is DeliveryStatus.REFUND_CLEANUP_PENDING:
+        if current is not DeliveryStatus.OFFER_TERMINATED:
+            raise DeliveryContractError(
+                "refund cleanup pending requires offer termination"
+            )
+        return
+    if target is DeliveryStatus.REFUNDED:
+        if current is not DeliveryStatus.REFUND_CLEANUP_PENDING:
+            raise DeliveryContractError(
+                "refunded requires refund cleanup pending"
+            )
         return
     if target in {
         DeliveryStatus.BLOCKED,
         DeliveryStatus.CANCELLED,
-        DeliveryStatus.REFUNDED,
     }:
         return
-    if current is DeliveryStatus.RESULT_UNKNOWN and target in {
-        DeliveryStatus.OFFER_ATTEMPTED,
-        DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
-    }:
+    if (
+        current is DeliveryStatus.RESULT_UNKNOWN
+        and target is DeliveryStatus.OFFER_TERMINATED
+    ):
+        if mode is None:
+            raise DeliveryContractError(
+                "result_unknown recovery requires a delivery mode"
+            )
+        return
+    if target is DeliveryStatus.OFFER_TERMINATED:
+        if current not in _TRADEOFFER_REQUIRED_STATUSES:
+            raise DeliveryContractError("offer termination requires a bound offer state")
+        return
+    if current is DeliveryStatus.RESULT_UNKNOWN and target in _WRITE_ATTEMPT_STATUSES:
         raise DeliveryContractError("result_unknown cannot transition to a write attempt")
 
     if current is DeliveryStatus.RESULT_UNKNOWN:
@@ -407,6 +560,8 @@ def _transition_statuses(
             DeliveryStatus.PENDING_DIRECTION,
             DeliveryStatus.AWAITING_OFFER,
             DeliveryStatus.OFFER_ATTEMPTED,
+            DeliveryStatus.OFFER_ACCEPT_ATTEMPTED,
+            DeliveryStatus.OFFER_CONFIRMATION_ATTEMPTED,
         }:
             raise DeliveryContractError("result_unknown recovery requires later evidence")
         return
@@ -423,6 +578,13 @@ def _transition_statuses(
             current is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
             and target is DeliveryStatus.OFFER_CONFIRMED
         )
+    ):
+        return
+
+    if (
+        mode is DeliveryMode.SELLER_SENDS_OFFER
+        and current is DeliveryStatus.OFFER_CONFIRMED
+        and target is DeliveryStatus.AWAITING_INVENTORY
     ):
         return
 
@@ -448,17 +610,27 @@ def _validate_snapshot_unknown_transition(
         return
     if current.delivery_status is not DeliveryStatus.RESULT_UNKNOWN:
         return
-    if (
-        current.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
-        and current.steam_tradeoffer_id is not None
-    ):
-        if target.delivery_status is not DeliveryStatus.OFFER_CONFIRMED:
+    if current.steam_tradeoffer_id is None:
+        return
+    if current.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER:
+        if target.delivery_status not in {
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryStatus.OFFER_TERMINATED,
+        }:
             raise DeliveryContractError(
                 "confirmation result_unknown recovery requires exact offer evidence"
             )
         return
-    # Historical unbound RESULT_UNKNOWN rows retain the original mode-specific
-    # later-evidence recovery contract; they can no longer be newly created.
+    if current.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER:
+        if target.delivery_status not in {
+            DeliveryStatus.AWAITING_INVENTORY,
+            DeliveryStatus.OFFER_TERMINATED,
+        }:
+            raise DeliveryContractError(
+                "accept result_unknown recovery requires exact offer evidence"
+            )
+        return
+    raise DeliveryContractError("bound result_unknown recovery requires a delivery mode")
 
 
 def validate_delivery_transition(
@@ -466,16 +638,13 @@ def validate_delivery_transition(
     target: DeliveryStatus | DeliverySnapshot,
     delivery_mode: DeliveryMode | None = None,
 ) -> None:
-    """Validate one forward transition without any resend/override escape hatch.
-
-    Status values may be supplied directly with a mode, or as snapshots.  The
-    snapshot form validates both states before applying the transition rules.
-    """
+    """Validate one forward transition without resend/override escape hatches."""
     if isinstance(current, DeliverySnapshot) or isinstance(target, DeliverySnapshot):
         if type(current) is not DeliverySnapshot or type(target) is not DeliverySnapshot:
             raise DeliveryContractError("transition endpoints must use the same form")
         validate_delivery_snapshot(current)
         validate_delivery_snapshot(target)
+        _validate_cleanup_frozen_fields(current, target)
         if (
             current.purchase_id,
             current.buff_order_id,
@@ -494,6 +663,7 @@ def validate_delivery_transition(
             raise DeliveryContractError("snapshot transitions must derive delivery mode")
         delivery_mode = target.delivery_mode or current.delivery_mode
         _validate_tradeoffer_binding(current, target, delivery_mode)
+        _validate_counterparty_binding(current, target, delivery_mode)
         _validate_snapshot_unknown_transition(current, target)
         current = current.delivery_status
         target = target.delivery_status
@@ -504,11 +674,15 @@ def validate_delivery_transition(
 
 
 def result_blocks_next_purchase(result: AutoOfferResult) -> bool:
-    """Return whether an Auto Offer result must stop the next purchase."""
+    """Return whether Auto Offer must globally stop a later purchase.
+
+    Ordinary WAITING is a per-delivery asynchronous outcome. Only an
+    irreversible-write ambiguity or explicit global invariant failure stops
+    later purchase admission. Canary serialization is enforced separately.
+    """
     if type(result) is not AutoOfferResult:
         raise DeliveryContractError("result must be an AutoOfferResult")
     return result in {
-        AutoOfferResult.WAITING,
         AutoOfferResult.RESULT_UNKNOWN,
         AutoOfferResult.BLOCKED,
     }

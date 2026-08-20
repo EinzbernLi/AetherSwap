@@ -835,6 +835,25 @@
           </div>
 
           <div class="settings-group">
+            <h2>Auto Offer 交付</h2>
+            <div class="form-grid">
+              <div class="field field--switch">
+                <label class="checkbox-wrapper" for="cfg-auto-offer-enabled">
+                  <input type="checkbox" id="cfg-auto-offer-enabled" />
+                  <span>启用 Auto Offer 交付</span>
+                </label>
+                <span class="field-hint">此开关仅保存用户意图；实际交付权限由后端运行态决定。</span>
+              </div>
+              <div class="field-hint" id="auto-offer-runtime-status" aria-live="polite">
+                <span id="auto-offer-runtime-intent">意图：未知</span>
+                <span id="auto-offer-runtime-mode">运行态：不可用</span>
+                <span id="auto-offer-runtime-count">进行中：—</span>
+                <span id="auto-offer-runtime-reason"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-group">
             <h2>启动时间限制</h2>
             <div class="form-grid">
               <div class="field field--switch">

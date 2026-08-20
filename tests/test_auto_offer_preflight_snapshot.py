@@ -28,7 +28,8 @@ CREATE TABLE auto_offer_delivery (
     delivery_error TEXT NULL,
     pending_receipt INTEGER NOT NULL,
     assetid TEXT NULL,
-    revision INTEGER NOT NULL
+    revision INTEGER NOT NULL,
+    counterparty_steam_id TEXT NULL
 )
 """
 
@@ -64,15 +65,15 @@ def _make_store(path, rows=()):
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as connection:
         connection.execute(_STORE_SQL)
-        connection.execute("PRAGMA user_version = 1")
+        connection.execute("PRAGMA user_version = 2")
         for row in rows:
             connection.execute(
                 "INSERT INTO auto_offer_delivery ("
                 "purchase_id, buff_order_id, account_id, recipient_steam_id, "
                 "delivery_mode, delivery_status, steam_tradeoffer_id, "
                 "offer_attempted_at, offer_sent_at, received_at, delivery_error, "
-                "pending_receipt, assetid, revision"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "pending_receipt, assetid, revision, counterparty_steam_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 row,
             )
         connection.commit()
@@ -83,6 +84,7 @@ def _initial_store_row(
     buff_order_id="order-1",
     account_id="account-1",
     recipient_steam_id="76561198000000001",
+    counterparty_steam_id=None,
 ):
     return (
         purchase_id,
@@ -99,6 +101,7 @@ def _initial_store_row(
         1,
         None,
         1,
+        counterparty_steam_id,
     )
 
 
@@ -278,6 +281,24 @@ def test_store_rows_are_detached_exact_and_ordered(tmp_path):
     assert result.store_rows[1].account_id == "account-2"
     assert result.store_rows[1].delivery_status is DeliveryStatus.PENDING_DIRECTION
     assert result.store_rows[1].pending_receipt is True
+    assert result.store_rows[1].counterparty_steam_id is None
+
+
+def test_store_v2_counterparty_binding_is_preserved_in_detached_evidence(tmp_path):
+    host = tmp_path / "app.db"
+    store = tmp_path / "auto_offer.db"
+    _make_host(host, [("order-1", 1, None)])
+    _make_store(
+        store,
+        [_initial_store_row(counterparty_steam_id="76561198000000002")],
+    )
+
+    result = collect_local_preflight_snapshot(
+        host_db_path=host,
+        auto_offer_store_path=store,
+    )
+
+    assert result.store_rows[0].counterparty_steam_id == "76561198000000002"
 
 
 def test_existing_store_with_wrong_schema_version_fails_without_repair(tmp_path):
@@ -286,7 +307,7 @@ def test_existing_store_with_wrong_schema_version_fails_without_repair(tmp_path)
     _make_host(host, [])
     _make_store(store, [])
     with sqlite3.connect(store) as connection:
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
         connection.commit()
     before = _fingerprint(store)
 

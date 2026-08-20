@@ -700,7 +700,14 @@ class SteamTradeOfferHttpReader(SteamCompletedTradeHttpReader):
         lifecycle = {
             2: "active",
             3: "accepted",
+            4: "countered",
+            5: "expired",
+            6: "canceled",
+            7: "declined",
+            8: "invalid_items",
             9: "created_needs_confirmation",
+            10: "canceled_by_second_factor",
+            11: "in_escrow",
         }.get(state)
         if lifecycle is None:
             return None
