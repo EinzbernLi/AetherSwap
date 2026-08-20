@@ -770,10 +770,7 @@ def get_pipeline_runtime_blocker(config: dict | None = None) -> dict:
         runtime_config = (
             load_app_config_validated() if config is None else config
         )
-        state = get_effective_runtime_state(
-            config=runtime_config,
-            purchases=_lifecycle_host_purchases(),
-        )
+        state = get_effective_runtime_state(config=runtime_config)
     except Exception:
         return {
             "code": "AUTO_OFFER_RUNTIME_BLOCKED",

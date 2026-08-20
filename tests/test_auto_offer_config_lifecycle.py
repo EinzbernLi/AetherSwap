@@ -23,6 +23,7 @@ def _activity_guard():
 
 
 def _install_start_environment(monkeypatch, *, persisted_enabled: bool):
+    from app.auto_offer.runtime_mode import AutoOfferRuntimeMode, AutoOfferRuntimeState
     from app.services import buff_auth
 
     monkeypatch.setattr(buff_auth, "get_buff_auth_lock", lambda: threading.RLock())
@@ -34,6 +35,19 @@ def _install_start_environment(monkeypatch, *, persisted_enabled: bool):
         pipeline,
         "load_app_config_validated",
         lambda: {"auto_offer": {"enabled": persisted_enabled}},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_effective_runtime_state",
+        lambda *, config: AutoOfferRuntimeState(
+            requested_enabled=persisted_enabled,
+            active_delivery_count=0,
+            mode=(
+                AutoOfferRuntimeMode.ON
+                if persisted_enabled
+                else AutoOfferRuntimeMode.OFF
+            ),
+        ),
     )
     monkeypatch.setattr(pipeline, "_pipeline_maintenance_reason", "")
     monkeypatch.setattr(pipeline, "_shutdown_pending", False)
@@ -247,20 +261,28 @@ def test_enable_runs_existing_store_maintenance_before_read_only_preflight(monke
         "maintain_existing_store_for_enable",
         lambda: calls.append("maintenance"),
     )
+    host_snapshot = [{"_db_id": 7, "buff_order_id": "ORDER-7"}]
     monkeypatch.setattr(
         pipeline,
-        "preflight_auto_offer_enable",
-        lambda **_kwargs: calls.append("preflight")
-        or AutoOfferRuntimeState(
+        "_lifecycle_host_purchases",
+        lambda: calls.append("host_snapshot") or host_snapshot,
+    )
+
+    def preflight(*, config, purchases):
+        calls.append(("preflight", config, purchases))
+        return AutoOfferRuntimeState(
             requested_enabled=True,
             active_delivery_count=0,
             mode=AutoOfferRuntimeMode.ON,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(pipeline, "preflight_auto_offer_enable", preflight)
 
     pipeline.update_auto_offer_enabled_config({"auto_offer": {"enabled": True}})
 
-    assert calls == ["maintenance", "preflight"]
+    assert calls[0:2] == ["maintenance", "host_snapshot"]
+    assert calls[2][0] == "preflight"
+    assert calls[2][2] == host_snapshot
     assert state["auto_offer"]["enabled"] is True
     assert len(updates) == 1
 
@@ -367,11 +389,15 @@ def test_pipeline_runtime_blocker_always_uses_effective_runtime_facade(monkeypat
         reason="duplicate_host_identity",
     )
     monkeypatch.setattr(pipeline, "load_app_config_validated", lambda: config)
-    monkeypatch.setattr(pipeline, "_lifecycle_host_purchases", lambda: [])
+    monkeypatch.setattr(
+        pipeline,
+        "_lifecycle_host_purchases",
+        lambda: pytest.fail("runtime blocker must not eagerly read Host purchases"),
+    )
     monkeypatch.setattr(
         pipeline,
         "get_effective_runtime_state",
-        lambda *, config, purchases: calls.append((config, purchases)) or blocked,
+        lambda *, config: calls.append(config) or blocked,
     )
 
     blocker = pipeline.get_pipeline_runtime_blocker()
@@ -379,7 +405,99 @@ def test_pipeline_runtime_blocker_always_uses_effective_runtime_facade(monkeypat
     assert blocker["code"] == "AUTO_OFFER_RUNTIME_BLOCKED"
     assert blocker["mode"] == AutoOfferRuntimeMode.BLOCKED.value
     assert blocker["message"] == "duplicate_host_identity"
-    assert calls == [(config, [])]
+    assert calls == [config]
+
+
+def test_pipeline_runtime_blocker_real_lifecycle_empty_off_is_caller_lazy(
+    monkeypatch,
+    tmp_path,
+):
+    import app.auto_offer.runtime_lifecycle as lifecycle
+    from app.services import buff_checkout_guard
+
+    config = {"auto_offer": {"enabled": False}, "pipeline": {}}
+    monkeypatch.setattr(
+        pipeline,
+        "_lifecycle_host_purchases",
+        lambda: pytest.fail("empty OFF Store must not use the pipeline Host getter"),
+    )
+    store_path = tmp_path / "auto_offer.db"
+    monkeypatch.setattr(lifecycle, "_STORE_PATH", store_path)
+    monkeypatch.setattr(lifecycle, "canary_metadata_present", lambda: False)
+    monkeypatch.setattr(buff_checkout_guard, "get_unresolved_checkout", lambda: None)
+    monkeypatch.setattr(
+        lifecycle,
+        "_host_snapshot",
+        lambda _purchases: pytest.fail("empty OFF Store must not read Host purchases"),
+    )
+
+    assert pipeline.get_pipeline_runtime_blocker(config) == {}
+    assert not store_path.exists()
+
+
+def test_pipeline_runtime_blocker_leaves_on_and_nonempty_store_correlation_to_lifecycle(
+    monkeypatch,
+):
+    from app.auto_offer.contracts import (
+        DeliveryMode,
+        DeliverySnapshot,
+        DeliveryStatus,
+    )
+    import app.auto_offer.runtime_lifecycle as lifecycle
+    from app.auto_offer.store import StoredDelivery
+
+    tombstone = StoredDelivery(
+        snapshot=DeliverySnapshot(
+            purchase_id="buff:ORDER-7",
+            buff_order_id="ORDER-7",
+            account_id="account-7",
+            recipient_steam_id="76561198000000000",
+            delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+            delivery_status=DeliveryStatus.REFUNDED,
+            steam_tradeoffer_id="123456789",
+            offer_attempted_at=None,
+            offer_sent_at=None,
+            received_at=None,
+            delivery_error="offer_terminated",
+            pending_receipt=True,
+            assetid=None,
+            counterparty_steam_id="76561198000000001",
+        ),
+        revision=1,
+    )
+    host_snapshot_calls = []
+    monkeypatch.setattr(
+        pipeline,
+        "_lifecycle_host_purchases",
+        lambda: pytest.fail("lifecycle must own conditional Host correlation"),
+    )
+    monkeypatch.setattr(lifecycle, "canary_metadata_present", lambda: False)
+
+    def host_snapshot(purchases):
+        host_snapshot_calls.append(purchases)
+        return None
+
+    monkeypatch.setattr(lifecycle, "_host_snapshot", host_snapshot)
+
+    for config, store_rows in (
+        ({"auto_offer": {"enabled": True}}, []),
+        ({"auto_offer": {"enabled": False}}, [tombstone]),
+    ):
+        monkeypatch.setattr(
+            lifecycle.AutoOfferStore,
+            "inspect_existing",
+            lambda _path, store_rows=store_rows: store_rows,
+        )
+
+        blocker = pipeline.get_pipeline_runtime_blocker(config)
+
+        assert blocker == {
+            "code": "AUTO_OFFER_RUNTIME_BLOCKED",
+            "message": "host_snapshot_invalid",
+            "mode": "blocked",
+        }
+
+    assert host_snapshot_calls == [None, None]
 
 
 def test_start_pipeline_rejects_blocked_effective_runtime_without_store(monkeypatch):
