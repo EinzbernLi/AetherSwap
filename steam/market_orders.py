@@ -517,12 +517,20 @@ def _fetch_action_orderbook_cny(
                 if not isinstance(payload, dict):
                     last_error = "Steam 新版 orderbook 接口返回格式异常"
                     break
-                if payload.get("success") not in (True, 1, "1"):
-                    msg = payload.get("message") or payload.get("error") or ""
-                    last_error = "Steam 新版 orderbook 接口返回失败" + (f": {msg}" if msg else "")
-                    break
+                orderbook_data = payload.get("data")
+                if "success" in payload:
+                    if payload.get("success") not in (True, 1, "1"):
+                        msg = payload.get("message") or payload.get("error") or ""
+                        last_error = "Steam 新版 orderbook 接口返回失败" + (f": {msg}" if msg else "")
+                        break
+                elif isinstance(orderbook_data, dict) and "success" in orderbook_data:
+                    if orderbook_data.get("success") not in (True, 1, "1"):
+                        msg = orderbook_data.get("message") or orderbook_data.get("error") or ""
+                        last_error = "Steam 新版 orderbook 接口返回失败" + (f": {msg}" if msg else "")
+                        break
+                    orderbook_data = orderbook_data.get("data")
                 result, parse_error = _compact_orderbook_data_to_cny(
-                    payload.get("data"),
+                    orderbook_data,
                     source="Steam 新版 orderbook 接口",
                     usd_to_cny_rate=usd_to_cny_rate,
                 )
