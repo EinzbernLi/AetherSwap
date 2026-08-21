@@ -357,12 +357,18 @@ def _process_deals_for_target(
     stability_failed_this_round: set,
     is_time_allowed=None,
 ):
+    auto_offer_enabled = is_auto_offer_enabled(cfg)
     integration = build_host_auto_offer_integration(
         config=cfg,
         buff_client=buyer,
         complete_purchase_receipt_by_id=(
             ctx.state.complete_purchase_receipt_by_id
-            if is_auto_offer_enabled(cfg)
+            if auto_offer_enabled
+            else None
+        ),
+        delete_refund_cleanup_purchase=(
+            ctx.state.delete_refund_cleanup_purchase
+            if auto_offer_enabled
             else None
         ),
     )
