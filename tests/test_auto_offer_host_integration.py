@@ -789,6 +789,24 @@ def test_enabled_builder_requires_receipt_writer_before_bridge_build(monkeypatch
         )
 
 
+def test_enabled_builder_requires_refund_cleanup_writer_before_bridge_build(monkeypatch):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration,
+        "_build_active_host_auto_offer_bridge",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("bridge built")),
+    )
+    with pytest.raises(
+        HostAutoOfferIntegrationError,
+        match="refund_cleanup_writer_required",
+    ):
+        host_integration.build_host_auto_offer_integration(
+            config={"auto_offer": {"enabled": True}},
+            buff_client=object(),
+            complete_purchase_receipt_by_id=lambda *_args: True,
+        )
+
+
 def test_draining_builder_disables_new_registration_before_store_mutation(monkeypatch):
     _patch_identity(monkeypatch)
     bridge = FakeBridge()
