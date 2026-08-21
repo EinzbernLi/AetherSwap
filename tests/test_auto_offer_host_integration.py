@@ -789,6 +789,24 @@ def test_enabled_builder_requires_receipt_writer_before_bridge_build(monkeypatch
         )
 
 
+def test_enabled_builder_requires_refund_cleanup_writer_before_bridge_build(monkeypatch):
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        host_integration,
+        "_build_active_host_auto_offer_bridge",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("bridge built")),
+    )
+    with pytest.raises(
+        HostAutoOfferIntegrationError,
+        match="refund_cleanup_writer_required",
+    ):
+        host_integration.build_host_auto_offer_integration(
+            config={"auto_offer": {"enabled": True}},
+            buff_client=object(),
+            complete_purchase_receipt_by_id=lambda *_args: True,
+        )
+
+
 def test_draining_builder_disables_new_registration_before_store_mutation(monkeypatch):
     _patch_identity(monkeypatch)
     bridge = FakeBridge()
@@ -2011,6 +2029,10 @@ class PipelineFakeState:
         self.events.append(("receipt_write",) + tuple(_args))
         return True
 
+    def delete_refund_cleanup_purchase(self, *_args):
+        self.events.append(("cleanup_write",) + tuple(_args))
+        return True
+
     def set_pending_payment(self, *_args, **_kwargs):
         pass
 
@@ -2127,7 +2149,50 @@ def test_pipeline_injects_host_owned_exact_receipt_writer(monkeypatch):
     writer = captured[0]["complete_purchase_receipt_by_id"]
     assert callable(writer)
     assert writer(7, "order-7", "asset-7") is True
-    assert state.events == [("receipt_write", 7, "order-7", "asset-7")]
+    cleanup_writer = captured[0]["delete_refund_cleanup_purchase"]
+    assert callable(cleanup_writer)
+    assert cleanup_writer("order-7", True) is True
+    assert state.events == [
+        ("receipt_write", 7, "order-7", "asset-7"),
+        ("cleanup_write", "order-7", True),
+    ]
+
+
+def test_pipeline_does_not_inject_host_writers_when_auto_offer_disabled(monkeypatch):
+    state = PipelineFakeState()
+    integration = FakePipelineIntegration()
+    captured = []
+
+    def build(**kwargs):
+        captured.append(kwargs)
+        return integration
+
+    monkeypatch.setattr(pipeline, "build_host_auto_offer_integration", build)
+    monkeypatch.setattr(
+        pipeline,
+        "pick_stable_item",
+        lambda *_args, **_kwargs: (None, set()),
+    )
+    ctx = PipelineContext(state, "task045", verbose=False)
+    pipeline._process_deals_for_target(
+        ctx,
+        [],
+        {"auto_offer": {"enabled": False}, "buff": {}},
+        1.0,
+        0.0,
+        0,
+        object(),
+        object(),
+        object(),
+        set(),
+        set(),
+        set(),
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["config"] == {"auto_offer": {"enabled": False}, "buff": {}}
+    assert captured[0]["complete_purchase_receipt_by_id"] is None
+    assert captured[0]["delete_refund_cleanup_purchase"] is None
 
 
 def test_host_commit_precedes_registration_and_seller_reminder_is_ephemeral(monkeypatch):
