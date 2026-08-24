@@ -106,6 +106,7 @@ def test_malformed_current_read_does_not_claim_history_fallback(monkeypatch):
     assert result.final_detail == "malformed_payload"
     assert result.history_fallback_used is False
     assert result.history_schema_trace == ()
+    assert result.history_tradeoffer_trace == ()
     assert len(adapter.requests) == 1
     assert client.closed is True
 
@@ -120,6 +121,7 @@ def test_result_unknown_current_read_reports_history_fallback(monkeypatch):
     assert result.final_status is PlatformResultStatus.SUCCESS
     assert result.final_detail == "offer_history_recovered"
     assert result.history_fallback_used is True
+    assert result.history_tradeoffer_trace == ()
     assert client.closed is True
 
 
@@ -196,18 +198,87 @@ def test_history_schema_trace_distinguishes_missing_target():
     assert code == "p1:valid_no_target"
 
 
-def test_tracing_client_records_only_sanitized_schema_code():
+def test_tradeoffer_shape_single_canonical_alias_is_sanitized():
+    code = diagnostic._tradeoffer_alias_shape(_exact_item(), page_num=1)
+    assert code == (
+        "p1:tradeofferid=string_canonical|trade_offer_id=absent|relation=single"
+    )
+    assert "123456" not in code
+
+
+def test_tradeoffer_shape_null_secondary_alias_is_invalid_without_value_leak():
+    code = diagnostic._tradeoffer_alias_shape(
+        _exact_item(trade_offer_id=None), page_num=1
+    )
+    assert code == (
+        "p1:tradeofferid=string_canonical|trade_offer_id=null|relation=invalid"
+    )
+    assert "123456" not in code
+
+
+def test_tradeoffer_shape_conflicting_canonical_aliases_is_conflict():
+    code = diagnostic._tradeoffer_alias_shape(
+        _exact_item(trade_offer_id="654321"), page_num=1
+    )
+    assert code == (
+        "p1:tradeofferid=string_canonical|trade_offer_id=string_canonical|relation=conflict"
+    )
+    assert "123456" not in code
+    assert "654321" not in code
+
+
+def test_tradeoffer_shape_equal_canonical_aliases_is_equal():
+    code = diagnostic._tradeoffer_alias_shape(
+        _exact_item(trade_offer_id="123456"), page_num=1
+    )
+    assert code == (
+        "p1:tradeofferid=string_canonical|trade_offer_id=string_canonical|relation=equal"
+    )
+
+
+def test_tradeoffer_shape_classifies_noncanonical_string_and_other_types():
+    item = _exact_item(tradeofferid=" 123456", trade_offer_id={"id": "hidden"})
+    code = diagnostic._tradeoffer_alias_shape(item, page_num=1)
+    assert code == (
+        "p1:tradeofferid=string_noncanonical|trade_offer_id=mapping|relation=invalid"
+    )
+    assert "hidden" not in code
+
+
+def test_tradeoffer_shape_from_history_only_emits_for_exact_target():
+    absent = diagnostic._tradeoffer_shape_from_history_payload(
+        _history_payload([{"id": "other-order"}]),
+        expected_page_num=1,
+        target_order_id="order-1",
+    )
+    exact = diagnostic._tradeoffer_shape_from_history_payload(
+        _history_payload([_exact_item(trade_offer_id=None)]),
+        expected_page_num=1,
+        target_order_id="order-1",
+    )
+    assert absent is None
+    assert exact == (
+        "p1:tradeofferid=string_canonical|trade_offer_id=null|relation=invalid"
+    )
+
+
+def test_tracing_client_records_only_sanitized_schema_and_tradeoffer_codes():
     class Client:
         def get_steam_trades(self):
             return []
 
         def get_buy_order_history_page(self, page_num, game="csgo"):
-            return _history_payload([_exact_item()], page_num=page_num)
+            return _history_payload(
+                [_exact_item(trade_offer_id=None)], page_num=page_num
+            )
 
     traced = diagnostic._TracingBuffClient(Client(), _binding())
     payload = traced.get_buy_order_history_page(1, "csgo")
     assert payload["code"] == "OK"
-    assert traced.history_schema_trace == ["p1:target_fields_shape_valid"]
+    assert traced.history_schema_trace == ["p1:target_tradeoffer_alias_invalid"]
+    assert traced.history_tradeoffer_trace == [
+        "p1:tradeofferid=string_canonical|trade_offer_id=null|relation=invalid"
+    ]
 
 
 def test_main_fingerprint_mismatch_stops_before_live_diagnostic(monkeypatch, capsys):
