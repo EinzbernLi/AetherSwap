@@ -329,6 +329,24 @@ def test_binding_drift_stops_before_buff_or_maintenance(monkeypatch):
         )
 
 
+def test_store_drift_stops_before_buff_or_maintenance(monkeypatch):
+    monkeypatch.setattr(command, "_assert_binding_stable", lambda _binding: None)
+    monkeypatch.setattr(
+        command,
+        "_assert_store_preexecution_stable",
+        lambda _binding: (_ for _ in ()).throw(command.RecoveryCommandError("store_target_changed_before_execution")),
+    )
+    monkeypatch.setattr(
+        command,
+        "_make_buff_client",
+        lambda _binding: (_ for _ in ()).throw(AssertionError("must not construct BUFF")),
+    )
+    with pytest.raises(command.RecoveryCommandError, match="store_target_changed_before_execution"):
+        command.execute_recovery(
+            _binding(), expected_fingerprint="f" * 64
+        )
+
+
 def test_assert_binding_stable_compares_exact_credential_snapshot(monkeypatch):
     binding = _binding()
     monkeypatch.setattr(command, "_verify_source", lambda *_args: (COMMIT, TREE))
@@ -356,6 +374,44 @@ def test_buff_client_snapshot_cannot_persist_rotated_credentials(monkeypatch):
     assert captured["cookies"] == "buff-cookie"
     assert captured["credentials_provider"] is None
     assert captured["credentials_update_callback"] is None
+
+
+def test_make_maintenance_injects_bound_cookie_without_convenience_builder(monkeypatch):
+    import app.auto_offer.host_integration as host_integration
+
+    captured = {}
+    bridge = object()
+    maintenance = object()
+
+    def fake_bridge_builder(**kwargs):
+        captured.update(kwargs)
+        return bridge
+
+    def fake_maintenance_builder(value, *, complete_purchase_receipt_by_id=None):
+        assert value is bridge
+        captured["receipt_writer"] = complete_purchase_receipt_by_id
+        return maintenance
+
+    monkeypatch.setattr(
+        host_integration,
+        "_build_recovery_only_host_auto_offer_bridge",
+        fake_bridge_builder,
+    )
+    monkeypatch.setattr(
+        host_integration,
+        "HostRecoveryOnlyMaintenance",
+        fake_maintenance_builder,
+    )
+
+    fake_buff = object()
+    result = command._make_maintenance(fake_buff, _binding())
+    assert result is maintenance
+    assert captured["buff_client"] is fake_buff
+    assert captured["account_id"] == ACCOUNT
+    assert captured["account_steam_id"] == RECIPIENT
+    assert captured["steam_cookie_string"] == "steam-cookie"
+    assert captured["store_path"] == command._STORE_PATH
+    assert captured["receipt_writer"] is command.db_complete_purchase_receipt_by_id
 
 
 def test_execute_advances_one_transition_per_tick_then_one_receipt(monkeypatch):
@@ -399,16 +455,11 @@ def test_execute_advances_one_transition_per_tick_then_one_receipt(monkeypatch):
         ]
 
     monkeypatch.setattr(command, "_assert_binding_stable", lambda _binding: None)
+    monkeypatch.setattr(command, "_assert_store_preexecution_stable", lambda _binding: None)
     monkeypatch.setattr(command, "_make_buff_client", lambda _binding: FakeBuff())
-    monkeypatch.setattr(command, "_make_maintenance", lambda _client: FakeMaintenance())
+    monkeypatch.setattr(command, "_make_maintenance", lambda _client, _binding: FakeMaintenance())
     monkeypatch.setattr(command, "_host_rows", host_rows)
     monkeypatch.setattr(command, "_read_store_target", lambda _order: states[cursor["index"]])
-    monkeypatch.setattr(command, "_verify_source", lambda *_args: (COMMIT, TREE))
-    monkeypatch.setattr(
-        command,
-        "_credential_snapshot",
-        lambda **_kwargs: ("steam-cookie", "buff-cookie", "ua", 3),
-    )
 
     assert command.execute_recovery(
         _binding(), expected_fingerprint="f" * 64
@@ -445,8 +496,9 @@ def test_confirmation_required_stops_without_another_tick_or_receipt(monkeypatch
             pass
 
     monkeypatch.setattr(command, "_assert_binding_stable", lambda _binding: None)
+    monkeypatch.setattr(command, "_assert_store_preexecution_stable", lambda _binding: None)
     monkeypatch.setattr(command, "_make_buff_client", lambda _binding: FakeBuff())
-    monkeypatch.setattr(command, "_make_maintenance", lambda _client: FakeMaintenance())
+    monkeypatch.setattr(command, "_make_maintenance", lambda _client, _binding: FakeMaintenance())
     monkeypatch.setattr(
         command,
         "_host_rows",
@@ -478,8 +530,9 @@ def test_wait_without_persisted_transition_stops_after_one_tick(monkeypatch):
             pass
 
     monkeypatch.setattr(command, "_assert_binding_stable", lambda _binding: None)
+    monkeypatch.setattr(command, "_assert_store_preexecution_stable", lambda _binding: None)
     monkeypatch.setattr(command, "_make_buff_client", lambda _binding: FakeBuff())
-    monkeypatch.setattr(command, "_make_maintenance", lambda _client: FakeMaintenance())
+    monkeypatch.setattr(command, "_make_maintenance", lambda _client, _binding: FakeMaintenance())
     monkeypatch.setattr(command, "_host_rows", lambda: [{"_db_id": 7, "buff_order_id": ORDER, "pending_receipt": True, "assetid": None}])
     monkeypatch.setattr(command, "_read_store_target", lambda _order: state)
 
