@@ -51,6 +51,7 @@ class BuffRecoveryDiagnostic:
     final_detail: str
     history_fallback_used: bool
     history_schema_trace: tuple[str, ...]
+    history_tradeoffer_trace: tuple[str, ...]
 
 
 def _request(binding: RecoveryTargetBinding) -> PlatformRequest:
@@ -133,6 +134,90 @@ def _canonical_positive_decimal_text(value: object) -> str | None:
     if number <= 0 or str(number) != value:
         return None
     return value
+
+
+def _sanitized_value_shape(*, present: bool, value: object) -> str:
+    if not present:
+        return "absent"
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "bool"
+    if type(value) is int:
+        return "int_canonical" if _canonical_raw_identifier(value) is not None else "int_noncanonical"
+    if type(value) is str:
+        return (
+            "string_canonical"
+            if _canonical_raw_identifier(value) is not None
+            else "string_noncanonical"
+        )
+    if type(value) is float:
+        return "float"
+    if isinstance(value, Mapping):
+        return "mapping"
+    if isinstance(value, list):
+        return "list"
+    return "other"
+
+
+def _tradeoffer_alias_shape(
+    record: Mapping[str, object],
+    *,
+    page_num: int,
+) -> str:
+    canonical_values: dict[str, str | None] = {}
+    shapes: dict[str, str] = {}
+    present_fields: list[str] = []
+    for field in _TRADE_OFFER_FIELDS:
+        present = field in record
+        value = record.get(field)
+        shapes[field] = _sanitized_value_shape(present=present, value=value)
+        if present:
+            present_fields.append(field)
+            canonical_values[field] = _canonical_raw_identifier(value)
+
+    if not present_fields:
+        relation = "none"
+    elif any(canonical_values[field] is None for field in present_fields):
+        relation = "invalid"
+    elif len(present_fields) == 1:
+        relation = "single"
+    elif len({canonical_values[field] for field in present_fields}) == 1:
+        relation = "equal"
+    else:
+        relation = "conflict"
+
+    return (
+        f"p{page_num}:"
+        f"tradeofferid={shapes['tradeofferid']}|"
+        f"trade_offer_id={shapes['trade_offer_id']}|"
+        f"relation={relation}"
+    )
+
+
+def _tradeoffer_shape_from_history_payload(
+    payload: object,
+    *,
+    expected_page_num: int,
+    target_order_id: str,
+) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return None
+    items = data.get("items")
+    if not isinstance(items, list):
+        return None
+    matches = [
+        item
+        for item in items
+        if isinstance(item, Mapping)
+        and _canonical_raw_identifier(item.get("id")) == target_order_id
+    ]
+    if len(matches) != 1:
+        return None
+    return _tradeoffer_alias_shape(matches[0], page_num=expected_page_num)
 
 
 def _classify_history_payload(
@@ -227,6 +312,7 @@ class _TracingBuffClient:
         self._target_order_id = binding.store.snapshot.buff_order_id
         self._recipient_steam_id = binding.store.snapshot.recipient_steam_id
         self.history_schema_trace: list[str] = []
+        self.history_tradeoffer_trace: list[str] = []
 
     def get_steam_trades(self):
         return self._client.get_steam_trades()
@@ -241,6 +327,13 @@ class _TracingBuffClient:
                 recipient_steam_id=self._recipient_steam_id,
             )
         )
+        tradeoffer_shape = _tradeoffer_shape_from_history_payload(
+            payload,
+            expected_page_num=page_num,
+            target_order_id=self._target_order_id,
+        )
+        if tradeoffer_shape is not None:
+            self.history_tradeoffer_trace.append(tradeoffer_shape)
         return payload
 
 
@@ -271,6 +364,7 @@ def diagnose_buff_read(binding: RecoveryTargetBinding) -> BuffRecoveryDiagnostic
             final_detail=final.detail,
             history_fallback_used=fallback_used,
             history_schema_trace=tuple(traced.history_schema_trace),
+            history_tradeoffer_trace=tuple(traced.history_tradeoffer_trace),
         )
     finally:
         try:
@@ -307,6 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         result = diagnose_buff_read(binding)
         trace = ",".join(result.history_schema_trace) or "none"
+        tradeoffer_trace = ",".join(result.history_tradeoffer_trace) or "none"
         print(
             "TASK049_BUFF_DIAGNOSTIC "
             f"current_status={result.current_status.value} "
@@ -315,6 +410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"final_detail={result.final_detail} "
             f"history_fallback_used={str(result.history_fallback_used).lower()} "
             f"history_schema_trace={trace} "
+            f"history_tradeoffer_trace={tradeoffer_trace} "
             "store_rw_opened=false store_cas=0 steam_requests=0 host_writes=0 platform_writes=0"
         )
         return 0
