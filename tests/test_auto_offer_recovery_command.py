@@ -232,6 +232,26 @@ def test_preflight_is_deterministic_and_binds_credentials(monkeypatch, tmp_path)
     assert changed.fingerprint != first.fingerprint
 
 
+def test_preflight_blocks_duplicate_nonpending_host_order(monkeypatch, tmp_path):
+    host_path = tmp_path / "app.db"
+    store_path = tmp_path / "auto_offer.db"
+    _make_host(
+        host_path,
+        rows=((7, ORDER, 1, None), (8, ORDER, 0, "old-asset")),
+    )
+    _insert_store_row(store_path)
+    monkeypatch.setattr(command, "_verify_source", lambda *_args: (COMMIT, TREE))
+    _patch_local_identity(monkeypatch)
+
+    with pytest.raises(command.RecoveryCommandError, match="host_exact_order_identity_changed"):
+        command.collect_recovery_preflight(
+            expected_commit=COMMIT,
+            expected_tree=TREE,
+            host_db_path=host_path,
+            store_path=store_path,
+        )
+
+
 def test_preflight_blocks_unrelated_recoverable_store_row(monkeypatch, tmp_path):
     host_path = tmp_path / "app.db"
     store_path = tmp_path / "auto_offer.db"
@@ -292,6 +312,36 @@ def test_fingerprint_mismatch_stops_before_buff_or_maintenance(monkeypatch):
         )
 
 
+def test_binding_drift_stops_before_buff_or_maintenance(monkeypatch):
+    monkeypatch.setattr(
+        command,
+        "_assert_binding_stable",
+        lambda _binding: (_ for _ in ()).throw(command.RecoveryCommandError("credential_snapshot_changed")),
+    )
+    monkeypatch.setattr(
+        command,
+        "_make_buff_client",
+        lambda _binding: (_ for _ in ()).throw(AssertionError("must not construct BUFF")),
+    )
+    with pytest.raises(command.RecoveryCommandError, match="credential_snapshot_changed"):
+        command.execute_recovery(
+            _binding(), expected_fingerprint="f" * 64
+        )
+
+
+def test_assert_binding_stable_compares_exact_credential_snapshot(monkeypatch):
+    binding = _binding()
+    monkeypatch.setattr(command, "_verify_source", lambda *_args: (COMMIT, TREE))
+    monkeypatch.setattr(command, "_assert_exact_host_order_readonly", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        command,
+        "_credential_snapshot",
+        lambda **_kwargs: ("different-steam-cookie", "buff-cookie", "ua", 3),
+    )
+    with pytest.raises(command.RecoveryCommandError, match="credential_snapshot_changed"):
+        command._assert_binding_stable(binding)
+
+
 def test_buff_client_snapshot_cannot_persist_rotated_credentials(monkeypatch):
     captured = {}
 
@@ -348,10 +398,17 @@ def test_execute_advances_one_transition_per_tick_then_one_receipt(monkeypatch):
             }
         ]
 
+    monkeypatch.setattr(command, "_assert_binding_stable", lambda _binding: None)
     monkeypatch.setattr(command, "_make_buff_client", lambda _binding: FakeBuff())
     monkeypatch.setattr(command, "_make_maintenance", lambda _client: FakeMaintenance())
     monkeypatch.setattr(command, "_host_rows", host_rows)
     monkeypatch.setattr(command, "_read_store_target", lambda _order: states[cursor["index"]])
+    monkeypatch.setattr(command, "_verify_source", lambda *_args: (COMMIT, TREE))
+    monkeypatch.setattr(
+        command,
+        "_credential_snapshot",
+        lambda **_kwargs: ("steam-cookie", "buff-cookie", "ua", 3),
+    )
 
     assert command.execute_recovery(
         _binding(), expected_fingerprint="f" * 64
@@ -387,6 +444,7 @@ def test_confirmation_required_stops_without_another_tick_or_receipt(monkeypatch
         def close(self):
             pass
 
+    monkeypatch.setattr(command, "_assert_binding_stable", lambda _binding: None)
     monkeypatch.setattr(command, "_make_buff_client", lambda _binding: FakeBuff())
     monkeypatch.setattr(command, "_make_maintenance", lambda _client: FakeMaintenance())
     monkeypatch.setattr(
@@ -419,6 +477,7 @@ def test_wait_without_persisted_transition_stops_after_one_tick(monkeypatch):
         def close(self):
             pass
 
+    monkeypatch.setattr(command, "_assert_binding_stable", lambda _binding: None)
     monkeypatch.setattr(command, "_make_buff_client", lambda _binding: FakeBuff())
     monkeypatch.setattr(command, "_make_maintenance", lambda _client: FakeMaintenance())
     monkeypatch.setattr(command, "_host_rows", lambda: [{"_db_id": 7, "buff_order_id": ORDER, "pending_receipt": True, "assetid": None}])
