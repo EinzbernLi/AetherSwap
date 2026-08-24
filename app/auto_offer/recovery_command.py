@@ -388,6 +388,21 @@ def collect_recovery_preflight(
     )
 
 
+def _assert_store_preexecution_stable(binding: RecoveryTargetBinding) -> None:
+    """Repeat detached Store admission before any RW Store handle is opened."""
+
+    rows = AutoOfferStore.inspect_existing(_STORE_PATH)
+    matches = [row for row in rows if row.snapshot.buff_order_id == binding.order_id]
+    if len(matches) != 1 or matches[0] != binding.store:
+        raise _fail("store_target_changed_before_execution")
+    if any(
+        row.snapshot.buff_order_id != binding.order_id
+        and row.snapshot.delivery_status not in TERMINAL_DELIVERY_STATUSES
+        for row in rows
+    ):
+        raise _fail("unrelated_recoverable_store_row")
+
+
 def _read_store_target(order_id: str, store_path: Path = _STORE_PATH) -> StoredDelivery:
     stored = AutoOfferStore.inspect_existing_by_buff_order_id(store_path, order_id)
     if stored is None:
@@ -412,13 +427,30 @@ def _make_buff_client(binding: RecoveryTargetBinding) -> BuffClient:
     )
 
 
-def _make_maintenance(buff_client: BuffClient):
-    from app.auto_offer.host_integration import build_host_recovery_only_maintenance
+def _make_maintenance(
+    buff_client: BuffClient,
+    binding: RecoveryTargetBinding,
+):
+    # Do not call build_host_recovery_only_maintenance(): its convenience
+    # credential lookup currently routes through load_app_config()/get_steam(),
+    # which can migrate legacy config and validates identity_secret.  TASK-049
+    # already owns an exact fingerprint-bound cookie snapshot, so inject it
+    # directly into the same TASK-048 recovery-only bridge instead.
+    from app.auto_offer.host_integration import (
+        HostRecoveryOnlyMaintenance,
+        _build_recovery_only_host_auto_offer_bridge,
+    )
 
-    return build_host_recovery_only_maintenance(
+    bridge = _build_recovery_only_host_auto_offer_bridge(
         buff_client=buff_client,
-        complete_purchase_receipt_by_id=db_complete_purchase_receipt_by_id,
+        account_id=binding.account_id,
+        account_steam_id=binding.recipient_steam_id,
+        steam_cookie_string=binding.steam_cookie,
         store_path=_STORE_PATH,
+    )
+    return HostRecoveryOnlyMaintenance(
+        bridge,
+        complete_purchase_receipt_by_id=db_complete_purchase_receipt_by_id,
     )
 
 
@@ -491,10 +523,11 @@ def execute_recovery(
         raise _fail("target_fingerprint_mismatch")
 
     _assert_binding_stable(binding)
+    _assert_store_preexecution_stable(binding)
     buff_client = _make_buff_client(binding)
     maintenance = None
     try:
-        maintenance = _make_maintenance(buff_client)
+        maintenance = _make_maintenance(buff_client, binding)
         for tick in range(1, _MAX_TICKS + 1):
             _assert_binding_stable(binding)
             before = _read_store_target(binding.order_id)
@@ -543,18 +576,7 @@ def execute_recovery(
                     raise _fail("received_store_evidence_invalid")
                 if outcome.result is not AutoOfferResult.COMPLETE:
                     raise _fail("received_outcome_invalid")
-                _verify_source(binding.source_commit, binding.source_tree)
-                credentials = _credential_snapshot(
-                    store_account_id=binding.account_id,
-                    store_recipient_steam_id=binding.recipient_steam_id,
-                )
-                if credentials != (
-                    binding.steam_cookie,
-                    binding.buff_cookie,
-                    binding.buff_user_agent,
-                    binding.buff_generation,
-                ):
-                    raise _fail("credential_snapshot_changed")
+                _assert_binding_stable(binding)
                 if maintenance.complete_host_receipt(_host_rows()) is not True:
                     raise _fail("host_receipt_not_completed")
                 if not _verify_host_receipt(binding, assetid):
