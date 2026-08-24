@@ -210,6 +210,39 @@ class AutoOfferStore:
 
         self._validate_schema(connection)
 
+    def initialize_existing(self) -> None:
+        """Open one existing, exact v2 Store without creation or migration.
+
+        Unlike :meth:`initialize`, this seam never creates the parent
+        directory, SQLite source, table, schema, or migration.  It is for
+        façades that must fail closed when the existing Store is absent.
+        """
+
+        if self._connection is not None:
+            self._validate_existing_v2(self._connection)
+            self._configure_connection(self._connection)
+            self._validate_existing_v2(self._connection)
+            return
+
+        path = self._resolved_source_path(self._db_path)
+        connection = self._open_existing_rw(path)
+        self._connection = connection
+        try:
+            # Validate before applying connection pragmas so an empty,
+            # version-0, v1, or malformed source remains byte-for-byte
+            # untouched and cannot be promoted into v2 by this seam.
+            self._validate_existing_v2(connection)
+            self._configure_connection(connection)
+            self._validate_existing_v2(connection)
+        except AutoOfferStoreError:
+            self.close()
+            raise
+        except sqlite3.DatabaseError as exc:
+            self.close()
+            raise AutoOfferStoreCorruptError(
+                "SQLite rejected existing Auto Offer schema"
+            ) from exc
+
     def close(self) -> None:
         """Close this store's connection without modifying the database."""
         connection = self._connection
@@ -756,6 +789,12 @@ class AutoOfferStore:
             raise AutoOfferStoreSchemaError("Auto Offer schema does not match v2")
 
         cls._validate_table_shape(connection, _EXPECTED_COLUMNS, "v2")
+
+    @classmethod
+    def _validate_existing_v2(cls, connection: sqlite3.Connection) -> None:
+        if cls._user_version(connection) != AUTO_OFFER_STORE_SCHEMA_VERSION:
+            raise AutoOfferStoreSchemaError("existing Auto Offer schema is not v2")
+        cls._validate_schema(connection)
 
     @classmethod
     def _validate_v1_schema(cls, connection: sqlite3.Connection) -> None:

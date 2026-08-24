@@ -144,6 +144,97 @@ def test_initialize_creates_schema_and_pragmas(tmp_path):
     store.close()
 
 
+def test_initialize_existing_rejects_missing_source_without_side_effects(tmp_path):
+    path = tmp_path / "missing" / "nested" / "auto_offer.db"
+    store = AutoOfferStore(path)
+
+    with pytest.raises(AutoOfferStoreError):
+        store.initialize_existing()
+
+    assert not path.exists()
+    assert not path.parent.exists()
+    for suffix in ("-wal", "-shm", "-journal"):
+        assert not Path(f"{path}{suffix}").exists()
+
+
+@pytest.mark.parametrize("source_kind", ("empty", "version_0_table", "v1", "wrong_v2"))
+def test_initialize_existing_rejects_non_v2_without_mutation(tmp_path, source_kind):
+    path = tmp_path / f"{source_kind}.db"
+    if source_kind == "empty":
+        path.touch()
+    elif source_kind == "version_0_table":
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE unrelated (id INTEGER)")
+            connection.execute("PRAGMA user_version = 0")
+    elif source_kind == "v1":
+        create_v1_source(path)
+    else:
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE auto_offer_delivery (id INTEGER)")
+            connection.execute("PRAGMA user_version = 2")
+
+    before = source_family(path)
+    with pytest.raises(AutoOfferStoreSchemaError):
+        AutoOfferStore(path).initialize_existing()
+
+    assert source_family(path) == before
+    with sqlite3.connect(path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        assert version == (1 if source_kind == "v1" else 2 if source_kind == "wrong_v2" else 0)
+        if source_kind == "empty":
+            assert connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall() == []
+        elif source_kind == "version_0_table":
+            assert connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall() == [("unrelated",)]
+        elif source_kind == "wrong_v2":
+            assert [column[1] for column in connection.execute(
+                "PRAGMA table_info(auto_offer_delivery)"
+            ).fetchall()] == ["id"]
+
+
+def test_initialize_existing_exact_v2_supports_normal_cas_operations(tmp_path):
+    path = tmp_path / "auto_offer.db"
+    created = AutoOfferStore(path)
+    created.initialize()
+    initial = created.ensure_initial(snapshot())
+    created.close()
+
+    store = AutoOfferStore(path)
+    store.initialize_existing()
+    assert store.get_by_purchase_id("purchase-1") == initial
+
+    target = snapshot(
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+    )
+    advanced = store.advance(initial, target)
+    assert advanced.revision == 2
+    assert store.get_by_buff_order_id("buff-1") == advanced
+    assert [item.snapshot.buff_order_id for item in store.list_recoverable()] == [
+        "buff-1"
+    ]
+    store.close()
+
+
+def test_initialize_retains_missing_source_creation_behavior(tmp_path):
+    path = tmp_path / "created" / "auto_offer.db"
+    store = AutoOfferStore(path)
+    store.initialize()
+
+    assert path.exists()
+    assert path.parent.exists()
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall() == [("auto_offer_delivery",)]
+    store.close()
+
+
 def test_operations_require_explicit_initialize(tmp_path):
     store = AutoOfferStore(tmp_path / "auto_offer.db")
     with pytest.raises(AutoOfferStoreError):

@@ -47,6 +47,7 @@ from app.auto_offer.coordinator import (
     AcceptOfferStepResult,
     ConfirmationAuthorityReadResult,
     DeliveryCoordinator,
+    ReadOnlyStepResult,
     SellerAcceptAuthorityReadResult,
 )
 from app.auto_offer.platform_accept import SteamIncomingOfferAcceptAdapter
@@ -76,6 +77,22 @@ _STORE_PATH = Path(__file__).resolve().parents[2] / "config" / "auto_offer.db"
 _TIMEOUT_SECONDS = 15.0
 MAX_DELIVERY_ORDERS_PER_TICK = 8
 _MAX_CANARY_RECOVERY_STEPS_PER_DELIVERY = 6
+_RECOVERY_ONLY_CAPABILITIES = frozenset(
+    {
+        PlatformCapability.READ_OFFER_STATE,
+        PlatformCapability.READ_STEAM_TRADE_OFFER,
+        PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+    }
+)
+_RECOVERY_ONLY_CONTINUATION_STATUSES = frozenset(
+    {
+        DeliveryStatus.OFFER_SENT,
+        DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+        DeliveryStatus.OFFER_CONFIRMED,
+        DeliveryStatus.AWAITING_INVENTORY,
+        DeliveryStatus.RECEIVED,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -890,6 +907,664 @@ def _build_active_host_auto_offer_bridge(
         account_id=account,
         recipient_steam_id=recipient,
     )
+
+
+class _RecoveryOnlyHostAutoOfferBridge:
+    """Owned Store/Coordinator bundle with read capabilities only."""
+
+    __slots__ = (
+        "_store",
+        "_coordinator",
+        "_session",
+        "_account_id",
+        "_recipient_steam_id",
+        "_closed",
+    )
+
+    def __init__(
+        self,
+        *,
+        store: AutoOfferStore,
+        coordinator: DeliveryCoordinator,
+        session: object,
+        account_id: str,
+        recipient_steam_id: str,
+    ) -> None:
+        self._store = store
+        self._coordinator = coordinator
+        self._session = session
+        self._account_id = account_id
+        self._recipient_steam_id = recipient_steam_id
+        self._closed = False
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def recipient_steam_id(self) -> str:
+        return self._recipient_steam_id
+
+    @property
+    def capabilities(self):
+        return _RECOVERY_ONLY_CAPABILITIES
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise HostAutoOfferIntegrationError("recovery_bridge_closed")
+
+    def list_recoverable(self) -> tuple[StoredDelivery, ...]:
+        self._require_open()
+        try:
+            return tuple(self._store.list_recoverable())
+        except Exception:
+            raise HostAutoOfferIntegrationError("recovery_store_read_failed") from None
+
+    def get_by_purchase_id(self, purchase_id: str) -> StoredDelivery | None:
+        self._require_open()
+        try:
+            return self._store.get_by_purchase_id(purchase_id)
+        except Exception:
+            raise HostAutoOfferIntegrationError("recovery_store_read_failed") from None
+
+    def recover_result_unknown_readonly(self, delivery: StoredDelivery):
+        self._require_open()
+        try:
+            return self._coordinator.recover_result_unknown_readonly(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError(
+                "recovery_result_unknown_read_failed"
+            ) from None
+
+    def step(self, delivery: StoredDelivery):
+        self._require_open()
+        try:
+            return self._coordinator.step(delivery)
+        except Exception:
+            raise HostAutoOfferIntegrationError("recovery_read_step_failed") from None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        store_ok = _safe_close_store(self._store)
+        session_ok = _safe_close_session(self._session)
+        if not store_ok or not session_ok:
+            raise HostAutoOfferIntegrationError("recovery_bridge_close_failed")
+
+
+def _build_recovery_only_host_auto_offer_bridge(
+    *,
+    buff_client,
+    account_id: str,
+    account_steam_id: str,
+    steam_cookie_string: str,
+    store_path: str | Path = _STORE_PATH,
+) -> _RecoveryOnlyHostAutoOfferBridge:
+    """Build the explicit maintenance bridge without any platform writer."""
+
+    if type(account_id) is not str or not account_id or account_id.strip() != account_id:
+        raise HostAutoOfferIntegrationError("current_account_id_invalid")
+    recipient = _canonical_steam_id(account_steam_id)
+    if type(steam_cookie_string) is not str or not steam_cookie_string:
+        raise HostAutoOfferIntegrationError("steam_cookie_required")
+
+    session = None
+    store = None
+    try:
+        session = requests.Session()
+        if getattr(session, "verify", None) is False:
+            raise HostAutoOfferIntegrationError("steam_tls_verification_disabled")
+
+        store = AutoOfferStore(store_path)
+        store.initialize_existing()
+
+        timeout = (_TIMEOUT_SECONDS, _TIMEOUT_SECONDS)
+        trade_offer_reader = SteamTradeOfferHttpReader(
+            steam_cookie_string,
+            session=session,
+            timeout=timeout,
+        )
+        completed_trade_reader = SteamCompletedTradeHttpReader(
+            steam_cookie_string,
+            session=session,
+            timeout=timeout,
+        )
+        if (
+            trade_offer_reader.bound_account_steam_id != recipient
+            or completed_trade_reader.bound_account_steam_id != recipient
+        ):
+            raise HostAutoOfferIntegrationError("steam_identity_mismatch")
+
+        buff_adapter = BuffReadOnlyAdapter(buff_client, account_id=account_id)
+        trade_offer_adapter = SteamTradeOfferReadOnlyAdapter(
+            trade_offer_reader,
+            account_id=account_id,
+            recipient_steam_id=recipient,
+        )
+        completed_trade_adapter = SteamCompletedTradeReadOnlyAdapter(
+            completed_trade_reader,
+            account_id=account_id,
+            recipient_steam_id=recipient,
+        )
+        adapters = {
+            PlatformCapability.READ_OFFER_STATE: buff_adapter,
+            PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
+        }
+        if frozenset(adapters) != _RECOVERY_ONLY_CAPABILITIES:
+            raise HostAutoOfferIntegrationError("recovery_capability_registry_invalid")
+
+        coordinator = DeliveryCoordinator(
+            store,
+            adapters,
+            timeout_seconds=_TIMEOUT_SECONDS,
+            allow_writes=False,
+            allow_confirmation_writes=False,
+            allow_accept_writes=False,
+        )
+    except HostAutoOfferIntegrationError:
+        _safe_close_store(store)
+        _safe_close_session(session)
+        raise
+    except Exception:
+        _safe_close_store(store)
+        _safe_close_session(session)
+        raise HostAutoOfferIntegrationError(
+            "recovery_only_bridge_build_failed"
+        ) from None
+
+    return _RecoveryOnlyHostAutoOfferBridge(
+        store=store,
+        coordinator=coordinator,
+        session=session,
+        account_id=account_id,
+        recipient_steam_id=recipient,
+    )
+
+
+class HostRecoveryOnlyMaintenance:
+    """Host-owned, one-target, read-only recovery maintenance façade."""
+
+    __slots__ = (
+        "_bridge",
+        "_complete_purchase_receipt_by_id",
+        "_target_order_id",
+        "_target_host_db_id",
+        "_receipt_completed",
+        "_closed",
+    )
+
+    def __init__(
+        self,
+        bridge,
+        *,
+        complete_purchase_receipt_by_id=None,
+    ) -> None:
+        try:
+            account_id = bridge.account_id
+            recipient_steam_id = bridge.recipient_steam_id
+            capabilities = bridge.capabilities
+        except Exception as exc:
+            raise HostAutoOfferIntegrationError(
+                "recovery_bridge_invalid"
+            ) from exc
+        if (
+            type(account_id) is not str
+            or not account_id
+            or account_id.strip() != account_id
+            or type(recipient_steam_id) is not str
+            or not recipient_steam_id
+            or frozenset(capabilities) != _RECOVERY_ONLY_CAPABILITIES
+        ):
+            raise HostAutoOfferIntegrationError("recovery_bridge_invalid")
+        self._bridge = bridge
+        self._complete_purchase_receipt_by_id = complete_purchase_receipt_by_id
+        self._target_order_id: str | None = None
+        self._target_host_db_id: int | None = None
+        self._receipt_completed = False
+        self._closed = False
+
+    @property
+    def account_id(self) -> str:
+        return self._bridge.account_id
+
+    @property
+    def recipient_steam_id(self) -> str:
+        return self._bridge.recipient_steam_id
+
+    @property
+    def capabilities(self):
+        return _RECOVERY_ONLY_CAPABILITIES
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise HostAutoOfferIntegrationError("recovery_maintenance_closed")
+
+    def _host_rows_for_order(
+        self,
+        host_purchases: object,
+        order_id: str,
+    ) -> list[Mapping[str, object]]:
+        if not isinstance(host_purchases, list):
+            raise HostAutoOfferIntegrationError("invalid_host_purchases")
+        matches: list[Mapping[str, object]] = []
+        for purchase in host_purchases:
+            if not isinstance(purchase, Mapping):
+                raise HostAutoOfferIntegrationError("invalid_host_purchase")
+            value = purchase.get("buff_order_id")
+            if value not in (None, "") and _exact_order_id(value) is None:
+                raise HostAutoOfferIntegrationError("invalid_host_order_identity")
+            if value == order_id:
+                matches.append(purchase)
+        return matches
+
+    def _validate_optional_host_identity(
+        self,
+        purchase: Mapping[str, object],
+    ) -> None:
+        for field, expected in (
+            ("account_id", self.account_id),
+            ("recipient_steam_id", self.recipient_steam_id),
+            ("steam_id", self.recipient_steam_id),
+            ("buyer_steamid", self.recipient_steam_id),
+            ("buyer_steam_id", self.recipient_steam_id),
+        ):
+            if field in purchase and purchase.get(field) != expected:
+                raise HostAutoOfferIntegrationError("host_store_identity_mismatch")
+
+    def _pending_host_target(
+        self,
+        host_purchases: object,
+    ) -> tuple[str, Mapping[str, object]]:
+        pending = _preflight_host_pending_by_order(host_purchases)
+        if len(pending) != 1:
+            raise HostAutoOfferIntegrationError("maintenance_host_target_not_exclusive")
+        order_id, purchase = next(iter(pending.items()))
+        matches = self._host_rows_for_order(host_purchases, order_id)
+        if len(matches) != 1 or matches[0] is not purchase:
+            raise HostAutoOfferIntegrationError("duplicate_host_order_identity")
+        if _exact_db_id(purchase.get("_db_id")) is None:
+            raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+        self._validate_optional_host_identity(purchase)
+        return order_id, purchase
+
+    def _receipt_host_target(
+        self,
+        host_purchases: object,
+    ) -> tuple[str, Mapping[str, object]]:
+        order_id = self._target_order_id
+        if order_id is None:
+            raise HostAutoOfferIntegrationError("maintenance_target_required")
+        pending = _preflight_host_pending_by_order(host_purchases)
+        if any(item != order_id for item in pending):
+            raise HostAutoOfferIntegrationError("maintenance_host_target_not_exclusive")
+        matches = self._host_rows_for_order(host_purchases, order_id)
+        if len(matches) != 1:
+            raise HostAutoOfferIntegrationError("duplicate_host_order_identity")
+        purchase = matches[0]
+        if _exact_db_id(purchase.get("_db_id")) is None:
+            raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+        self._validate_optional_host_identity(purchase)
+        return order_id, purchase
+
+    def _validate_store_identity(
+        self,
+        stored: object,
+        order_id: str,
+    ) -> StoredDelivery:
+        if type(stored) is not StoredDelivery:
+            raise HostAutoOfferIntegrationError("invalid_store_delivery")
+        try:
+            validate_delivery_snapshot(stored.snapshot)
+        except Exception:
+            raise HostAutoOfferIntegrationError("invalid_store_delivery") from None
+        snapshot = stored.snapshot
+        if (
+            snapshot.purchase_id != f"buff:{order_id}"
+            or snapshot.buff_order_id != order_id
+            or snapshot.account_id != self.account_id
+            or snapshot.recipient_steam_id != self.recipient_steam_id
+            or type(stored.revision) is not int
+            or stored.revision < 1
+        ):
+            raise HostAutoOfferIntegrationError("host_store_identity_mismatch")
+        return stored
+
+    def _store_target(
+        self,
+        order_id: str,
+    ) -> StoredDelivery:
+        recoverable = self._bridge.list_recoverable()
+        seen: set[str] = set()
+        for item in recoverable:
+            if type(item) is not StoredDelivery:
+                raise HostAutoOfferIntegrationError("invalid_store_delivery")
+            item_order = _exact_order_id(item.snapshot.buff_order_id)
+            if item_order is None or item_order in seen:
+                raise HostAutoOfferIntegrationError("invalid_store_order_identity")
+            seen.add(item_order)
+            self._validate_store_identity(item, item_order)
+        if seen - {order_id}:
+            raise HostAutoOfferIntegrationError("maintenance_unrelated_store_row")
+        stored = self._bridge.get_by_purchase_id(f"buff:{order_id}")
+        if stored is None:
+            raise HostAutoOfferIntegrationError("maintenance_store_row_required")
+        return self._validate_store_identity(stored, order_id)
+
+    @staticmethod
+    def _validate_initial_target(stored: StoredDelivery) -> None:
+        snapshot = stored.snapshot
+        if (
+            snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
+            or snapshot.delivery_status is not DeliveryStatus.RESULT_UNKNOWN
+            or snapshot.delivery_error != "write_result_unknown"
+            or snapshot.offer_attempted_at is None
+            or snapshot.offer_sent_at is not None
+            or snapshot.received_at is not None
+            or snapshot.steam_tradeoffer_id is not None
+            or snapshot.counterparty_steam_id is not None
+            or snapshot.pending_receipt is not True
+            or snapshot.assetid is not None
+        ):
+            raise HostAutoOfferIntegrationError("maintenance_target_not_recoverable")
+
+    @staticmethod
+    def _validate_continuation_target(stored: StoredDelivery) -> None:
+        snapshot = stored.snapshot
+        if snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER:
+            raise HostAutoOfferIntegrationError("maintenance_target_not_recoverable")
+        if snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+            HostRecoveryOnlyMaintenance._validate_initial_target(stored)
+            return
+        if snapshot.delivery_status not in _RECOVERY_ONLY_CONTINUATION_STATUSES:
+            raise HostAutoOfferIntegrationError("maintenance_target_not_recoverable")
+        if snapshot.delivery_status is DeliveryStatus.RECEIVED:
+            if snapshot.pending_receipt is not False or _exact_assetid(snapshot.assetid) is None:
+                raise HostAutoOfferIntegrationError("maintenance_receipt_not_proven")
+            return
+        if (
+            snapshot.pending_receipt is not True
+            or snapshot.assetid is not None
+            or snapshot.offer_attempted_at is None
+            or snapshot.offer_sent_at is None
+            or snapshot.steam_tradeoffer_id is None
+            or snapshot.counterparty_steam_id is None
+        ):
+            raise HostAutoOfferIntegrationError("maintenance_target_not_recoverable")
+
+    def _admit_target(
+        self,
+        host_purchases: object,
+    ) -> tuple[str, Mapping[str, object], StoredDelivery]:
+        order_id, purchase = self._pending_host_target(host_purchases)
+        if self._target_order_id is not None and self._target_order_id != order_id:
+            raise HostAutoOfferIntegrationError("maintenance_target_changed")
+        host_db_id = _exact_db_id(purchase.get("_db_id"))
+        if host_db_id is None:
+            raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+        if (
+            self._target_host_db_id is not None
+            and self._target_host_db_id != host_db_id
+        ):
+            raise HostAutoOfferIntegrationError("maintenance_target_changed")
+        stored = self._store_target(order_id)
+        if self._target_order_id is None:
+            self._validate_initial_target(stored)
+            self._target_order_id = order_id
+            self._target_host_db_id = host_db_id
+        else:
+            self._validate_continuation_target(stored)
+        return order_id, purchase, stored
+
+    def _validate_read_result(
+        self,
+        current: StoredDelivery,
+        result: object,
+    ) -> tuple[AutoOfferResult, StoredDelivery]:
+        if type(result) is not ReadOnlyStepResult or result.before != current:
+            raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+        after = result.after
+        persisted = result.persisted
+        decision_result = result.decision.result
+        platform_result = result.platform_result
+        if (
+            type(after) is not StoredDelivery
+            or type(persisted) is not bool
+            or type(decision_result) is not AutoOfferResult
+            or type(platform_result) is not PlatformResult
+        ):
+            raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+        request = platform_result.request
+        expected_capability = {
+            DeliveryStatus.RESULT_UNKNOWN: PlatformCapability.READ_OFFER_STATE,
+            DeliveryStatus.OFFER_SENT: PlatformCapability.READ_STEAM_TRADE_OFFER,
+            DeliveryStatus.OFFER_CONFIRMATION_REQUIRED: PlatformCapability.READ_STEAM_TRADE_OFFER,
+            DeliveryStatus.OFFER_CONFIRMED: PlatformCapability.READ_STEAM_TRADE_OFFER,
+            DeliveryStatus.AWAITING_INVENTORY: PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+        }.get(current.snapshot.delivery_status)
+        if (
+            expected_capability is None
+            or request.capability is not expected_capability
+            or request.capability not in _RECOVERY_ONLY_CAPABILITIES
+            or request.purchase_id != current.snapshot.purchase_id
+            or request.buff_order_id != current.snapshot.buff_order_id
+            or request.account_id != current.snapshot.account_id
+            or request.recipient_steam_id != current.snapshot.recipient_steam_id
+            or request.revision != current.revision
+        ):
+            raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+        if request.capability is PlatformCapability.READ_OFFER_STATE:
+            request_bound_fields_valid = (
+                request.steam_tradeoffer_id is None
+                and request.counterparty_steam_id is None
+                and request.host_goods_id is None
+            )
+        else:
+            request_bound_fields_valid = (
+                request.steam_tradeoffer_id
+                == current.snapshot.steam_tradeoffer_id
+                and request.counterparty_steam_id is None
+                and request.host_goods_id is None
+            )
+        if not request_bound_fields_valid:
+            raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+        if request.capability in {
+            PlatformCapability.SEND_OFFER,
+            PlatformCapability.CONFIRM_OFFER,
+            PlatformCapability.ACCEPT_OFFER,
+        }:
+            raise HostAutoOfferIntegrationError("maintenance_write_capability_seen")
+        if decision_result is AutoOfferResult.BLOCKED:
+            if persisted or after != current:
+                raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+            return AutoOfferResult.BLOCKED, current
+        if not persisted:
+            if after != current or decision_result is not AutoOfferResult.WAITING:
+                raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+            result = (
+                AutoOfferResult.RESULT_UNKNOWN
+                if current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+                else AutoOfferResult.WAITING
+            )
+            return result, current
+        if after.revision != current.revision + 1:
+            raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+        if after.snapshot == current.snapshot:
+            raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+        if (
+            after.snapshot.purchase_id != current.snapshot.purchase_id
+            or after.snapshot.buff_order_id != current.snapshot.buff_order_id
+            or after.snapshot.account_id != current.snapshot.account_id
+            or after.snapshot.recipient_steam_id != current.snapshot.recipient_steam_id
+        ):
+            raise HostAutoOfferIntegrationError("maintenance_identity_changed")
+        current_status = current.snapshot.delivery_status
+        after_status = after.snapshot.delivery_status
+        allowed = {
+            DeliveryStatus.RESULT_UNKNOWN: {DeliveryStatus.OFFER_SENT},
+            DeliveryStatus.OFFER_SENT: {
+                DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+                DeliveryStatus.OFFER_CONFIRMED,
+            },
+            DeliveryStatus.OFFER_CONFIRMATION_REQUIRED: {
+                DeliveryStatus.OFFER_CONFIRMED,
+            },
+            DeliveryStatus.OFFER_CONFIRMED: {DeliveryStatus.AWAITING_INVENTORY},
+            DeliveryStatus.AWAITING_INVENTORY: {DeliveryStatus.RECEIVED},
+        }
+        if after_status not in allowed.get(current_status, set()):
+            raise HostAutoOfferIntegrationError("maintenance_transition_invalid")
+        self._validate_store_identity(after, current.snapshot.buff_order_id)
+        self._validate_continuation_target(after)
+        if after_status is DeliveryStatus.RECEIVED:
+            if decision_result is not AutoOfferResult.COMPLETE:
+                raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+            return AutoOfferResult.COMPLETE, after
+        if decision_result is not AutoOfferResult.WAITING:
+            raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
+        return AutoOfferResult.WAITING, after
+
+    def run_recovery_tick(
+        self,
+        host_purchases: object,
+        *,
+        cursor: str | None = None,
+    ) -> DeliveryTickOutcome:
+        """Run at most one exact read-derived maintenance transition."""
+
+        self._require_open()
+        if cursor is not None and _exact_order_id(cursor) is None:
+            return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
+        order_id: str | None = None
+        try:
+            order_id, _purchase, current = self._admit_target(host_purchases)
+            if current.snapshot.delivery_status is DeliveryStatus.RECEIVED:
+                return DeliveryTickOutcome(
+                    AutoOfferResult.COMPLETE,
+                    order_id,
+                    (order_id,),
+                )
+            if (
+                current.snapshot.delivery_status
+                is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+            ):
+                return DeliveryTickOutcome(
+                    AutoOfferResult.WAITING,
+                    order_id,
+                    (order_id,),
+                )
+            if current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
+                result = self._bridge.recover_result_unknown_readonly(current)
+            else:
+                result = self._bridge.step(current)
+            outcome, _after = self._validate_read_result(current, result)
+            return DeliveryTickOutcome(outcome, order_id, (order_id,))
+        except Exception:
+            return DeliveryTickOutcome(
+                AutoOfferResult.BLOCKED,
+                order_id if order_id is not None else cursor,
+                (order_id,) if order_id is not None else (),
+            )
+
+    def recover_existing_buyer_send(
+        self,
+        host_purchases: object,
+        *,
+        cursor: str | None = None,
+    ) -> DeliveryTickOutcome:
+        """Explicit alias for the one-target recovery tick."""
+
+        return self.run_recovery_tick(host_purchases, cursor=cursor)
+
+    def complete_host_receipt(self, host_purchases: object) -> bool:
+        """Complete one exact Host receipt only after Store reaches RECEIVED."""
+
+        self._require_open()
+        if self._receipt_completed:
+            return True
+        try:
+            order_id, purchase = self._receipt_host_target(host_purchases)
+            stored = self._store_target(order_id)
+            snapshot = stored.snapshot
+            if (
+                snapshot.delivery_status is not DeliveryStatus.RECEIVED
+                or snapshot.pending_receipt is not False
+                or _exact_assetid(snapshot.assetid) is None
+            ):
+                raise HostAutoOfferIntegrationError("maintenance_receipt_not_proven")
+            db_id = _exact_db_id(purchase.get("_db_id"))
+            if db_id is None:
+                raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+            if type(purchase.get("pending_receipt")) is not bool:
+                raise HostAutoOfferIntegrationError("invalid_host_pending_identity")
+            if (
+                self._target_host_db_id is not None
+                and db_id != self._target_host_db_id
+            ):
+                raise HostAutoOfferIntegrationError("maintenance_target_changed")
+            host_pending = purchase.get("pending_receipt") is True
+            host_asset = purchase.get("assetid")
+            if not host_pending:
+                if _exact_assetid(host_asset) != snapshot.assetid:
+                    raise HostAutoOfferIntegrationError("host_receipt_identity_mismatch")
+                self._receipt_completed = True
+                return True
+            if host_asset not in (None, ""):
+                raise HostAutoOfferIntegrationError("host_receipt_identity_mismatch")
+            writer = self._complete_purchase_receipt_by_id
+            if not callable(writer):
+                raise HostAutoOfferIntegrationError("receipt_writer_required")
+            completed = writer(db_id, order_id, snapshot.assetid)
+            if completed is not True:
+                raise HostAutoOfferIntegrationError("host_receipt_write_failed")
+            self._receipt_completed = True
+            return True
+        except HostAutoOfferIntegrationError:
+            raise
+        except Exception:
+            raise HostAutoOfferIntegrationError("host_receipt_write_failed") from None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._bridge.close()
+
+
+def build_host_recovery_only_maintenance(
+    *,
+    buff_client,
+    complete_purchase_receipt_by_id=None,
+    store_path: str | Path = _STORE_PATH,
+) -> HostRecoveryOnlyMaintenance:
+    """Build an explicit Host-owned recovery-only surface.
+
+    This builder is not connected to config, workers, pipeline, or normal
+    runtime startup.  Read construction needs only the exact Steam cookie;
+    mobile identity_secret is deliberately not inspected.
+    """
+
+    account_id, account_steam_id = _exact_current_account()
+    cookie_string = _steam_cookie_for_expected(account_steam_id)
+    try:
+        bridge = _build_recovery_only_host_auto_offer_bridge(
+            buff_client=buff_client,
+            account_id=account_id,
+            account_steam_id=account_steam_id,
+            steam_cookie_string=cookie_string,
+            store_path=store_path,
+        )
+        return HostRecoveryOnlyMaintenance(
+            bridge,
+            complete_purchase_receipt_by_id=complete_purchase_receipt_by_id,
+        )
+    except HostAutoOfferIntegrationError:
+        raise
+    except Exception:
+        raise HostAutoOfferIntegrationError(
+            "recovery_only_maintenance_build_failed"
+        ) from None
 
 
 class HostAutoOfferIntegration:
@@ -2569,8 +3244,10 @@ __all__ = [
     "DeliveryTickOutcome",
     "HostAutoOfferIntegration",
     "HostAutoOfferIntegrationError",
+    "HostRecoveryOnlyMaintenance",
     "MAX_DELIVERY_ORDERS_PER_TICK",
     "build_host_auto_offer_integration",
+    "build_host_recovery_only_maintenance",
     "is_auto_offer_enabled",
     "preflight_canary_permit",
 ]
