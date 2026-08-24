@@ -1,8 +1,8 @@
 """One-shot OWNER command for exact recovery-only Auto Offer maintenance.
 
 This module deliberately does not import the FastAPI app, task queue, workers,
-pipeline, or normal Auto Offer runtime.  ``preflight`` is local-only and
-zero-network.  ``execute`` first repeats the same local proof, then constructs
+pipeline, or normal Auto Offer runtime. ``preflight`` is local-only and
+zero-network. ``execute`` first repeats the same local proof, then constructs
 only the reviewed recovery-only Host facade.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -257,6 +258,58 @@ def _target_fingerprint(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _assert_exact_host_order_readonly(
+    host_db_path: Path,
+    *,
+    order_id: str,
+    expected_db_id: int,
+    expected_pending: bool,
+    expected_assetid: str | None,
+) -> None:
+    """Prove exact Host order multiplicity without creating or writing SQLite."""
+
+    try:
+        path = Path(host_db_path).expanduser().resolve(strict=True)
+        if path.is_symlink() or not path.is_file():
+            raise _fail("host_db_source_invalid")
+        connection = sqlite3.connect(
+            f"{path.as_uri()}?mode=ro&immutable=1",
+            uri=True,
+            timeout=5.0,
+            isolation_level=None,
+        )
+    except RecoveryCommandError:
+        raise
+    except (OSError, sqlite3.DatabaseError, RuntimeError, ValueError):
+        raise _fail("host_db_readonly_open_failed") from None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT id, pending_receipt, assetid FROM purchase "
+            "WHERE buff_order_id = ? ORDER BY id ASC",
+            (order_id,),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        raise _fail("host_exact_order_read_failed") from None
+    finally:
+        try:
+            connection.close()
+        except sqlite3.DatabaseError:
+            raise _fail("host_db_readonly_close_failed") from None
+
+    expected_pending_int = 1 if expected_pending else 0
+    if (
+        len(rows) != 1
+        or len(rows[0]) != 3
+        or type(rows[0][0]) is not int
+        or rows[0][0] != expected_db_id
+        or type(rows[0][1]) is not int
+        or rows[0][1] != expected_pending_int
+        or rows[0][2] != expected_assetid
+    ):
+        raise _fail("host_exact_order_identity_changed")
+
+
 def collect_recovery_preflight(
     *,
     expected_commit: str,
@@ -274,6 +327,13 @@ def collect_recovery_preflight(
     host = local.host_pending[0]
     if host.assetid is not None:
         raise _fail("host_target_asset_already_bound")
+    _assert_exact_host_order_readonly(
+        host_db_path,
+        order_id=host.buff_order_id,
+        expected_db_id=host.host_db_id,
+        expected_pending=True,
+        expected_assetid=None,
+    )
 
     rows = AutoOfferStore.inspect_existing(store_path)
     matches = [row for row in rows if row.snapshot.buff_order_id == host.buff_order_id]
@@ -381,6 +441,30 @@ def _valid_one_step(before: StoredDelivery, after: StoredDelivery) -> bool:
     )
 
 
+def _assert_binding_stable(binding: RecoveryTargetBinding) -> None:
+    """Recheck local authority immediately before each possible platform read."""
+
+    _verify_source(binding.source_commit, binding.source_tree)
+    _assert_exact_host_order_readonly(
+        _HOST_DB_PATH,
+        order_id=binding.order_id,
+        expected_db_id=binding.host_db_id,
+        expected_pending=True,
+        expected_assetid=None,
+    )
+    credentials = _credential_snapshot(
+        store_account_id=binding.account_id,
+        store_recipient_steam_id=binding.recipient_steam_id,
+    )
+    if credentials != (
+        binding.steam_cookie,
+        binding.buff_cookie,
+        binding.buff_user_agent,
+        binding.buff_generation,
+    ):
+        raise _fail("credential_snapshot_changed")
+
+
 def _verify_host_receipt(binding: RecoveryTargetBinding, assetid: str) -> bool:
     rows = [
         row
@@ -406,11 +490,13 @@ def execute_recovery(
     if binding.fingerprint != expected_fingerprint:
         raise _fail("target_fingerprint_mismatch")
 
+    _assert_binding_stable(binding)
     buff_client = _make_buff_client(binding)
     maintenance = None
     try:
         maintenance = _make_maintenance(buff_client)
         for tick in range(1, _MAX_TICKS + 1):
+            _assert_binding_stable(binding)
             before = _read_store_target(binding.order_id)
             if before.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED:
                 print(
@@ -457,6 +543,18 @@ def execute_recovery(
                     raise _fail("received_store_evidence_invalid")
                 if outcome.result is not AutoOfferResult.COMPLETE:
                     raise _fail("received_outcome_invalid")
+                _verify_source(binding.source_commit, binding.source_tree)
+                credentials = _credential_snapshot(
+                    store_account_id=binding.account_id,
+                    store_recipient_steam_id=binding.recipient_steam_id,
+                )
+                if credentials != (
+                    binding.steam_cookie,
+                    binding.buff_cookie,
+                    binding.buff_user_agent,
+                    binding.buff_generation,
+                ):
+                    raise _fail("credential_snapshot_changed")
                 if maintenance.complete_host_receipt(_host_rows()) is not True:
                     raise _fail("host_receipt_not_completed")
                 if not _verify_host_receipt(binding, assetid):
