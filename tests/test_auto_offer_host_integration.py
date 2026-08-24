@@ -10,13 +10,16 @@ import pytest
 import app.auto_offer.host_integration as host_integration
 import app.pipeline as pipeline
 from app.auto_offer.adapters import (
+    CompletedTradeItemEvidence,
     ConfirmOfferEvidence,
     OfferStateEvidence,
     PlatformCapability,
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
+    RecipientInventoryItemEvidence,
     SellerOrderItemEvidence,
+    SteamCompletedTradeEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
     TradeOfferItemEvidence,
@@ -482,6 +485,122 @@ class _ExactAdapter:
     def execute(self, request):
         self.calls.append(request)
         return self._execute(request)
+
+
+class RecoveryOnlyCoordinatorBridge:
+    """A real read-only Coordinator behind the maintenance façade tests."""
+
+    capabilities = host_integration._RECOVERY_ONLY_CAPABILITIES
+
+    def __init__(self, initial, *, steam_lifecycles=()):
+        self.account_id = initial.snapshot.account_id
+        self.recipient_steam_id = initial.snapshot.recipient_steam_id
+        self.current = {initial.snapshot.buff_order_id: initial}
+        self.events = []
+        self.steam_lifecycles = list(steam_lifecycles)
+        self.write_calls = []
+        self.buff_adapter = _ExactAdapter(
+            PlatformCapability.READ_OFFER_STATE,
+            lambda request: PlatformResult(
+                request,
+                PlatformResultStatus.SUCCESS,
+                evidence=OfferStateEvidence(
+                    f"offer-{initial.snapshot.buff_order_id}",
+                    "76561198000000002",
+                ),
+            ),
+        )
+        self.steam_adapter = _ExactAdapter(
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            self._read_steam_offer,
+        )
+        self.completed_adapter = _ExactAdapter(
+            PlatformCapability.READ_STEAM_COMPLETED_TRADE,
+            self._read_completed_trade,
+        )
+        self.coordinator = DeliveryCoordinator(
+            _CoordinatorBridgeStore(self),
+            {
+                PlatformCapability.READ_OFFER_STATE: self.buff_adapter,
+                PlatformCapability.READ_STEAM_TRADE_OFFER: self.steam_adapter,
+                PlatformCapability.READ_STEAM_COMPLETED_TRADE: self.completed_adapter,
+            },
+            timeout_seconds=5.0,
+            allow_writes=False,
+            allow_confirmation_writes=False,
+            allow_accept_writes=False,
+        )
+
+    def _read_steam_offer(self, request):
+        if not self.steam_lifecycles:
+            raise AssertionError("unexpected Steam offer read")
+        return PlatformResult(
+            request,
+            PlatformResultStatus.SUCCESS,
+            evidence=SteamTradeOfferEvidence(
+                steam_tradeoffer_id=request.steam_tradeoffer_id,
+                account_steam_id=self.recipient_steam_id,
+                counterparty_steam_id="76561198000000002",
+                is_our_offer=True,
+                lifecycle=self.steam_lifecycles.pop(0),
+                items_to_give=(),
+                items_to_receive=(
+                    TradeOfferItemEvidence(730, "2", "asset-offer-1", 1),
+                ),
+            ),
+        )
+
+    def _read_completed_trade(self, request):
+        item = CompletedTradeItemEvidence(
+            730,
+            "2",
+            "source-asset-1",
+            1,
+            "2",
+            "asset-received-1",
+        )
+        return PlatformResult(
+            request,
+            PlatformResultStatus.SUCCESS,
+            evidence=SteamCompletedTradeEvidence(
+                steam_tradeoffer_id=request.steam_tradeoffer_id,
+                steam_trade_id="trade-1",
+                account_steam_id=self.recipient_steam_id,
+                counterparty_steam_id="76561198000000002",
+                completed_at=2_000_000_000.0,
+                items_given=(),
+                items_received=(item,),
+                inventory_confirmed_items=(
+                    RecipientInventoryItemEvidence(730, "2", "asset-received-1", 1),
+                ),
+            ),
+        )
+
+    def list_recoverable(self):
+        return tuple(
+            item
+            for item in self.current.values()
+            if item.snapshot.delivery_status is not DeliveryStatus.RECEIVED
+        )
+
+    def get_by_purchase_id(self, purchase_id):
+        return next(
+            (
+                item
+                for item in self.current.values()
+                if item.snapshot.purchase_id == purchase_id
+            ),
+            None,
+        )
+
+    def recover_result_unknown_readonly(self, delivery):
+        return self.coordinator.recover_result_unknown_readonly(delivery)
+
+    def step(self, delivery):
+        return self.coordinator.step(delivery)
+
+    def close(self):
+        pass
 
 
 class ExactNormalConfirmationBridge(FakeBridge):
@@ -2621,3 +2740,262 @@ def test_task034_runtime_markers_remain_confined_to_existing_host_seam():
         ".execute(",
     ):
         assert marker not in host_source, f"{marker} found in host integration"
+
+
+def test_recovery_only_builder_constructs_zero_write_capability_without_identity_secret(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+
+    class CredentialsWithoutIdentitySecret(dict):
+        def get(self, key, default=None):
+            if key == "identity_secret":
+                raise AssertionError("recovery-only builder inspected identity_secret")
+            return super().get(key, default)
+
+    monkeypatch.setattr(
+        host_integration,
+        "get_steam_credentials",
+        lambda: CredentialsWithoutIdentitySecret(
+            steam_id=STEAM_ID,
+            cookies=COOKIE,
+        ),
+    )
+
+    class FakeSession:
+        verify = True
+
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeStore:
+        instances = []
+
+        def __init__(self, path):
+            self.path = path
+            self.closed = False
+            self.__class__.instances.append(self)
+
+        def initialize(self):
+            return None
+
+        def list_recoverable(self):
+            return []
+
+        def get_by_purchase_id(self, _purchase_id):
+            return None
+
+        def advance(self, *_args):
+            raise AssertionError("maintenance builder advanced Store during construction")
+
+        def close(self):
+            self.closed = True
+
+    class FakeReader:
+        def __init__(self, *_args, **_kwargs):
+            self.bound_account_steam_id = STEAM_ID
+
+        def __call__(self, *_args, **_kwargs):
+            raise AssertionError("builder performed Steam I/O")
+
+    class SpyCoordinator:
+        calls = []
+
+        def __init__(self, store, adapters, **kwargs):
+            self.__class__.calls.append(
+                {"store": store, "adapters": adapters, "kwargs": kwargs}
+            )
+
+    class ReadBuff:
+        def get_steam_trades(self):
+            raise AssertionError("builder performed BUFF I/O")
+
+    def bomb_writer_constructor(*_args, **_kwargs):
+        raise AssertionError("recovery-only builder constructed a platform writer")
+
+    monkeypatch.setattr(host_integration.requests, "Session", FakeSession)
+    monkeypatch.setattr(host_integration, "AutoOfferStore", FakeStore)
+    monkeypatch.setattr(host_integration, "SteamTradeOfferHttpReader", FakeReader)
+    monkeypatch.setattr(host_integration, "SteamCompletedTradeHttpReader", FakeReader)
+    monkeypatch.setattr(host_integration, "DeliveryCoordinator", SpyCoordinator)
+    for name in (
+        "BuffBuyerSendOfferAdapter",
+        "SteamTradeOfferConfirmationAdapter",
+        "SteamIncomingOfferAcceptAdapter",
+        "SteamTradeOfferConfirmationTransport",
+        "SteamIncomingOfferAcceptTransport",
+    ):
+        monkeypatch.setattr(host_integration, name, bomb_writer_constructor)
+
+    maintenance = host_integration.build_host_recovery_only_maintenance(
+        buff_client=ReadBuff(),
+        store_path=tmp_path / "maintenance.db",
+    )
+
+    assert len(SpyCoordinator.calls) == 1
+    call = SpyCoordinator.calls[0]
+    assert set(call["adapters"]) == host_integration._RECOVERY_ONLY_CAPABILITIES
+    assert call["kwargs"]["allow_writes"] is False
+    assert call["kwargs"]["allow_confirmation_writes"] is False
+    assert call["kwargs"]["allow_accept_writes"] is False
+    assert not set(call["adapters"]) & {
+        PlatformCapability.SEND_OFFER,
+        PlatformCapability.CONFIRM_OFFER,
+        PlatformCapability.ACCEPT_OFFER,
+    }
+
+    maintenance.close()
+    assert FakeStore.instances[0].closed is True
+
+
+def test_recovery_only_exact_admission_never_adopts_missing_or_unrelated_store_rows():
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = RecoveryOnlyCoordinatorBridge(unknown)
+    bridge.current.clear()
+    maintenance = host_integration.HostRecoveryOnlyMaintenance(bridge)
+
+    missing = maintenance.run_recovery_tick([_host_row("order-1")])
+    assert missing.result is AutoOfferResult.BLOCKED
+    assert bridge.buff_adapter.calls == []
+
+    bridge.current["order-1"] = unknown
+    bridge.current["order-2"] = _stored(
+        "order-2",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    unrelated = maintenance.run_recovery_tick(
+        [_host_row("order-1"), _host_row("order-2", db_id=2)]
+    )
+    assert unrelated.result is AutoOfferResult.BLOCKED
+    assert bridge.buff_adapter.calls == []
+
+
+def test_recovery_only_rejects_non_exact_initial_state_without_read_or_writer():
+    awaiting = _stored(
+        "order-1",
+        status=DeliveryStatus.AWAITING_OFFER,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+    )
+    bridge = RecoveryOnlyCoordinatorBridge(awaiting)
+    writer_calls = []
+    maintenance = host_integration.HostRecoveryOnlyMaintenance(
+        bridge,
+        complete_purchase_receipt_by_id=lambda *args: writer_calls.append(args) or True,
+    )
+
+    outcome = maintenance.recover_existing_buyer_send([_host_row("order-1")])
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert bridge.buff_adapter.calls == []
+    assert bridge.steam_adapter.calls == []
+    assert writer_calls == []
+
+
+@pytest.mark.parametrize(
+    "lifecycle",
+    [SteamTradeOfferLifecycle.ACCEPTED, SteamTradeOfferLifecycle.IN_ESCROW],
+)
+def test_recovery_only_external_completion_reaches_received_then_exact_host_receipt(
+    lifecycle,
+):
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = RecoveryOnlyCoordinatorBridge(
+        unknown,
+        steam_lifecycles=[lifecycle, lifecycle],
+    )
+    writer_calls = []
+    maintenance = host_integration.HostRecoveryOnlyMaintenance(
+        bridge,
+        complete_purchase_receipt_by_id=lambda *args: writer_calls.append(args) or True,
+    )
+    rows = [_host_row("order-1", db_id=41)]
+
+    first = maintenance.run_recovery_tick(rows)
+    assert first.result is AutoOfferResult.WAITING
+    assert bridge.current["order-1"].snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+
+    before_received = maintenance.complete_host_receipt
+    with pytest.raises(HostAutoOfferIntegrationError, match="receipt_not_proven"):
+        before_received(rows)
+    assert writer_calls == []
+
+    second = maintenance.run_recovery_tick(rows, cursor=first.next_cursor)
+    third = maintenance.run_recovery_tick(rows, cursor=second.next_cursor)
+    fourth = maintenance.run_recovery_tick(rows, cursor=third.next_cursor)
+
+    assert second.result is AutoOfferResult.WAITING
+    assert third.result is AutoOfferResult.WAITING
+    assert fourth.result is AutoOfferResult.COMPLETE
+    assert bridge.current["order-1"].snapshot.delivery_status is DeliveryStatus.RECEIVED
+    assert bridge.current["order-1"].snapshot.pending_receipt is False
+    assert bridge.current["order-1"].snapshot.assetid == "asset-received-1"
+
+    assert maintenance.complete_host_receipt(rows) is True
+    assert maintenance.complete_host_receipt(rows) is True
+    assert writer_calls == [(41, "order-1", "asset-received-1")]
+    assert bridge.buff_adapter.calls
+    assert len(bridge.steam_adapter.calls) == 2
+    assert len(bridge.completed_adapter.calls) == 1
+
+
+def test_recovery_only_confirmation_required_stops_without_confirm_constructor_or_execute(
+    monkeypatch,
+):
+    unknown = _stored(
+        "order-1",
+        status=DeliveryStatus.RESULT_UNKNOWN,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=3,
+    )
+    bridge = RecoveryOnlyCoordinatorBridge(
+        unknown,
+        steam_lifecycles=[SteamTradeOfferLifecycle.CREATED_NEEDS_CONFIRMATION],
+    )
+    maintenance = host_integration.HostRecoveryOnlyMaintenance(bridge)
+
+    def bomb_confirm(*_args, **_kwargs):
+        raise AssertionError("recovery-only path attempted CONFIRM")
+
+    monkeypatch.setattr(DeliveryCoordinator, "_step_confirm_offer", bomb_confirm)
+    original_execute = DeliveryCoordinator._execute
+
+    def guarded_execute(self, adapter, request):
+        if request.capability in {
+            PlatformCapability.SEND_OFFER,
+            PlatformCapability.CONFIRM_OFFER,
+            PlatformCapability.ACCEPT_OFFER,
+        }:
+            raise AssertionError("recovery-only path executed a writer")
+        return original_execute(self, adapter, request)
+
+    monkeypatch.setattr(DeliveryCoordinator, "_execute", guarded_execute)
+
+    first = maintenance.run_recovery_tick([_host_row("order-1")])
+    second = maintenance.run_recovery_tick([_host_row("order-1")])
+    third = maintenance.run_recovery_tick([_host_row("order-1")])
+
+    assert first.result is AutoOfferResult.WAITING
+    assert second.result is AutoOfferResult.WAITING
+    assert third.result is AutoOfferResult.WAITING
+    assert (
+        bridge.current["order-1"].snapshot.delivery_status
+        is DeliveryStatus.OFFER_CONFIRMATION_REQUIRED
+    )
+    assert bridge.steam_adapter.calls[-1].capability is PlatformCapability.READ_STEAM_TRADE_OFFER
+    assert len(bridge.steam_adapter.calls) == 1
