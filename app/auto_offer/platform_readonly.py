@@ -447,6 +447,44 @@ def _recipient_binding_failure(
     return None
 
 
+def _offer_state_from_exact_history_item(
+    item: Mapping[str, Any],
+    *,
+    buff_order_id: str,
+    recipient_steam_id: str,
+) -> OfferStateEvidence | _ReadFailure:
+    if _canonical_raw_identifier(item.get("id")) != buff_order_id:
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "identity_mismatch")
+    order_values = _canonical_order_values(item)
+    if order_values is None or (
+        order_values and buff_order_id not in order_values
+    ):
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+
+    recipient_failure = _recipient_binding_failure(item, recipient_steam_id)
+    if recipient_failure is not None:
+        return _ReadFailure(*recipient_failure)
+
+    offer_values = _canonical_alias_values(item, _TRADE_OFFER_FIELDS)
+    if offer_values is None:
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    if not offer_values:
+        return _ReadFailure(PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven")
+
+    try:
+        counterparty = seller_counterparty_from_exact_buff_record(item).steam_id
+    except CounterpartyEvidenceError as exc:
+        if str(exc) == "seller_steam_id_not_proven":
+            return _ReadFailure(PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven")
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+    if counterparty == recipient_steam_id:
+        return _ReadFailure(PlatformResultStatus.FAILURE, "identity_mismatch")
+    try:
+        return OfferStateEvidence(offer_values[0], counterparty)
+    except PlatformAdapterProtocolError:
+        return _ReadFailure(PlatformResultStatus.MALFORMED, "malformed_payload")
+
+
 def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
 
     direction_values = _identity_values(record, _DIRECTION_FIELDS)
@@ -756,6 +794,112 @@ class BuffReadOnlyAdapter:
             PlatformResultStatus.RESULT_UNKNOWN,
             "order_not_proven",
         )
+
+    def _execute_historical_offer_recovery(
+        self, request: PlatformRequest
+    ) -> PlatformResult:
+        reader = getattr(self._client, "get_buy_order_history_page", None)
+        if not callable(reader):
+            return _result(
+                request,
+                PlatformResultStatus.UNSUPPORTED,
+                "history_reader_not_available",
+            )
+
+        matches: list[Mapping[str, Any]] = []
+        for page_num in range(1, _MAX_BUFF_LIFECYCLE_PAGES + 1):
+            raw = _call_lifecycle_read(
+                lambda page_num=page_num: reader(page_num, "csgo")
+            )
+            if isinstance(raw, _ReadFailure):
+                return _result(request, raw.status, raw.detail)
+            parsed = _parse_buff_history_page(
+                raw,
+                expected_page_num=page_num,
+            )
+            if isinstance(parsed, _ReadFailure):
+                return _result(request, parsed.status, parsed.detail)
+
+            matches.extend(
+                item
+                for item in parsed.items
+                if _canonical_raw_identifier(item.get("id"))
+                == request.buff_order_id
+            )
+            if page_num >= parsed.total_page:
+                break
+
+        if len(matches) > 1:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "ambiguous_order",
+            )
+        if not matches:
+            return _result(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_not_proven",
+            )
+
+        evidence = _offer_state_from_exact_history_item(
+            matches[0],
+            buff_order_id=request.buff_order_id,
+            recipient_steam_id=request.recipient_steam_id,
+        )
+        if isinstance(evidence, _ReadFailure):
+            return _result(request, evidence.status, evidence.detail)
+        return _result(
+            request,
+            PlatformResultStatus.SUCCESS,
+            "offer_history_recovered",
+            evidence,
+        )
+
+    def _recover_result_unknown_offer_state(
+        self,
+        request: PlatformRequest,
+        current_result: PlatformResult,
+    ) -> PlatformResult:
+        """Recover one coordinator-approved unbound buyer result by exact history."""
+
+        request = _request_or_raise(request)
+        if type(current_result) is not PlatformResult:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "recovery_result_invalid",
+            )
+        try:
+            PlatformResult.__post_init__(current_result)
+        except Exception:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "recovery_result_invalid",
+            )
+        if current_result.request != request:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "recovery_result_invalid",
+            )
+        if (
+            request.capability is not PlatformCapability.READ_OFFER_STATE
+            or request.steam_tradeoffer_id is not None
+            or request.counterparty_steam_id is not None
+        ):
+            return current_result
+        if current_result.status in {
+            PlatformResultStatus.SUCCESS,
+            PlatformResultStatus.MALFORMED,
+        }:
+            return current_result
+        if current_result.status is PlatformResultStatus.FAILURE and (
+            current_result.detail != "network_failure"
+        ):
+            return current_result
+        return self._execute_historical_offer_recovery(request)
 
 
 def _inventory_evidence(payload: Mapping[str, Any]) -> InventoryStateEvidence | None:

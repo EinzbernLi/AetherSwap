@@ -25,6 +25,7 @@ from app.auto_offer.coordinator import (
     DeliveryCoordinator,
     ReadOnlyCoordinatorError,
 )
+from app.auto_offer.platform_readonly import BuffReadOnlyAdapter
 from app.auto_offer.reconciliation import plan_read_evidence_transition
 from app.auto_offer.store import StoredDelivery
 
@@ -127,6 +128,22 @@ class SpyAdapter:
         return self._result_factory(request)
 
 
+class HistoryClient:
+    def __init__(self, *, history_pages, steam_trades=None):
+        self.history_pages = history_pages
+        self.steam_trades = [] if steam_trades is None else steam_trades
+        self.steam_calls = 0
+        self.history_calls = []
+
+    def get_steam_trades(self):
+        self.steam_calls += 1
+        return self.steam_trades
+
+    def get_buy_order_history_page(self, page_num, game="csgo"):
+        self.history_calls.append((page_num, game))
+        return self.history_pages.get(page_num)
+
+
 class NeverSendAdapter:
     capabilities = frozenset({PlatformCapability.SEND_OFFER})
 
@@ -164,6 +181,31 @@ def unknown_offer_adapter():
             detail="order_not_proven",
         ),
     )
+
+
+def history_page(page_num=1, total_page=1, items=()):
+    return {
+        "code": "OK",
+        "data": {
+            "page_num": page_num,
+            "page_size": 10,
+            "total_page": total_page,
+            "items": list(items),
+        },
+    }
+
+
+def history_record(**changes):
+    value = {
+        "id": IDENTITY["buff_order_id"],
+        "buyer_steam_id": IDENTITY["recipient_steam_id"],
+        "seller_steam_id": "76561198000000002",
+        "tradeofferid": "history-offer-1",
+        "state": "SUCCESS",
+        "state_text": "已完成",
+    }
+    value.update(changes)
+    return value
 
 
 def test_planner_recovers_offer_attempted_from_exact_offer_evidence():
@@ -322,6 +364,207 @@ def test_coordinator_routes_result_unknown_to_read_and_never_resends():
     assert result.after.snapshot.steam_tradeoffer_id == "9102"
     assert result.after.snapshot.counterparty_steam_id == "76561198000000002"
     assert result.after.snapshot.delivery_error is None
+
+
+def test_coordinator_result_unknown_history_recovery_binds_exact_offer_without_send():
+    before = make_delivery(
+        DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    store = SpyStore(before)
+    client = HistoryClient(
+        history_pages={1: history_page(items=[history_record()])},
+    )
+    read_adapter = BuffReadOnlyAdapter(
+        client,
+        account_id=IDENTITY["account_id"],
+    )
+    send_adapter = NeverSendAdapter()
+    coordinator = DeliveryCoordinator(
+        store,
+        {
+            PlatformCapability.READ_OFFER_STATE: read_adapter,
+            PlatformCapability.SEND_OFFER: send_adapter,
+        },
+        timeout_seconds=5.0,
+        allow_writes=True,
+        clock=lambda: 14.0,
+    )
+
+    result = coordinator.recover_result_unknown_readonly(before)
+
+    assert result.persisted is True
+    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+    assert result.after.snapshot.steam_tradeoffer_id == "history-offer-1"
+    assert result.after.snapshot.counterparty_steam_id == "76561198000000002"
+    assert result.after.snapshot.offer_sent_at == 14.0
+    assert result.after.snapshot.delivery_error is None
+    assert client.steam_calls == 1
+    assert client.history_calls == [(1, "csgo")]
+    assert send_adapter.calls == []
+    assert len(store.advance_calls) == 1
+
+
+def test_history_recovery_continues_existing_steam_lifecycle_to_awaiting_inventory():
+    before = make_delivery(
+        DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    store = SpyStore(before)
+    client = HistoryClient(
+        history_pages={1: history_page(items=[history_record()])},
+    )
+    buff_adapter = BuffReadOnlyAdapter(
+        client,
+        account_id=IDENTITY["account_id"],
+    )
+
+    def accepted_trade_offer(request):
+        return PlatformResult(
+            request=request,
+            status=PlatformResultStatus.SUCCESS,
+            detail="trade_offer_read",
+            evidence=SteamTradeOfferEvidence(
+                steam_tradeoffer_id=request.steam_tradeoffer_id,
+                account_steam_id=IDENTITY["recipient_steam_id"],
+                counterparty_steam_id="76561198000000002",
+                is_our_offer=True,
+                lifecycle=SteamTradeOfferLifecycle.ACCEPTED,
+                items_to_give=(),
+                items_to_receive=(
+                    TradeOfferItemEvidence(
+                        appid=730,
+                        contextid="2",
+                        assetid="asset-source-1",
+                        amount=1,
+                    ),
+                ),
+            ),
+        )
+
+    steam_adapter = SpyAdapter(
+        PlatformCapability.READ_STEAM_TRADE_OFFER,
+        accepted_trade_offer,
+    )
+    send_adapter = NeverSendAdapter()
+    coordinator = DeliveryCoordinator(
+        store,
+        {
+            PlatformCapability.READ_OFFER_STATE: buff_adapter,
+            PlatformCapability.READ_STEAM_TRADE_OFFER: steam_adapter,
+            PlatformCapability.SEND_OFFER: send_adapter,
+        },
+        timeout_seconds=5.0,
+        allow_writes=True,
+        clock=lambda: 14.0,
+    )
+
+    recovered = coordinator.recover_result_unknown_readonly(before).after
+    confirmed = coordinator.step(recovered).after
+    awaiting_inventory = coordinator.step(confirmed)
+
+    assert recovered.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+    assert confirmed.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+    assert awaiting_inventory.after.snapshot.delivery_status is (
+        DeliveryStatus.AWAITING_INVENTORY
+    )
+    assert awaiting_inventory.after.snapshot.steam_tradeoffer_id == (
+        "history-offer-1"
+    )
+    assert len(steam_adapter.calls) == 2
+    assert client.history_calls == [(1, "csgo")]
+    assert send_adapter.calls == []
+
+
+def test_coordinator_history_recovery_is_not_used_for_seller_awaiting_offer():
+    seller_snapshot = DeliverySnapshot(
+        **IDENTITY,
+        delivery_mode=DeliveryMode.SELLER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.AWAITING_OFFER,
+        steam_tradeoffer_id=None,
+        offer_attempted_at=None,
+        offer_sent_at=None,
+        received_at=None,
+        delivery_error=None,
+        pending_receipt=True,
+        assetid=None,
+    )
+    validate_delivery_snapshot(seller_snapshot)
+    before = StoredDelivery(snapshot=seller_snapshot, revision=4)
+    store = SpyStore(before)
+    client = HistoryClient(
+        history_pages={1: history_page(items=[history_record()])},
+    )
+    read_adapter = BuffReadOnlyAdapter(
+        client,
+        account_id=IDENTITY["account_id"],
+    )
+    coordinator = DeliveryCoordinator(
+        store,
+        {PlatformCapability.READ_OFFER_STATE: read_adapter},
+        timeout_seconds=5.0,
+        clock=lambda: 15.0,
+    )
+
+    result = coordinator.step(before)
+
+    assert result.persisted is False
+    assert result.after == before
+    assert result.decision.detail == "read_result_unknown"
+    assert client.steam_calls == 1
+    assert client.history_calls == []
+    assert store.advance_calls == []
+
+
+def test_repeated_unresolved_history_recovery_never_sends_or_mutates():
+    before = make_delivery(
+        DeliveryStatus.RESULT_UNKNOWN,
+        delivery_error="write_result_unknown",
+    )
+    pages = {
+        page_num: history_page(page_num=page_num, total_page=9)
+        for page_num in range(1, 4)
+    }
+    store = SpyStore(before)
+    client = HistoryClient(history_pages=pages)
+    read_adapter = BuffReadOnlyAdapter(
+        client,
+        account_id=IDENTITY["account_id"],
+    )
+    send_adapter = NeverSendAdapter()
+    coordinator = DeliveryCoordinator(
+        store,
+        {
+            PlatformCapability.READ_OFFER_STATE: read_adapter,
+            PlatformCapability.SEND_OFFER: send_adapter,
+        },
+        timeout_seconds=5.0,
+        allow_writes=True,
+        clock=lambda: (_ for _ in ()).throw(
+            AssertionError("unresolved recovery must not read the clock")
+        ),
+    )
+
+    first = coordinator.recover_result_unknown_readonly(before)
+    second = coordinator.recover_result_unknown_readonly(before)
+
+    assert first.persisted is False
+    assert second.persisted is False
+    assert first.after == before
+    assert second.after == before
+    assert first.decision.detail == "read_result_unknown"
+    assert second.decision.detail == "read_result_unknown"
+    assert client.steam_calls == 2
+    assert client.history_calls == [
+        (1, "csgo"),
+        (2, "csgo"),
+        (3, "csgo"),
+        (1, "csgo"),
+        (2, "csgo"),
+        (3, "csgo"),
+    ]
+    assert store.advance_calls == []
+    assert send_adapter.calls == []
 
 
 def test_missing_offer_evidence_keeps_result_unknown_without_resend_or_write():

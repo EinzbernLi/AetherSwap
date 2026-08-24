@@ -243,6 +243,58 @@ def test_buff_client_facade_owns_wait_send_read_and_single_send(monkeypatch):
     ]
 
 
+def test_buff_client_history_facade_delegates_once_preserving_result_and_exception():
+    payload = {"code": "OK", "data": {"page_num": 2}}
+    calls = []
+
+    class FakeBuyer:
+        def get_buy_order_history_page(self, page_num, game):
+            calls.append((page_num, game))
+            return payload
+
+    fake_buyer = FakeBuyer()
+    client = object.__new__(BuffClient)
+    run_calls = []
+
+    def owned_run(operation):
+        run_calls.append(operation)
+        return operation(fake_buyer)
+
+    client._run = owned_run
+    before = dict(client.__dict__)
+
+    assert client.get_buy_order_history_page(2, "csgo") is payload
+    assert calls == [(2, "csgo")]
+    assert len(run_calls) == 1
+    assert client.__dict__ == before
+    assert payload == {"code": "OK", "data": {"page_num": 2}}
+
+    error_calls = []
+
+    class RaisingBuyer:
+        def get_buy_order_history_page(self, page_num, game):
+            error_calls.append((page_num, game))
+            raise RuntimeError("history failure")
+
+    raising_buyer = RaisingBuyer()
+    error_client = object.__new__(BuffClient)
+    error_run_calls = []
+
+    def owned_error_run(operation):
+        error_run_calls.append(operation)
+        return operation(raising_buyer)
+
+    error_client._run = owned_error_run
+    error_before = dict(error_client.__dict__)
+
+    with pytest.raises(RuntimeError, match="history failure"):
+        error_client.get_buy_order_history_page(3, "csgo")
+
+    assert error_calls == [(3, "csgo")]
+    assert len(error_run_calls) == 1
+    assert error_client.__dict__ == error_before
+
+
 def test_host_send_transport_uses_only_public_buff_facade_surface():
     calls = []
 
