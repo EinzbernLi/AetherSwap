@@ -58,13 +58,24 @@ def wait_send_request():
 
 
 class BuffStub:
-    def __init__(self, payload=None, error=None, wait_payload=None, wait_error=None):
+    def __init__(
+        self,
+        payload=None,
+        error=None,
+        wait_payload=None,
+        wait_error=None,
+        history_pages=None,
+        history_error=None,
+    ):
         self.payload = payload
         self.error = error
         self.calls = 0
         self.wait_payload = wait_payload
         self.wait_error = wait_error
         self.wait_calls = []
+        self.history_pages = history_pages or {}
+        self.history_error = history_error
+        self.history_calls = []
 
     def get_steam_trades(self):
         self.calls += 1
@@ -77,6 +88,12 @@ class BuffStub:
         if self.wait_error:
             raise self.wait_error
         return self.wait_payload
+
+    def get_buy_order_history_page(self, page_num, game="csgo"):
+        self.history_calls.append((page_num, game))
+        if self.history_error:
+            raise self.history_error
+        return self.history_pages.get(page_num)
 
 
 class InventoryStub:
@@ -125,6 +142,31 @@ def buff_record(**changes):
         "buyer_steam_id": "steam-1",
         "state": 1,
         "tradeofferid": "offer-1",
+    }
+    value.update(changes)
+    return value
+
+
+def history_page(page_num=1, total_page=1, items=()):
+    return {
+        "code": "OK",
+        "data": {
+            "page_num": page_num,
+            "page_size": 10,
+            "total_page": total_page,
+            "items": list(items),
+        },
+    }
+
+
+def history_record(**changes):
+    value = {
+        "id": "buff-order-1",
+        "buyer_steam_id": "steam-1",
+        "seller_steam_id": "76561198000000002",
+        "tradeofferid": "history-offer-1",
+        "state": "SUCCESS",
+        "state_text": "已完成",
     }
     value.update(changes)
     return value
@@ -831,6 +873,194 @@ def test_buff_offer_state_success_carries_exact_offer_and_same_record_seller():
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.evidence.steam_tradeoffer_id == "offer-1"
     assert result.evidence.counterparty_steam_id == "76561198000000002"
+
+
+def test_historical_offer_recovery_accepts_non_pending_exact_identity():
+    client = BuffStub(
+        [],
+        history_pages={1: history_page(items=[history_record()])},
+    )
+    exact_request = request()
+    adapter = buff_adapter(client)
+
+    current = adapter.execute(exact_request)
+    assert current.status is PlatformResultStatus.RESULT_UNKNOWN
+
+    recovered = adapter._recover_result_unknown_offer_state(
+        exact_request,
+        current,
+    )
+
+    assert recovered.status is PlatformResultStatus.SUCCESS
+    assert recovered.detail == "offer_history_recovered"
+    assert recovered.evidence == OfferStateEvidence(
+        "history-offer-1",
+        "76561198000000002",
+    )
+    assert client.calls == 1
+    assert client.history_calls == [(1, "csgo")]
+
+
+def test_current_pending_offer_recovery_does_not_read_history():
+    client = BuffStub(
+        [buff_record()],
+        history_pages={1: history_page(items=[history_record()])},
+    )
+
+    result = buff_adapter(client).execute(request())
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert client.calls == 1
+    assert client.history_calls == []
+
+
+def test_historical_offer_recovery_rejects_duplicate_exact_order_rows():
+    client = BuffStub(
+        [],
+        history_pages={
+            1: history_page(items=[history_record(), history_record()]),
+        },
+    )
+    exact_request = request()
+    adapter = buff_adapter(client)
+
+    recovered = adapter._recover_result_unknown_offer_state(
+        exact_request,
+        adapter.execute(exact_request),
+    )
+
+    assert recovered.status is PlatformResultStatus.MALFORMED
+    assert recovered.detail == "ambiguous_order"
+    assert recovered.evidence is None
+    assert client.history_calls == [(1, "csgo")]
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_status", "expected_detail"),
+    [
+        (
+            {"tradeofferid": None},
+            PlatformResultStatus.MALFORMED,
+            "malformed_payload",
+        ),
+        (
+            {
+                "tradeofferid": "history-offer-1",
+                "trade_offer_id": "different-offer",
+            },
+            PlatformResultStatus.MALFORMED,
+            "malformed_payload",
+        ),
+        (
+            {"buff_order_id": "buff-order-1", "bill_order_id": "other-order"},
+            PlatformResultStatus.MALFORMED,
+            "malformed_payload",
+        ),
+        (
+            {"buyer_steam_id": "other-recipient"},
+            PlatformResultStatus.FAILURE,
+            "identity_mismatch",
+        ),
+        (
+            {
+                "buyer_steam_id": "76561198000000001",
+                "seller_steam_id": "76561198000000001",
+            },
+            PlatformResultStatus.FAILURE,
+            "identity_mismatch",
+        ),
+    ],
+)
+def test_historical_offer_recovery_rejects_contradictory_or_mismatched_identity(
+    changes,
+    expected_status,
+    expected_detail,
+):
+    client = BuffStub(
+        [],
+        history_pages={1: history_page(items=[history_record(**changes)])},
+    )
+    exact_request = request()
+    if changes.get("seller_steam_id") == "76561198000000001":
+        exact_request = replace(
+            exact_request,
+            recipient_steam_id="76561198000000001",
+        )
+    adapter = buff_adapter(client)
+
+    recovered = adapter._recover_result_unknown_offer_state(
+        exact_request,
+        adapter.execute(exact_request),
+    )
+
+    assert recovered.status is expected_status
+    assert recovered.detail == expected_detail
+    assert recovered.evidence is None
+
+
+def test_historical_offer_recovery_missing_identity_stays_unknown():
+    missing_offer = history_record()
+    del missing_offer["tradeofferid"]
+    missing_counterparty = history_record()
+    del missing_counterparty["seller_steam_id"]
+
+    for item in (missing_offer, missing_counterparty):
+        client = BuffStub(
+            [],
+            history_pages={1: history_page(items=[item])},
+        )
+        exact_request = request()
+        adapter = buff_adapter(client)
+
+        recovered = adapter._recover_result_unknown_offer_state(
+            exact_request,
+            adapter.execute(exact_request),
+        )
+
+        assert recovered.status is PlatformResultStatus.RESULT_UNKNOWN
+        assert recovered.detail == "order_not_proven"
+        assert recovered.evidence is None
+
+
+def test_historical_offer_recovery_is_bounded_to_three_pages():
+    client = BuffStub(
+        [],
+        history_pages={
+            page: history_page(page_num=page, total_page=9)
+            for page in (1, 2, 3)
+        },
+    )
+    exact_request = request()
+    adapter = buff_adapter(client)
+
+    recovered = adapter._recover_result_unknown_offer_state(
+        exact_request,
+        adapter.execute(exact_request),
+    )
+
+    assert recovered.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert recovered.detail == "order_not_proven"
+    assert client.history_calls == [(1, "csgo"), (2, "csgo"), (3, "csgo")]
+
+
+def test_historical_offer_recovery_ignores_unrelated_purchase():
+    client = BuffStub(
+        [],
+        history_pages={
+            1: history_page(items=[history_record(id="unrelated-order")]),
+        },
+    )
+    exact_request = request()
+    adapter = buff_adapter(client)
+
+    recovered = adapter._recover_result_unknown_offer_state(
+        exact_request,
+        adapter.execute(exact_request),
+    )
+
+    assert recovered.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert recovered.detail == "order_not_proven"
+    assert recovered.evidence is None
 
 
 @pytest.mark.parametrize(

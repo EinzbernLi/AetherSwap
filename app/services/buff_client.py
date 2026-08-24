@@ -204,6 +204,15 @@ class BuffClient:
     def get_steam_trades(self) -> Optional[list]:
         return self._run(lambda buyer: buyer.get_steam_trades())
 
+    def get_buy_order_history_page(
+        self, page_num: int, game: str = "csgo"
+    ) -> dict:
+        """Read one bounded BUFF buy-order history page through the facade."""
+
+        return self._run(
+            lambda buyer: buyer.get_buy_order_history_page(page_num, game)
+        )
+
     def get_buy_orders_waiting_to_send_offer(
         self, game: str = "csgo", appid: int = 730
     ) -> Optional[list]:
