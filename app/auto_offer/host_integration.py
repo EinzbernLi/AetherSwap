@@ -1017,7 +1017,7 @@ def _build_recovery_only_host_auto_offer_bridge(
             raise HostAutoOfferIntegrationError("steam_tls_verification_disabled")
 
         store = AutoOfferStore(store_path)
-        store.initialize()
+        store.initialize_existing()
 
         timeout = (_TIMEOUT_SECONDS, _TIMEOUT_SECONDS)
         trade_offer_reader = SteamTradeOfferHttpReader(

@@ -2778,10 +2778,14 @@ def test_recovery_only_builder_constructs_zero_write_capability_without_identity
         def __init__(self, path):
             self.path = path
             self.closed = False
+            self.existing_initialized = False
             self.__class__.instances.append(self)
 
         def initialize(self):
-            return None
+            raise AssertionError("recovery-only builder called normal initialize")
+
+        def initialize_existing(self):
+            self.existing_initialized = True
 
         def list_recoverable(self):
             return []
@@ -2850,6 +2854,37 @@ def test_recovery_only_builder_constructs_zero_write_capability_without_identity
 
     maintenance.close()
     assert FakeStore.instances[0].closed is True
+    assert FakeStore.instances[0].existing_initialized is True
+
+
+def test_recovery_only_builder_missing_store_fails_without_creating_source(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_identity(monkeypatch)
+
+    class FakeSession:
+        verify = True
+
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(host_integration.requests, "Session", FakeSession)
+    path = tmp_path / "missing" / "nested" / "auto_offer.db"
+
+    with pytest.raises(HostAutoOfferIntegrationError):
+        host_integration.build_host_recovery_only_maintenance(
+            buff_client=object(),
+            store_path=path,
+        )
+
+    assert not path.exists()
+    assert not path.parent.exists()
+    for suffix in ("-wal", "-shm", "-journal"):
+        assert not Path(f"{path}{suffix}").exists()
 
 
 def test_recovery_only_exact_admission_never_adopts_missing_or_unrelated_store_rows():
