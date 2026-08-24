@@ -73,6 +73,29 @@ def _run(monkeypatch, current, final):
     return result, client, adapter
 
 
+def _history_payload(items, *, page_num=1, page_size=10, total_page=1):
+    return {
+        "code": "OK",
+        "data": {
+            "page_num": page_num,
+            "page_size": page_size,
+            "total_page": total_page,
+            "items": items,
+        },
+    }
+
+
+def _exact_item(**overrides):
+    item = {
+        "id": "order-1",
+        "buyer_steamid": "76561198000000000",
+        "tradeofferid": "123456",
+        "seller_steam_id": "76561198000000001",
+    }
+    item.update(overrides)
+    return item
+
+
 def test_malformed_current_read_does_not_claim_history_fallback(monkeypatch):
     result, client, adapter = _run(
         monkeypatch,
@@ -82,6 +105,7 @@ def test_malformed_current_read_does_not_claim_history_fallback(monkeypatch):
     assert result.current_status is PlatformResultStatus.MALFORMED
     assert result.final_detail == "malformed_payload"
     assert result.history_fallback_used is False
+    assert result.history_schema_trace == ()
     assert len(adapter.requests) == 1
     assert client.closed is True
 
@@ -108,6 +132,82 @@ def test_auth_failure_does_not_claim_history_fallback(monkeypatch):
     assert result.final_status is PlatformResultStatus.FAILURE
     assert result.final_detail == "auth_failed"
     assert result.history_fallback_used is False
+
+
+def test_history_schema_trace_accepts_exact_shape_without_raw_values():
+    code = diagnostic._classify_history_payload(
+        _history_payload([_exact_item()]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:target_fields_shape_valid"
+    assert "order-1" not in code
+    assert "765611" not in code
+
+
+def test_history_schema_trace_pinpoints_page_envelope_mismatch():
+    code = diagnostic._classify_history_payload(
+        _history_payload([], page_size="10"),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:page_size_mismatch_or_type"
+
+
+def test_history_schema_trace_pinpoints_unrelated_invalid_item_id():
+    code = diagnostic._classify_history_payload(
+        _history_payload([{"id": None}, _exact_item()]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:item_id_invalid"
+
+
+def test_history_schema_trace_pinpoints_tradeoffer_alias_conflict():
+    code = diagnostic._classify_history_payload(
+        _history_payload([_exact_item(trade_offer_id="654321")]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:target_tradeoffer_alias_invalid"
+
+
+def test_history_schema_trace_pinpoints_seller_field_invalidity():
+    code = diagnostic._classify_history_payload(
+        _history_payload([_exact_item(seller_steam_id=76561198000000001)]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:target_seller_alias_invalid"
+
+
+def test_history_schema_trace_distinguishes_missing_target():
+    code = diagnostic._classify_history_payload(
+        _history_payload([{"id": "other-order"}]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:valid_no_target"
+
+
+def test_tracing_client_records_only_sanitized_schema_code():
+    class Client:
+        def get_steam_trades(self):
+            return []
+
+        def get_buy_order_history_page(self, page_num, game="csgo"):
+            return _history_payload([_exact_item()], page_num=page_num)
+
+    traced = diagnostic._TracingBuffClient(Client(), _binding())
+    payload = traced.get_buy_order_history_page(1, "csgo")
+    assert payload["code"] == "OK"
+    assert traced.history_schema_trace == ["p1:target_fields_shape_valid"]
 
 
 def test_main_fingerprint_mismatch_stops_before_live_diagnostic(monkeypatch, capsys):
