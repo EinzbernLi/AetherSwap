@@ -52,6 +52,20 @@ def _request(binding: RecoveryTargetBinding) -> PlatformRequest:
     )
 
 
+def _history_fallback_used(current: PlatformResult) -> bool:
+    if current.status in {
+        PlatformResultStatus.SUCCESS,
+        PlatformResultStatus.MALFORMED,
+    }:
+        return False
+    if (
+        current.status is PlatformResultStatus.FAILURE
+        and current.detail != "network_failure"
+    ):
+        return False
+    return True
+
+
 def diagnose_buff_read(binding: RecoveryTargetBinding) -> BuffRecoveryDiagnostic:
     """Run only the BUFF read portion of RESULT_UNKNOWN identity recovery."""
 
@@ -66,6 +80,7 @@ def diagnose_buff_read(binding: RecoveryTargetBinding) -> BuffRecoveryDiagnostic
         recover = getattr(adapter, "_recover_result_unknown_offer_state", None)
         if not callable(recover):
             raise RecoveryCommandError("buff_diagnostic_recovery_unavailable")
+        fallback_used = _history_fallback_used(current)
         final = recover(request, current)
         if type(final) is not PlatformResult:
             raise RecoveryCommandError("buff_diagnostic_result_invalid")
@@ -75,7 +90,7 @@ def diagnose_buff_read(binding: RecoveryTargetBinding) -> BuffRecoveryDiagnostic
             current_detail=current.detail,
             final_status=final.status,
             final_detail=final.detail,
-            history_fallback_used=final != current,
+            history_fallback_used=fallback_used,
         )
     finally:
         try:
