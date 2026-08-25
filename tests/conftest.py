@@ -33,6 +33,7 @@ def isolate_host_runtime_state(tmp_path_factory: pytest.TempPathFactory):
         "_GUARD_PATH",
         Path(state_dir) / "buff_checkout_guard.json",
     )
+    database.init_db()
     try:
         yield
     finally:
