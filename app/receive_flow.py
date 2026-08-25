@@ -4,6 +4,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 from app.auto_offer.canary_authority import CanaryAuthorityError, external_write_guard
+from app.auto_offer.host_ownership import (
+    HostPurchaseOwnership,
+    classify_host_purchases,
+)
 from buff import BuffAuthExpired, BuffRequestBlocked
 from utils.delay import jittered_sleep
 try:
@@ -216,6 +220,41 @@ def _match_purchase_for_item(
     if len(name_candidates) != 1:
         return None
     return name_candidates[0]
+
+
+def _legacy_pending_records(
+    purchases: List[dict],
+) -> Optional[List[dict]]:
+    """Classify a Host snapshot before legacy receive can use or mutate it."""
+    try:
+        decisions = classify_host_purchases(purchases)
+    except Exception:
+        return None
+    if len(decisions) != len(purchases):
+        return None
+
+    known_ownership = {
+        HostPurchaseOwnership.UNOWNED,
+        HostPurchaseOwnership.MANAGED,
+        HostPurchaseOwnership.RECEIPT_PENDING,
+        HostPurchaseOwnership.RELEASED,
+    }
+    if any(
+        getattr(decision, "ownership", None) not in known_ownership
+        for decision in decisions
+    ):
+        return None
+
+    return [
+        purchase
+        for purchase, decision in zip(purchases, decisions)
+        if decision.ownership is HostPurchaseOwnership.UNOWNED
+        and purchase.get("pending_receipt")
+        and not purchase.get("assetid")
+        and purchase.get("_db_id")
+    ]
+
+
 def try_receive_once(
     get_purchases: Callable[[], List[dict]],
     update_purchase: Callable[[int, dict], bool],
@@ -232,11 +271,8 @@ def try_receive_once(
     is not supplied (backward-compatibility).
     """
     purchases = get_purchases()
-    pending_records: List[dict] = [
-        p for p in purchases
-        if p.get("pending_receipt") and not p.get("assetid") and p.get("_db_id")
-    ]
-    if not pending_records:
+    pending_records = _legacy_pending_records(purchases)
+    if pending_records is None or not pending_records:
         return 0
     buff_client = get_buff_client()
     steam_cred = get_steam_credentials()
@@ -266,10 +302,9 @@ def try_receive_once(
         # Steam trade offer.  A mixed or incomplete offer must stay pending
         # instead of disappearing before we know which rows it belongs to.
         purchases = get_purchases()
-        pending_records = [
-            p for p in purchases
-            if p.get("pending_receipt") and not p.get("assetid") and p.get("_db_id")
-        ]
+        pending_records = _legacy_pending_records(purchases)
+        if pending_records is None:
+            return 0
         assigned_db_ids: set = set()
         pairs: List[Tuple[dict, dict]] = []
         task_items = task.get("items") or []
@@ -307,7 +342,14 @@ def try_receive_once(
         accept_result = accept_steam_trade_offer(str(offer_id), steam_cookies)
         if accept_result is False:
             continue
-        already_used = {str(p.get("assetid")) for p in get_purchases() if p.get("assetid")}
+        purchases = get_purchases()
+        post_accept_pending = _legacy_pending_records(purchases)
+        if post_accept_pending is None:
+            return 0
+        eligible_db_ids = {
+            p.get("_db_id") for p in post_accept_pending if p.get("_db_id")
+        }
+        already_used = {str(p.get("assetid")) for p in purchases if p.get("assetid")}
         inv_by_name: Dict[str, List[dict]] = {}
         required_by_name = Counter(
             (it.get("market_hash_name") or "").strip()
@@ -364,6 +406,8 @@ def try_receive_once(
                     break
             if our_assetid:
                 db_id = purchase_rec.get("_db_id") or 0
+                if db_id not in eligible_db_ids:
+                    continue
                 pos_idx = next(
                     (i for i, p in enumerate(purchases) if p.get("_db_id") == db_id),
                     -1,
