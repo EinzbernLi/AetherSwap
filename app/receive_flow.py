@@ -168,6 +168,38 @@ def accept_steam_trade_offer(
         return False
     except Exception:
         return None
+def _normalized_goods_id(value: object) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _purchase_could_match_item(item: dict, purchase: dict) -> bool:
+    """Return whether one pending row is identity-compatible with an item."""
+    if not purchase.get("_db_id") or purchase.get("assetid"):
+        return False
+    item_goods_id = _normalized_goods_id(item.get("goods_id"))
+    purchase_goods_id = _normalized_goods_id(purchase.get("goods_id"))
+    if item_goods_id is not None and purchase_goods_id is not None:
+        return item_goods_id == purchase_goods_id
+    item_name = (item.get("market_hash_name") or item.get("name") or "").strip()
+    purchase_name = (purchase.get("name") or "").strip()
+    return bool(item_name and purchase_name and item_name == purchase_name)
+
+
+def _has_protected_pending_match(
+    task_items: List[dict],
+    protected_records: List[dict],
+) -> bool:
+    """Return true when any task item could match any protected pending row."""
+    return any(
+        _purchase_could_match_item(item, purchase)
+        for item in task_items
+        for purchase in protected_records
+    )
+
+
 def _match_purchase_for_item(
     item: dict,
     pending_purchases: List[dict],
@@ -325,10 +357,7 @@ def try_receive_once(
         assigned_db_ids: set = set()
         pairs: List[Tuple[dict, dict]] = []
         task_items = task.get("items") or []
-        if any(
-            _match_purchase_for_item(item, protected_records, set()) is not None
-            for item in task_items
-        ):
+        if _has_protected_pending_match(task_items, protected_records):
             continue
         for it in task_items:
             matched = _match_purchase_for_item(
@@ -369,7 +398,9 @@ def try_receive_once(
         purchase_sets = _legacy_purchase_sets(purchases)
         if purchase_sets is None:
             return 0
-        revalidated_pending, _ = purchase_sets
+        revalidated_pending, revalidated_protected = purchase_sets
+        if _has_protected_pending_match(task_items, revalidated_protected):
+            continue
         revalidated_by_db_id = {
             p.get("_db_id"): p for p in revalidated_pending
         }

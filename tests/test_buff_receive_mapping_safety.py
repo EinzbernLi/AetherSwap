@@ -112,18 +112,20 @@ def test_mixed_same_item_rows_are_rejected_as_ambiguous(monkeypatch):
     purchases = [
         _legacy_purchase(1),
         _legacy_purchase(2),
+        _legacy_purchase(3),
     ]
     calls = []
     task = {
         "tradeofferid": "offer-ambiguous",
         "created_at": 100,
-        "items": [{"goods_id": 42, "market_hash_name": ITEM_NAME}],
+        "items": [{"market_hash_name": ITEM_NAME}],
     }
 
     def classify(rows):
         return [
             SimpleNamespace(ownership=HostPurchaseOwnership.UNOWNED),
             SimpleNamespace(ownership=HostPurchaseOwnership.MANAGED),
+            SimpleNamespace(ownership=HostPurchaseOwnership.RECEIPT_PENDING),
         ]
 
     def scan_inventory():
@@ -273,9 +275,12 @@ def test_reclassified_protected_row_is_not_accepted(monkeypatch):
 
 
 def test_ownership_flip_during_baseline_inventory_blocks_accept(monkeypatch):
-    purchases = [_legacy_purchase()]
+    purchases = [
+        _legacy_purchase(1),
+        _legacy_purchase(2, goods_id=999),
+    ]
     calls = []
-    ownership = {"value": HostPurchaseOwnership.UNOWNED}
+    ownership = {"value": False}
     task = {
         "tradeofferid": "offer-baseline-race",
         "created_at": 100,
@@ -285,7 +290,16 @@ def test_ownership_flip_during_baseline_inventory_blocks_accept(monkeypatch):
     monkeypatch.setattr(
         receive_flow,
         "classify_host_purchases",
-        lambda rows: _ownership_decisions(rows, ownership["value"]),
+        lambda rows: [
+            SimpleNamespace(ownership=HostPurchaseOwnership.UNOWNED),
+            SimpleNamespace(
+                ownership=(
+                    HostPurchaseOwnership.MANAGED
+                    if ownership["value"]
+                    else HostPurchaseOwnership.UNOWNED
+                )
+            ),
+        ],
     )
     monkeypatch.setattr(
         receive_flow,
@@ -300,11 +314,14 @@ def test_ownership_flip_during_baseline_inventory_blocks_accept(monkeypatch):
 
     def scan_inventory():
         calls.append("inventory")
-        ownership["value"] = HostPurchaseOwnership.MANAGED
+        ownership["value"] = True
         return True, [], ""
 
     received = receive_flow.try_receive_once(
-        get_purchases=lambda: [dict(row) for row in purchases],
+        get_purchases=lambda: [
+            dict(row, goods_id=(42 if ownership["value"] and row["_db_id"] == 2 else row["goods_id"]))
+            for row in purchases
+        ],
         update_purchase=lambda *_args, **_kwargs: calls.append("host-update") or True,
         get_buff_client=lambda: object(),
         get_steam_credentials=lambda: {
