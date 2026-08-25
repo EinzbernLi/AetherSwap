@@ -222,10 +222,14 @@ def _match_purchase_for_item(
     return name_candidates[0]
 
 
-def _legacy_pending_records(
+def _legacy_purchase_sets(
     purchases: List[dict],
-) -> Optional[List[dict]]:
-    """Classify a Host snapshot before legacy receive can use or mutate it."""
+) -> Optional[Tuple[List[dict], List[dict]]]:
+    """Classify a Host snapshot before legacy receive can use or mutate it.
+
+    Protected pending rows stay visible to the mapping ambiguity fence, but
+    never become legacy mutation candidates.
+    """
     try:
         decisions = classify_host_purchases(purchases)
     except Exception:
@@ -245,14 +249,23 @@ def _legacy_pending_records(
     ):
         return None
 
-    return [
-        purchase
+    pending = [
+        (purchase, decision.ownership)
         for purchase, decision in zip(purchases, decisions)
-        if decision.ownership is HostPurchaseOwnership.UNOWNED
-        and purchase.get("pending_receipt")
+        if purchase.get("pending_receipt")
         and not purchase.get("assetid")
         and purchase.get("_db_id")
     ]
+    return (
+        [purchase for purchase, ownership in pending
+         if ownership is HostPurchaseOwnership.UNOWNED],
+        [purchase for purchase, ownership in pending
+         if ownership in {
+             HostPurchaseOwnership.MANAGED,
+             HostPurchaseOwnership.RECEIPT_PENDING,
+             HostPurchaseOwnership.RELEASED,
+         }],
+    )
 
 
 def try_receive_once(
@@ -271,8 +284,11 @@ def try_receive_once(
     is not supplied (backward-compatibility).
     """
     purchases = get_purchases()
-    pending_records = _legacy_pending_records(purchases)
-    if pending_records is None or not pending_records:
+    purchase_sets = _legacy_purchase_sets(purchases)
+    if purchase_sets is None:
+        return 0
+    pending_records, _ = purchase_sets
+    if not pending_records:
         return 0
     buff_client = get_buff_client()
     steam_cred = get_steam_credentials()
@@ -302,12 +318,18 @@ def try_receive_once(
         # Steam trade offer.  A mixed or incomplete offer must stay pending
         # instead of disappearing before we know which rows it belongs to.
         purchases = get_purchases()
-        pending_records = _legacy_pending_records(purchases)
-        if pending_records is None:
+        purchase_sets = _legacy_purchase_sets(purchases)
+        if purchase_sets is None:
             return 0
+        pending_records, protected_records = purchase_sets
         assigned_db_ids: set = set()
         pairs: List[Tuple[dict, dict]] = []
         task_items = task.get("items") or []
+        if any(
+            _match_purchase_for_item(item, protected_records, set()) is not None
+            for item in task_items
+        ):
+            continue
         for it in task_items:
             matched = _match_purchase_for_item(
                 it,
@@ -339,13 +361,44 @@ def try_receive_once(
             if inv_item.get("assetid")
         }
 
+        # Ownership may change while the baseline inventory request is in
+        # flight.  Re-read and reclassify immediately before the irreversible
+        # ACCEPT, and require every mapped row to remain the same eligible
+        # legacy pending record.
+        purchases = get_purchases()
+        purchase_sets = _legacy_purchase_sets(purchases)
+        if purchase_sets is None:
+            return 0
+        revalidated_pending, _ = purchase_sets
+        revalidated_by_db_id = {
+            p.get("_db_id"): p for p in revalidated_pending
+        }
+        mapped_rows_still_eligible = True
+        for purchase_rec, _ in pairs:
+            current = revalidated_by_db_id.get(purchase_rec.get("_db_id"))
+            if current is None or any(
+                current.get(field) != purchase_rec.get(field)
+                for field in (
+                    "_db_id",
+                    "goods_id",
+                    "name",
+                    "pending_receipt",
+                    "assetid",
+                )
+            ):
+                mapped_rows_still_eligible = False
+                break
+        if not mapped_rows_still_eligible:
+            continue
+
         accept_result = accept_steam_trade_offer(str(offer_id), steam_cookies)
         if accept_result is False:
             continue
         purchases = get_purchases()
-        post_accept_pending = _legacy_pending_records(purchases)
-        if post_accept_pending is None:
+        post_accept_sets = _legacy_purchase_sets(purchases)
+        if post_accept_sets is None:
             return 0
+        post_accept_pending, _ = post_accept_sets
         eligible_db_ids = {
             p.get("_db_id") for p in post_accept_pending if p.get("_db_id")
         }

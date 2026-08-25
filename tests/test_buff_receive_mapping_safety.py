@@ -108,10 +108,62 @@ def test_unavailable_ownership_classification_fails_closed_before_side_effects(
     assert calls == []
 
 
-def test_mixed_legacy_and_managed_rows_only_legacy_row_can_be_received(monkeypatch):
+def test_mixed_same_item_rows_are_rejected_as_ambiguous(monkeypatch):
     purchases = [
         _legacy_purchase(1),
         _legacy_purchase(2),
+    ]
+    calls = []
+    task = {
+        "tradeofferid": "offer-ambiguous",
+        "created_at": 100,
+        "items": [{"goods_id": 42, "market_hash_name": ITEM_NAME}],
+    }
+
+    def classify(rows):
+        return [
+            SimpleNamespace(ownership=HostPurchaseOwnership.UNOWNED),
+            SimpleNamespace(ownership=HostPurchaseOwnership.MANAGED),
+        ]
+
+    def scan_inventory():
+        calls.append("inventory")
+        return True, [], ""
+
+    monkeypatch.setattr(receive_flow, "classify_host_purchases", classify)
+    monkeypatch.setattr(
+        receive_flow,
+        "fetch_buff_steam_trade",
+        lambda _client: calls.append("buff-fetch") or (True, [task], ""),
+    )
+    monkeypatch.setattr(
+        receive_flow,
+        "accept_steam_trade_offer",
+        lambda *_args, **_kwargs: calls.append("accept") or True,
+    )
+
+    received = receive_flow.try_receive_once(
+        get_purchases=lambda: [dict(row) for row in purchases],
+        update_purchase=lambda *_args, **_kwargs: False,
+        get_buff_client=lambda: calls.append("buff-client") or object(),
+        get_steam_credentials=lambda: calls.append("credentials") or {
+            "cookies": "steamLoginSecure=secure; sessionid=session",
+        },
+        scan_inventory=scan_inventory,
+        update_purchase_by_id=lambda *_args, **_kwargs: calls.append("host-update") or True,
+    )
+
+    assert received == 0
+    assert "inventory" not in calls
+    assert "accept" not in calls
+    assert "host-update" not in calls
+    assert not purchases[1].get("assetid")
+
+
+def test_mixed_distinct_goods_rows_allow_unowned_legacy_receive(monkeypatch):
+    purchases = [
+        _legacy_purchase(1),
+        _legacy_purchase(2, goods_id=999),
     ]
     calls = []
     accepted = {"value": False}
@@ -218,6 +270,52 @@ def test_reclassified_protected_row_is_not_accepted(monkeypatch):
     assert received == 0
     assert "accept" not in calls
     assert "inventory" not in calls
+
+
+def test_ownership_flip_during_baseline_inventory_blocks_accept(monkeypatch):
+    purchases = [_legacy_purchase()]
+    calls = []
+    ownership = {"value": HostPurchaseOwnership.UNOWNED}
+    task = {
+        "tradeofferid": "offer-baseline-race",
+        "created_at": 100,
+        "items": [{"goods_id": 42, "market_hash_name": ITEM_NAME}],
+    }
+
+    monkeypatch.setattr(
+        receive_flow,
+        "classify_host_purchases",
+        lambda rows: _ownership_decisions(rows, ownership["value"]),
+    )
+    monkeypatch.setattr(
+        receive_flow,
+        "fetch_buff_steam_trade",
+        lambda _client: (True, [task], ""),
+    )
+    monkeypatch.setattr(
+        receive_flow,
+        "accept_steam_trade_offer",
+        lambda *_args, **_kwargs: calls.append("accept") or True,
+    )
+
+    def scan_inventory():
+        calls.append("inventory")
+        ownership["value"] = HostPurchaseOwnership.MANAGED
+        return True, [], ""
+
+    received = receive_flow.try_receive_once(
+        get_purchases=lambda: [dict(row) for row in purchases],
+        update_purchase=lambda *_args, **_kwargs: calls.append("host-update") or True,
+        get_buff_client=lambda: object(),
+        get_steam_credentials=lambda: {
+            "cookies": "steamLoginSecure=secure; sessionid=session",
+        },
+        scan_inventory=scan_inventory,
+        update_purchase_by_id=lambda *_args, **_kwargs: calls.append("host-update") or True,
+    )
+
+    assert received == 0
+    assert calls == ["inventory"]
 
 
 def test_accept_timeout_is_unknown_and_non_idempotent_post_is_not_retried(
