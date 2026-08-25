@@ -16,7 +16,6 @@ from app.pipeline_context import PipelineContext
 from app.services.account_region import refresh_account_region_currency
 from app.strategy_engine import apply_strategy_to_config, evaluate_strategy_runtime_modules
 from app.state import get_state, append_sale
-from app.steam_confirm import auto_confirm_once
 from app.steam_listings import fetch_my_listings
 from steam.market import list_item, parse_sell_response
 from steam.market_orders import compute_smart_list_price, get_sell_orders_cny
@@ -582,28 +581,16 @@ def _submit_listings(
     return listed
 
 
-def _auto_confirm_listings(ctx: PipelineContext, cfg: dict, steam_id: str, cookies: str) -> None:
-    """Confirm pending Steam Guard confirmations after listing, if configured."""
+def _auto_confirm_listings(ctx: PipelineContext, cfg: dict) -> None:
+    """Report that the retired listing confirmer remains disabled."""
     steam_confirm_cfg = cfg.get("steam_confirm") or {}
     if not bool(steam_confirm_cfg.get("enabled")):
         return
-    identity_secret = (steam_confirm_cfg.get("identity_secret") or "").strip()
-    device_id = (steam_confirm_cfg.get("device_id") or "").strip()
-    if not identity_secret or not device_id:
-        ctx.log("[确认] 已开启自动确认，但 identity_secret/device_id 未配置，跳过", "warn", category="steam")
-        return
-    jittered_sleep(2)
-    ctx.log("[确认] 正在检查待确认列表…", "info", category="steam")
-    okc, n, errc = auto_confirm_once(
-        identity_secret=identity_secret,
-        device_id=device_id,
-        steam_id=str(steam_id),
-        cookies=str(cookies),
+    ctx.log(
+        "[确认] legacy bulk confirmation disabled; skipping",
+        "warn",
+        category="steam",
     )
-    if okc:
-        ctx.log(f"[确认] 已自动确认 {n} 项", "info", category="steam")
-    else:
-        ctx.log(f"[确认] 自动确认失败: {errc}", "warn", category="steam")
 
 
 # ---------------------------------------------------------------------------
@@ -716,7 +703,7 @@ def _run_sell_phase_impl(cfg: dict, state, flow_id: str, items: Optional[list] =
 
     if listed:
         ctx.log(f"[出售] 本轮回共上架 {listed} 件，等待下一轮", "info", category="steam")
-        _auto_confirm_listings(ctx, cfg, cred_steam.get("steam_id", ""), cred_steam.get("cookies", ""))
+        _auto_confirm_listings(ctx, cfg)
 
 
 def _run_sell_phase(cfg: dict, state, flow_id: str, items: Optional[list] = None) -> None:
