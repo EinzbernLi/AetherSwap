@@ -119,6 +119,36 @@ def _alias_values(
     return tuple(values)
 
 
+def _tradeoffer_alias_invalid_reason(record: Mapping[str, object]) -> str:
+    """Classify an invalid Trade Offer alias set without exposing field values."""
+
+    canonical_values: list[str] = []
+    saw_null = False
+    saw_field = False
+    for field in _TRADE_OFFER_FIELDS:
+        if field not in record:
+            continue
+        saw_field = True
+        raw = record[field]
+        if raw is None:
+            saw_null = True
+            continue
+        canonical = _canonical_raw_identifier(raw)
+        if canonical is None:
+            if type(raw) is str:
+                return "target_tradeoffer_alias_format_invalid"
+            return "target_tradeoffer_alias_type_invalid"
+        canonical_values.append(canonical)
+
+    if not saw_field:
+        return "target_tradeoffer_missing"
+    if saw_null:
+        return "target_tradeoffer_alias_null"
+    if len(set(canonical_values)) > 1:
+        return "target_tradeoffer_alias_conflict"
+    return "target_tradeoffer_alias_invalid_unclassified"
+
+
 def _canonical_positive_decimal_text(value: object) -> str | None:
     if (
         type(value) is not str
@@ -197,7 +227,7 @@ def _classify_history_payload(
 
     offer_values = _alias_values(target, _TRADE_OFFER_FIELDS, canonical=True)
     if offer_values is None:
-        return prefix + "target_tradeoffer_alias_invalid"
+        return prefix + _tradeoffer_alias_invalid_reason(target)
     if not offer_values:
         return prefix + "target_tradeoffer_missing"
 
