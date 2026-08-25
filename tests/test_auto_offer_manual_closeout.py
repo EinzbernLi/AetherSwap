@@ -168,10 +168,10 @@ def test_proof_requires_same_source_item_across_offer_and_receipt():
         )
 
 
-def test_proof_rejects_inventory_evidence_for_a_different_post_trade_asset():
+def test_typed_completed_trade_adapter_rejects_mismatched_inventory_evidence():
     with pytest.raises(
         closeout.RecoveryCommandError,
-        match="steam_inventory_identity_mismatch",
+        match="steam_completed_trade_not_proven",
     ):
         closeout.collect_manual_closeout_proof(
             _binding(),
