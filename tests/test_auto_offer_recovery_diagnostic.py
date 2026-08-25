@@ -173,7 +173,46 @@ def test_history_schema_trace_pinpoints_tradeoffer_alias_conflict():
         target_order_id="order-1",
         recipient_steam_id="76561198000000000",
     )
-    assert code == "p1:target_tradeoffer_alias_invalid"
+    assert code == "p1:target_tradeoffer_alias_conflict"
+
+
+def test_history_schema_trace_pinpoints_tradeoffer_alias_null():
+    code = diagnostic._classify_history_payload(
+        _history_payload([_exact_item(trade_offer_id=None)]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:target_tradeoffer_alias_null"
+
+
+def test_history_schema_trace_pinpoints_tradeoffer_alias_type_invalid():
+    code = diagnostic._classify_history_payload(
+        _history_payload([_exact_item(trade_offer_id={"id": "654321"})]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:target_tradeoffer_alias_type_invalid"
+
+
+def test_history_schema_trace_pinpoints_tradeoffer_alias_format_invalid():
+    code = diagnostic._classify_history_payload(
+        _history_payload([_exact_item(trade_offer_id=" 654321")]),
+        expected_page_num=1,
+        target_order_id="order-1",
+        recipient_steam_id="76561198000000000",
+    )
+    assert code == "p1:target_tradeoffer_alias_format_invalid"
+
+
+def test_tradeoffer_alias_reason_does_not_expose_values():
+    code = diagnostic._tradeoffer_alias_invalid_reason(
+        {"tradeofferid": "123456", "trade_offer_id": "654321"}
+    )
+    assert code == "target_tradeoffer_alias_conflict"
+    assert "123456" not in code
+    assert "654321" not in code
 
 
 def test_history_schema_trace_pinpoints_seller_field_invalidity():
