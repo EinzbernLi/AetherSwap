@@ -1,0 +1,30 @@
+schema_version: "1.0"
+project: AetherSwap
+adoption_issue_ref: "github:EinzbernLi/AetherSwap#145"
+adopted_from_code_ref: "integration/auto-buyer-offer@cc87881cc5ea10c7564494a8be89691249cee1fb"
+
+central_governance:
+  repository: EinzbernLi/agent-dev-governance
+  version: "0.3.1"
+  ref: eda77469c90ac0153bffdb7a5fc7ad8917bb552f
+  follow_main: false
+
+modules:
+  lprl:
+    repository: EinzbernLi/agent-dev-governance
+    version: "v0.2.2"
+    ref: c769bc0b7b102cd12e54fcd966d638fb88a5a2cc
+    pin_separately: true
+    note: "Ongoing Aether LPRL evidence remains bound to this replay-accepted revision until a separately validated upgrade."
+
+task_result_fact_source:
+  mode: github_issue_pr
+  mirror_full_task_result_bodies_into_agent_files: false
+
+adoption_rules:
+  project_specific_policy_file: .agent/LOCAL_POLICY.yaml
+  current_state_file: .agent/PROJECT_STATE.md
+  bootstrap_file: .agent/BOOTSTRAP.md
+  legacy_project_governance_is_compatibility_evidence: true
+  ordinary_runtime_capabilities_are_session_state: true
+  governance_upgrade_requires_explicit_review: true
