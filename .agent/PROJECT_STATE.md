@@ -1,7 +1,7 @@
 # AetherSwap Current Project State
 
 Status: **brownfield governance adoption candidate**  
-State date: **2026-08-27**  
+State date: **2026-08-28**  
 Adoption tracking: **Issue #145**
 
 This file is the compact current-state entry point. It is not a transcript of historical development. Task contracts, Results, Reviews, CI evidence and Lead Acceptance remain in GitHub Issues/PRs.
@@ -46,10 +46,10 @@ Standing rule: do not create a TASK-050 implementation branch, do not infer undo
 
 These tracks may progress independently of the blocked business task when they do not mutate the same runtime/state authority.
 
-- Issue #141 — LPRL controlled-migration read-only inspection/evidence. No cleanup or migration authority.
-- Issue #143 — draft project-local LPRL fact records. Persistent project-local fact files are not yet accepted/materialized.
-- Issue #144 — Codex native subagent dispatch pilot. **Open at the time of this adoption draft** and bound to the pre-v0.3.1 pilot governance baseline.
-- Issue #145 — this brownfield governance adoption.
+- Issue #141 — accepted read-only LPRL inventory/correction factual basis. No cleanup or migration authority.
+- Issue #143 — effective draft fact-record set `5440287345 + 5440560816` passed independent composite validation at `5446240299` and Sol acceptance at `5446252616`. The only authorized next step is **project-local fact-file materialization design**; no project-local fact files, Snapshot, Gate, Retirement, migration, cleanup, or reclamation are authorized yet.
+- Issue #144 — Codex native-subagent dispatch pilot is **CLOSED / PASS**. Codex Sol natively dispatched `gpt-5.6-terra / high` with isolated context; child result `5446240299`, Lead acceptance `5446252616`, pilot result `5446264237`. No OWNER manual child launch and no project mutation occurred.
+- Issue #145 / PR #146 — brownfield adoption of central governance v0.3.1 into the active integration line. Adoption is additive and preserves existing legacy/domain governance files.
 
 LPRL authority for the ongoing Aether evidence remains pinned to `EinzbernLi/agent-dev-governance@c769bc0b7b102cd12e54fcd966d638fb88a5a2cc` until separately upgraded/replayed.
 
@@ -68,6 +68,7 @@ No LPRL Snapshot/Gate/Retirement/migration/cleanup/reclamation authority exists 
 - Historical protected checkout and verifier details are retained in `.agent/PROJECT_CONTEXT.md` until a later reviewed compaction replaces them.
 - Local-required tasks use isolated workspaces/worktrees and exact source/tree handoff when necessary.
 - Local resource discovery has identified mixed Source/Workspace/State/Data/Evidence/Cache and shared Git topology; these remain under LPRL fail-closed handling rather than folder-name cleanup heuristics.
+- The Codex runtime has one accepted session-level capability sample showing native Terra dispatch with explicit model/reasoning selection and isolated child context. This is runtime evidence, not a permanent guarantee for future Codex sessions; every new Lead session must re-probe.
 
 ## 7. Governance migration status
 
@@ -92,12 +93,12 @@ Legacy governance/domain documents remain referenced compatibility evidence in t
 - Do not publish secrets/credentials/session material.
 - Do not clean/reset/delete/move protected local project resources based only on age, task number or folder name.
 - Do not perform LPRL cleanup/migration before the required future Snapshot/Gate/authorization chain exists.
+- Do not persist one Codex native-dispatch observation as a permanent runtime capability assumption.
 
 ## 9. Next actions
 
-1. Let Issue #144 reach a terminal pilot result under its original frozen dispatch baseline.
-2. Validate the effective LPRL draft fact records in Issue #143 and obtain Sol acceptance before any project-local LPRL materialization.
-3. Review this governance-adoption PR after #144 closes; only then consider merging it to `integration/auto-buyer-offer`.
-4. After adoption merge, run the v0.3.1 natural-language Web <-> Codex takeover qualification (normal takeover, stale checkpoint reconciliation, stale Lead generation).
-5. Keep TASK-050 blocked until a separately authorized sanitized live schema capture closes its exact contract gap.
-6. After the governance/takeover path is stable, perform a separate reviewed compaction of legacy `.agent` documents; do not combine that cleanup with initial adoption.
+1. Complete review and acceptance of PR #146, then merge the minimal governance authority layer to `integration/auto-buyer-offer` if still exact and conflict-free.
+2. After adoption merge, run the v0.3.1 natural-language Web <-> Codex takeover qualification: normal takeover, stale checkpoint reconciliation, and stale Lead generation.
+3. Design the project-local LPRL fact-file materialization from the accepted #143 effective draft; keep this as a separately reviewed step and do not create Snapshot/Gate/Retirement authority.
+4. Keep TASK-050 blocked until a separately authorized sanitized live schema capture closes its exact contract gap.
+5. After governance/takeover stability is proven, perform a separate reviewed compaction of legacy `.agent` documents; do not combine that cleanup with initial adoption.
