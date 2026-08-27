@@ -81,12 +81,15 @@ Before formal dispatch or project mutation, a returning/stale Lead must verify t
 
 Every new Active Lead session performs a fresh Runtime Capability Probe before dispatch. Do not infer capability from `web`, `codex`, `desktop`, or from a previous session.
 
-## Current blocking facts at adoption
+The accepted #144 pilot proves that one Codex Sol session could explicitly native-dispatch `gpt-5.6-terra / high` with isolated child context. Treat that only as calibration evidence; it is not a permanent capability promise for the next session.
+
+## Current blocking / accepted facts at adoption
 
 - Primary product Task #130 is BLOCKED pending verified live `/api/market/steam_trade` field semantics.
 - REAL-WRITE is CLOSED.
 - LPRL cleanup/migration is not authorized.
-- Issue #144 was launched under the previous dispatch baseline and must finish before this adoption PR is merged.
+- Issue #143 effective draft fact records passed independent composite validation (`5446240299`) and Sol acceptance (`5446252616`); only project-local fact-file materialization design is authorized next.
+- Issue #144 native-dispatch pilot is CLOSED / PASS (`5446264237`) and no longer blocks governance adoption review.
 
 ## Completion of bootstrap
 
@@ -97,5 +100,5 @@ A resumed Lead should be able to state, without chat-history replay:
 - current governance/LPRL work relevant to the requested continuation;
 - the standing REAL-WRITE and local-resource boundaries;
 - whether a newer checkpoint/Lead Claim exists;
-- current runtime dispatch capabilities;
+- current runtime dispatch capabilities from a fresh probe;
 - the next safe action.
