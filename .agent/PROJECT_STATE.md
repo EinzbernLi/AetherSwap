@@ -12,6 +12,7 @@ This file is the compact current-state entry point. It is not a transcript of hi
 - Current accepted integration ref at adoption freeze: `cc87881cc5ea10c7564494a8be89691249cee1fb`
 - Latest accepted product change at that ref: TASK-053 / Issue #135 / PR #136, disabling the legacy Steam bulk listing confirmer fail-closed.
 - `main` currently points to `b26ff06cd1d89452523c5246414dca472c75df7a` and is not the active Auto Offer integration line.
+- `main` is one commit ahead of the integration merge-base because it contains the older `docs/PROJECT_GOVERNANCE.md` governance document. That main-only document is a legacy governance artifact, not the active authority for the integration line. Reconcile it explicitly before a future integration -> main release; do not silently cherry-pick it into the active line during this adoption.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
 
 Do not silently treat `main` and `integration/auto-buyer-offer` as synchronized baselines.
