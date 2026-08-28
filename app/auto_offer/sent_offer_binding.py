@@ -11,10 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from app.auto_offer.adapters import (
-    PlatformAdapterProtocolError,
-    SteamTradeOfferEvidence,
-)
+from app.auto_offer.adapters import SteamTradeOfferEvidence
 
 
 class SentOfferBindingContractError(ValueError):
@@ -175,8 +172,6 @@ def close_exact_sent_offer_candidate(
         )
     try:
         SteamTradeOfferEvidence.__post_init__(exact_offer)
-    except PlatformAdapterProtocolError as exc:
-        raise SentOfferBindingContractError("exact_offer_is_malformed") from exc
     except Exception as exc:
         raise SentOfferBindingContractError("exact_offer_is_malformed") from exc
 
@@ -198,8 +193,8 @@ def close_exact_sent_offer_candidate(
         raise SentOfferBindingContractError("counterparty_identity_mismatch")
     if exact_offer.items_to_give:
         raise SentOfferBindingContractError("buyer_offer_gives_items")
-    if not exact_offer.items_to_receive:
-        raise SentOfferBindingContractError("buyer_offer_receives_no_items")
+    # SteamTradeOfferEvidence requires at least one non-empty item side, so once
+    # buyer-send is proven to give nothing, at least one received item is implied.
 
     return SentOfferBindingEvidence(
         query=query,
