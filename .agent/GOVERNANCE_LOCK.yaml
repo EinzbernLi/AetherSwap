@@ -5,8 +5,8 @@ adopted_from_code_ref: "integration/auto-buyer-offer@cc87881cc5ea10c7564494a8be8
 
 central_governance:
   repository: EinzbernLi/agent-dev-governance
-  version: "0.3.1"
-  ref: eda77469c90ac0153bffdb7a5fc7ad8917bb552f
+  version: "0.3.2"
+  ref: 4beabe24fdda9a48bcaf7dd6e9565604f7278731
   follow_main: false
 
 modules:
@@ -25,6 +25,7 @@ adoption_rules:
   project_specific_policy_file: .agent/LOCAL_POLICY.yaml
   current_state_file: .agent/PROJECT_STATE.md
   bootstrap_file: .agent/BOOTSTRAP.md
+  lead_claim_sink: "github:EinzbernLi/AetherSwap#149"
   legacy_project_governance_is_compatibility_evidence: true
   ordinary_runtime_capabilities_are_session_state: true
   governance_upgrade_requires_explicit_review: true
