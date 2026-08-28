@@ -1,4 +1,4 @@
-schema_version: "1.0"
+schema_version: "1.1"
 project: AetherSwap
 
 branches:
@@ -11,6 +11,19 @@ fact_source:
   github_is_durable_technical_source: true
   chat_is_not_durable_authority: true
 
+lead_and_worker_coordination:
+  one_active_project_lead: true
+  canonical_lead_claim_sink: github:EinzbernLi/AetherSwap#149
+  task_scoped_web_codex_workers_allowed: true
+  parallel_workers_are_not_parallel_leads: true
+  worker_may_modify_lead_claim_sink: false
+  worker_may_integrate_sibling_work: false
+  lead_owns_integration_and_final_acceptance: true
+  actual_lead_handoff_requires_explicit_owner_intent: true
+  executor_launch_or_task_execution_wording_does_not_transfer_lead: true
+  required_worker_instruction_suffix: "作为该 Task 的执行者，不接管项目 Lead。"
+  ambiguous_cross_runtime_instruction_policy: remain_worker_and_fail_closed_on_lead_claim
+
 owner_gates:
   real_write_default: CLOSED
   explicit_owner_authorization_required_for:
@@ -22,6 +35,8 @@ owner_gates:
     - integration/auto-buyer-offer -> main
     - scope expansion beyond a frozen Task
     - destructive local-resource migration, retirement, cleanup, or reclamation
+    - live authenticated one-shot probes when the exact Task/Issue marks them separately gated
+    - actual project Lead handoff to another runtime/session
 
 product_authority_boundaries:
   host_purchase_and_payment_authority: retained
@@ -39,6 +54,7 @@ safety_invariants:
   - "Credentials, cookies, tokens, API keys, buyer_info, decrypted session material, and secret values must not enter logs, Issues, PRs, fixtures, or governance records."
   - "Tests and safety gates must not be deleted, skipped, weakened, or reinterpreted merely to obtain PASS."
   - "REAL-WRITE remains closed unless an exact separately authorized packet explicitly opens the required write boundary."
+  - "A worker session must not create or advance the project Lead generation unless the OWNER explicitly authorizes an actual Lead handoff."
 
 local_execution:
   isolated_workspace_or_worktree_required: true
@@ -61,6 +77,20 @@ verification:
 
 work_concurrency:
   one_primary_business_task_at_a_time: true
+  same_project_parallel_task_workers_allowed: true
+  parallelism_requires_explicit_parallel_safe_classification: true
+  parallel_safe_requirements:
+    - exact frozen baseline
+    - declared dependencies
+    - no unmet ordering dependency
+    - pairwise disjoint substantive write scopes
+    - isolated write surface for implementation tasks
+  read_scope_overlap_allowed: true
+  append_only_result_sink_sharing_allowed_when_task_refs_are_unambiguous: true
+  same_file_multiwriter_allowed_by_default: false
+  shared_mutable_state_multiwriter_allowed_by_default: false
+  merge_conflict_is_not_coordination_mechanism: true
+  sibling_merge_invalidating_scope_returns_to_lead_for_rebase_replan_or_serialise: true
   independent_governance_hardening_lprl_tracks_may_run_in_parallel_when_they_do_not_mutate_the_same_authority_or_runtime_state: true
 
 legacy_governance_compatibility:
