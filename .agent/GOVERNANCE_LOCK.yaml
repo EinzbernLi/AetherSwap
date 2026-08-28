@@ -12,10 +12,10 @@ central_governance:
 modules:
   lprl:
     repository: EinzbernLi/agent-dev-governance
-    version: "v0.2.2"
-    ref: c769bc0b7b102cd12e54fcd966d638fb88a5a2cc
+    version: "v0.2.3-pilot"
+    ref: d63dae9ac1de65420f410cb36e6c2ccb58cc0478
     pin_separately: true
-    note: "Ongoing Aether LPRL evidence remains bound to this replay-accepted revision until a separately validated upgrade."
+    note: "Aether LPRL is pinned to the central v0.2.3-pilot merge accepted through governance Issue #25 / PR #26. This pin does not authorize local materialization, Snapshot/Gate, retirement, migration, cleanup, or reclamation."
 
 task_result_fact_source:
   mode: github_issue_pr
