@@ -5,9 +5,10 @@ adopted_from_code_ref: "integration/auto-buyer-offer@cc87881cc5ea10c7564494a8be8
 
 central_governance:
   repository: EinzbernLi/agent-dev-governance
-  version: "0.3.5"
-  ref: a42359b56210b02a66cefd809c5851f53a252590
+  version: "0.3.6"
+  ref: c06b82de61de9249d91473bda974228725bdb714
   follow_main: false
+  note: "v0.3.6 keeps one Active Lead while allowing bounded same-project Web/Codex parallel workers. Parallel workers are not parallel Leads and Lead owns integration/final acceptance."
 
 modules:
   lprl:
@@ -29,3 +30,6 @@ adoption_rules:
   legacy_project_governance_is_compatibility_evidence: true
   ordinary_runtime_capabilities_are_session_state: true
   governance_upgrade_requires_explicit_review: true
+  one_active_project_lead: true
+  task_scoped_workers_do_not_claim_project_lead: true
+  lead_handoff_requires_explicit_owner_intent: true
