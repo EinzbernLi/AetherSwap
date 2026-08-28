@@ -875,30 +875,21 @@ def test_buff_offer_state_success_carries_exact_offer_and_same_record_seller():
     assert result.evidence.counterparty_steam_id == "76561198000000002"
 
 
-def test_historical_offer_recovery_accepts_non_pending_exact_identity():
+def test_offer_state_history_cannot_bind_when_current_read_is_unproven():
     client = BuffStub(
         [],
         history_pages={1: history_page(items=[history_record()])},
     )
-    exact_request = request()
     adapter = buff_adapter(client)
 
-    current = adapter.execute(exact_request)
-    assert current.status is PlatformResultStatus.RESULT_UNKNOWN
+    result = adapter.execute(request())
 
-    recovered = adapter._recover_result_unknown_offer_state(
-        exact_request,
-        current,
-    )
-
-    assert recovered.status is PlatformResultStatus.SUCCESS
-    assert recovered.detail == "offer_history_recovered"
-    assert recovered.evidence == OfferStateEvidence(
-        "history-offer-1",
-        "76561198000000002",
-    )
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_not_proven"
+    assert result.evidence is None
     assert client.calls == 1
-    assert client.history_calls == [(1, "csgo")]
+    assert client.history_calls == []
+    assert not hasattr(adapter, "_recover_result_unknown_offer_state")
 
 
 def test_current_pending_offer_recovery_does_not_read_history():
@@ -912,155 +903,6 @@ def test_current_pending_offer_recovery_does_not_read_history():
     assert result.status is PlatformResultStatus.SUCCESS
     assert client.calls == 1
     assert client.history_calls == []
-
-
-def test_historical_offer_recovery_rejects_duplicate_exact_order_rows():
-    client = BuffStub(
-        [],
-        history_pages={
-            1: history_page(items=[history_record(), history_record()]),
-        },
-    )
-    exact_request = request()
-    adapter = buff_adapter(client)
-
-    recovered = adapter._recover_result_unknown_offer_state(
-        exact_request,
-        adapter.execute(exact_request),
-    )
-
-    assert recovered.status is PlatformResultStatus.MALFORMED
-    assert recovered.detail == "ambiguous_order"
-    assert recovered.evidence is None
-    assert client.history_calls == [(1, "csgo")]
-
-
-@pytest.mark.parametrize(
-    ("changes", "expected_status", "expected_detail"),
-    [
-        (
-            {"tradeofferid": None},
-            PlatformResultStatus.MALFORMED,
-            "malformed_payload",
-        ),
-        (
-            {
-                "tradeofferid": "history-offer-1",
-                "trade_offer_id": "different-offer",
-            },
-            PlatformResultStatus.MALFORMED,
-            "malformed_payload",
-        ),
-        (
-            {"buff_order_id": "buff-order-1", "bill_order_id": "other-order"},
-            PlatformResultStatus.MALFORMED,
-            "malformed_payload",
-        ),
-        (
-            {"buyer_steam_id": "other-recipient"},
-            PlatformResultStatus.FAILURE,
-            "identity_mismatch",
-        ),
-        (
-            {
-                "buyer_steam_id": "76561198000000001",
-                "seller_steam_id": "76561198000000001",
-            },
-            PlatformResultStatus.FAILURE,
-            "identity_mismatch",
-        ),
-    ],
-)
-def test_historical_offer_recovery_rejects_contradictory_or_mismatched_identity(
-    changes,
-    expected_status,
-    expected_detail,
-):
-    client = BuffStub(
-        [],
-        history_pages={1: history_page(items=[history_record(**changes)])},
-    )
-    exact_request = request()
-    if changes.get("seller_steam_id") == "76561198000000001":
-        exact_request = replace(
-            exact_request,
-            recipient_steam_id="76561198000000001",
-        )
-    adapter = buff_adapter(client)
-
-    recovered = adapter._recover_result_unknown_offer_state(
-        exact_request,
-        adapter.execute(exact_request),
-    )
-
-    assert recovered.status is expected_status
-    assert recovered.detail == expected_detail
-    assert recovered.evidence is None
-
-
-def test_historical_offer_recovery_missing_identity_stays_unknown():
-    missing_offer = history_record()
-    del missing_offer["tradeofferid"]
-    missing_counterparty = history_record()
-    del missing_counterparty["seller_steam_id"]
-
-    for item in (missing_offer, missing_counterparty):
-        client = BuffStub(
-            [],
-            history_pages={1: history_page(items=[item])},
-        )
-        exact_request = request()
-        adapter = buff_adapter(client)
-
-        recovered = adapter._recover_result_unknown_offer_state(
-            exact_request,
-            adapter.execute(exact_request),
-        )
-
-        assert recovered.status is PlatformResultStatus.RESULT_UNKNOWN
-        assert recovered.detail == "order_not_proven"
-        assert recovered.evidence is None
-
-
-def test_historical_offer_recovery_is_bounded_to_three_pages():
-    client = BuffStub(
-        [],
-        history_pages={
-            page: history_page(page_num=page, total_page=9)
-            for page in (1, 2, 3)
-        },
-    )
-    exact_request = request()
-    adapter = buff_adapter(client)
-
-    recovered = adapter._recover_result_unknown_offer_state(
-        exact_request,
-        adapter.execute(exact_request),
-    )
-
-    assert recovered.status is PlatformResultStatus.RESULT_UNKNOWN
-    assert recovered.detail == "order_not_proven"
-    assert client.history_calls == [(1, "csgo"), (2, "csgo"), (3, "csgo")]
-
-
-def test_historical_offer_recovery_ignores_unrelated_purchase():
-    client = BuffStub(
-        [],
-        history_pages={
-            1: history_page(items=[history_record(id="unrelated-order")]),
-        },
-    )
-    exact_request = request()
-    adapter = buff_adapter(client)
-
-    recovered = adapter._recover_result_unknown_offer_state(
-        exact_request,
-        adapter.execute(exact_request),
-    )
-
-    assert recovered.status is PlatformResultStatus.RESULT_UNKNOWN
-    assert recovered.detail == "order_not_proven"
-    assert recovered.evidence is None
 
 
 @pytest.mark.parametrize(
