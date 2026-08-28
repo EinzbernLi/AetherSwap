@@ -72,7 +72,14 @@ class SchemaValidationError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class ProbeOutcome:rn    """Outcome of one injected callable invocation.rnrn    ``request_count`` counts invocations of the injected ``send_once`` callable;rn    it is not proof of wire-request count or of retry behavior inside that callable.rn    """rnrn    failure_class: FailureClass
+class ProbeOutcome:
+    """Outcome of one injected callable invocation.
+
+    ``request_count`` counts invocations of the injected ``send_once`` callable;
+    it is not proof of wire-request count or of retry behavior inside that callable.
+    """
+
+    failure_class: FailureClass
     request_reached_server: ReachedServer
     http_status_class: HttpStatusClass
     json_parsed: bool
