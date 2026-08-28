@@ -1211,7 +1211,7 @@ class DeliveryCoordinator:
         self,
         delivery: StoredDelivery,
     ) -> ReadOnlyStepResult:
-        """Perform only exact BUFF read recovery for one unbound buyer SEND."""
+        """Perform only one configured offer-state read for an unbound buyer SEND."""
 
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
@@ -1237,19 +1237,6 @@ class DeliveryCoordinator:
             raise ReadOnlyCoordinatorBlockedError("read_step_not_available")
         request = self._make_request(delivery, capability)
         platform_result = self._execute(adapter, request)
-        recover_history = getattr(
-            adapter,
-            "_recover_result_unknown_offer_state",
-            None,
-        )
-        if callable(recover_history):
-            try:
-                platform_result = _normalize_result(
-                    request,
-                    recover_history(request, platform_result),
-                )
-            except Exception as exc:
-                platform_result = _exception_result(request, exc)
         decision = self._plan(delivery, platform_result)
         return self._persist_read(delivery, decision, platform_result)
 
