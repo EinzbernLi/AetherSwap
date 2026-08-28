@@ -5,8 +5,8 @@ adopted_from_code_ref: "integration/auto-buyer-offer@cc87881cc5ea10c7564494a8be8
 
 central_governance:
   repository: EinzbernLi/agent-dev-governance
-  version: "0.3.4"
-  ref: d000f0768a6e8dad27c8f893165791b67815ff24
+  version: "0.3.5"
+  ref: a42359b56210b02a66cefd809c5851f53a252590
   follow_main: false
 
 modules:

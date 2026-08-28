@@ -11,7 +11,7 @@ project_aliases:
   - AetherSwap
 current_phase: auto-offer-integration-plus-governance-continuity
 active_development_branch: integration/auto-buyer-offer
-governance_upgrade_source_ref: integration/auto-buyer-offer@180324fc67836fefb3a487ee5ea9dcf6b522c394
+governance_upgrade_source_ref: integration/auto-buyer-offer@4aee488af792627be6c50c0880647073a9f67023
 primary_product_task_ref: github:EinzbernLi/AetherSwap#130
 governance_work_refs:
   - github:EinzbernLi/AetherSwap#147
@@ -19,7 +19,7 @@ governance_work_refs:
 lprl_work_refs:
   - github:EinzbernLi/AetherSwap#143
   - github:EinzbernLi/AetherSwap#148
-governance_ref: EinzbernLi/agent-dev-governance@d000f0768a6e8dad27c8f893165791b67815ff24
+governance_ref: EinzbernLi/agent-dev-governance@a42359b56210b02a66cefd809c5851f53a252590
 lprl_ref: EinzbernLi/agent-dev-governance@c769bc0b7b102cd12e54fcd966d638fb88a5a2cc
 task_fact_source: github_issue_pr
 lead_claim_sink: github:EinzbernLi/AetherSwap#149
@@ -40,9 +40,15 @@ Interpret them as `TAKEOVER_PROJECT + RESUME_LATEST_DURABLE_STATE`.
 
 Do not ask the OWNER to re-paste development baselines, governance rules, Task IDs, checkpoint IDs or commit SHAs when current durable facts can resolve them. Natural language triggers recovery; it does not widen control scope.
 
+## Root cold-start guard
+
+Aether's root `AGENTS.md` carries the v0.3.5 runtime-auto-loaded cold-start guard for Codex. It exists only to route a new formal Lead/takeover/resume into this Bootstrap and the existing Lead Activation Gate before any planning/progress/test/source/local mutation or Task recovery.
+
+`AGENTS.md` is not a second Task/Result/Lead Claim authority and must not mirror the current generation. Durable control still comes from #149 and the pinned governance facts below.
+
 ## Required read / activation order
 
-Aether uses the v0.3.4 Lead Activation Gate. Control activation has precedence over Task recovery or execution.
+Aether uses central governance v0.3.5. The Lead Activation Gate semantics remain the v0.3.4 parent-bound activation model; v0.3.5 hardens only the runtime cold-start entry into that gate.
 
 1. `.agent/GOVERNANCE_LOCK.yaml`
 2. `.agent/LOCAL_POLICY.yaml`
@@ -99,26 +105,28 @@ For every new formal Lead session, including Web->Web or Codex->Codex rollover:
 6. perform a fresh runtime probe;
 7. only then become `ACTIVE` within that scope.
 
-`control_scope` modes follow central governance v0.3.4: `normal_project_continuation`, `qualification_only`, `task_scoped`, or `blocked`.
+`control_scope` modes follow central governance v0.3.5: `normal_project_continuation`, `qualification_only`, `task_scoped`, or `blocked`.
 
 A takeover may preserve or narrow scope. It must not widen scope merely because the prompt says “continue development”, because a primary Task exists, or because a planning file mentions work.
 
 If sibling/duplicate claims are found, fail closed before formal dispatch/project mutation and recover only through the next generation with explicit conflict evidence.
 
-## v0.3.4 migration compatibility
+## v0.3.5 cold-start compatibility
 
-The current durable control chain was created under v0.3.2. Do not rewrite, delete, renumber, or synthesize replacement claims merely to add the v0.3.4 `control_scope` field.
+The durable control chain was created before v0.3.5. Do not rewrite, delete, renumber, or synthesize replacement claims merely to adopt the root cold-start guard.
 
 At this adoption point:
 
-- G10 claim `5449449417` is the latest valid parent in #149;
+- G10 claim `5449449417` remains the latest valid parent in #149;
 - G10 activation verify `5449453374` establishes `ACTIVE_CONTROL_ONLY` and `formal_continuation_allowed_under_current_scope: false`;
-- #147 comment `5449455674` records the G10 qualification `FAIL_CLOSED` because the fresh Codex session wrote external control-workspace `progress.md` before governance/scope recovery;
-- therefore the effective inherited scope for the next fresh takeover is `qualification_only`, sourced from the G10 activation / #147 qualification evidence;
-- the next monotonic generation is G11, parent=`5449449417`;
-- the first v0.3.4 validation sample must test the same ordinary natural-language takeover without pre-ACTIVE local/planning mutation.
+- #147 comment `5449455674` records the G10 v0.3.2 qualification `FAIL_CLOSED` for preclaim external `progress.md` mutation;
+- Aether adopted v0.3.4 at `4aee488af792627be6c50c0880647073a9f67023`;
+- the first fresh post-v0.3.4 Codex sample created no durable G11; independent Web audit is #147 comment `5449566016`;
+- because no G11 claim was created, generation does not advance: the next monotonic generation is still G11 with parent `5449449417`;
+- the effective inherited scope remains `qualification_only`, sourced from G10 activation evidence `5449453374`;
+- the first v0.3.5 validation sample must be exactly one fresh ordinary natural-language Codex takeover with the root `AGENTS.md` guard active.
 
-This migration does not retroactively invalidate accepted historical Web takeover evidence or the G8 staging PASS. It preserves the G9/G10 failures as evidence instead of retrying v0.3.2 until a sample happens to pass.
+Historical G8 PASS and G9/G10 failures remain evidence. The no-G11 v0.3.4 sample is also retained as a negative cold-start sample. Do not replay all historical qualification cycles.
 
 ## Runtime rule
 
@@ -134,7 +142,7 @@ The accepted #144 pilot proves only that one tested Codex Sol session could nati
 - LPRL cleanup/migration is not authorized; the LPRL module remains separately pinned to `c769bc0b7b102cd12e54fcd966d638fb88a5a2cc`.
 - Issue #143 effective draft fact records remain accepted.
 - Issue #148 remains design-only and substantively paused during the takeover repair; no `.local/lprl/` materialization, Snapshot/Gate/Retirement/migration/cleanup/reclaimability authority is created here.
-- Issue #147 remains the qualification track. The next required evidence is one clean v0.3.4 fresh Codex takeover from G10 to G11, followed by independent Lead review.
+- Issue #147 remains the qualification track. The next required evidence is one clean v0.3.5 fresh Codex takeover from G10 to G11, followed by independent Web review.
 - `integration/auto-buyer-offer -> main` remains OWNER-gated.
 
 ## Legacy/domain documents — load only when relevant

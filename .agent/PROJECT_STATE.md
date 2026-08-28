@@ -1,6 +1,6 @@
 # AetherSwap Current Project State
 
-Status: **governance v0.3.4 adoption; post-adoption validation pending; product work unchanged**  
+Status: **governance v0.3.5 cold-start guard adoption candidate; product work unchanged**  
 State date: **2026-08-28**
 
 This file is a compact current-state entry point, not a transcript. GitHub Issues/PRs remain the durable Task/Result/Review/Acceptance source.
@@ -8,8 +8,8 @@ This file is a compact current-state entry point, not a transcript. GitHub Issue
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- v0.3.4 adoption source ref: `180324fc67836fefb3a487ee5ea9dcf6b522c394`.
-- That source ref is the accepted v0.3.2 governance adoption commit; no product code has advanced during the G8/G9/G10 takeover qualification work.
+- v0.3.5 adoption source ref: `4aee488af792627be6c50c0880647073a9f67023`.
+- That source ref is the accepted Aether v0.3.4 governance adoption commit; no product code has advanced during the post-adoption takeover validation.
 - `main` remains the release line and is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
 
@@ -17,14 +17,16 @@ Do not silently treat `main` and `integration/auto-buyer-offer` as synchronized 
 
 ## 2. Governance baseline
 
-This adoption upgrades only the ordinary central-governance pin from Aether v0.3.2 to central governance v0.3.4:
+This candidate upgrades only the ordinary central-governance pin from v0.3.4 to v0.3.5:
 
-- central governance: `EinzbernLi/agent-dev-governance@d000f0768a6e8dad27c8f893165791b67815ff24` (`v0.3.4`);
+- central governance: `EinzbernLi/agent-dev-governance@a42359b56210b02a66cefd809c5851f53a252590` (`v0.3.5`);
 - canonical Lead Claim sink: `github:EinzbernLi/AetherSwap#149`;
 - takeover qualification evidence: `github:EinzbernLi/AetherSwap#147`;
 - LPRL remains separately pinned and unchanged at `c769bc0b7b102cd12e54fcd966d638fb88a5a2cc` (`v0.2.2`).
 
-The v0.3.4 repair is deliberately narrow: Lead activation must complete before Task recovery/execution, and control scope must be inherited without widening by inference. No Agent Bus, session DB, distributed lock, second Task authority, local daemon, automatic migration, or automatic cleanup is introduced.
+v0.3.5 does not change Lead Claim or `control_scope` semantics. It adds one minimal runtime cold-start rule: because Codex already auto-loads the repository-root `AGENTS.md`, Aether places a short non-authoritative guard at the top of that existing file so a new Lead/takeover/resume reaches the existing Lead Activation Gate before planning/progress/test/source/local mutation or Task recovery.
+
+No Agent Bus, session DB, distributed lock, second Task authority, local daemon, automatic launcher, migration, or cleanup mechanism is introduced.
 
 ## 3. Current Lead / qualification state
 
@@ -34,11 +36,13 @@ Current durable control chain in #149:
 - G9 Codex claim `5449282726`: control takeover succeeded, qualification `FAIL_CLOSED` because external control-workspace `progress.md` was written before scope recovery;
 - G10 Codex claim `5449449417`: latest valid claim, parent G9;
 - G10 activation verify `5449453374`: `ACTIVE_CONTROL_ONLY`, unique/monotonic claim, fresh runtime probe recorded, formal continuation not allowed;
-- #147 comment `5449455674`: G10 qualification `FAIL_CLOSED` for the same preclaim external planning-file mutation.
+- #147 comment `5449455674`: G10 qualification `FAIL_CLOSED` for the same preclaim external planning-file mutation;
+- Aether v0.3.4 adoption merged at `4aee488af792627be6c50c0880647073a9f67023`;
+- the first fresh post-v0.3.4 Codex takeover created no durable G11; independent Web audit `5449566016` records that post-adoption sample as not qualified.
 
-The repeated G9/G10 failure is retained as evidence. Do not delete, overwrite, renumber, or synthesize replacement generations.
+Because the v0.3.4 sample created no G11, generation did not advance. Do not delete, overwrite, renumber, or synthesize a replacement generation.
 
-Effective next takeover scope after v0.3.4 adoption:
+Effective next takeover scope after v0.3.5 adoption:
 
 ```yaml
 control_scope:
@@ -48,9 +52,9 @@ next_expected_generation: 11
 parent_claim_ref: 5449449417
 ```
 
-The #147 G10 FAIL_CLOSED record `5449455674` is corroborating qualification evidence for that inherited boundary; it is not a second scope authority.
+The next sample is exactly one fresh Codex Sol session started by the ordinary natural-language Aether takeover request. Root `AGENTS.md` must route it into governance recovery before any planning/progress mutation. PASS requires G11 from exact parent G10, inherited `qualification_only` scope, post-write uniqueness verification and fresh runtime probe, with zero pre-ACTIVE Task/test/source/local/network action.
 
-The first post-adoption validation is one fresh Codex session started by ordinary natural language. It must complete the v0.3.4 Lead Activation Gate before any local/planning mutation and then stop for independent review. Do not replay all historical qualification samples.
+Do not replay all historical qualification samples.
 
 ## 4. Primary business work
 
@@ -102,10 +106,24 @@ No LPRL Snapshot/Gate/Retirement/migration/cleanup/reclamation authority is crea
 - Historical protected-checkout rules remain in `.agent/PROJECT_CONTEXT.md`.
 - Local-required tasks use isolated workspaces/worktrees and exact source/tree handoff where required.
 - Every new formal Lead session must fresh-probe runtime capability; prior Codex dispatch evidence is not a permanent capability promise.
+- Root `AGENTS.md` cold-start guard is routing only and is not a local state or authority store.
 
-## 9. Lead Activation Gate
+## 9. Lead Activation Gate / cold-start order
 
-For projects using #149 durable Lead Claims, v0.3.4 precedence is:
+For new formal Lead/takeover/resume sessions:
+
+```text
+runtime-auto-loaded root AGENTS guard
+-> GOVERNANCE_LOCK / LOCAL_POLICY / PROJECT_STATE / BOOTSTRAP
+-> canonical #149 parent + current control scope
+-> next parent-bound claim
+-> re-read uniqueness
+-> fresh Runtime Capability Probe
+-> ACTIVE
+-> only then Task recovery / execution
+```
+
+Precedence remains:
 
 ```text
 Lead activation gate
@@ -130,11 +148,12 @@ If claim persistence, post-write uniqueness verification, or fresh runtime probe
 - Do not publish secrets/credentials/session material.
 - Do not clean/reset/delete/move protected local project resources based only on age, task number or folder name.
 - Do not perform LPRL cleanup/migration before a separately authorized future chain exists.
-- Do not widen takeover control scope from the natural-language prompt, primary Task ref, or planning files.
+- Do not widen takeover control scope from the natural-language prompt, primary Task ref, `AGENTS.md`, or planning files.
 
 ## 11. Next actions
 
-1. After the v0.3.4 adoption is merged to `integration/auto-buyer-offer`, start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
-2. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, claim-before-task ordering, post-write uniqueness verification and fresh runtime probe, with zero pre-ACTIVE local/planning mutation.
-3. Web Sol independently reviews #149/#147 evidence. If the v0.3.4 sample passes, close the takeover-repair qualification without replaying all historical samples.
-4. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
+1. Review and merge this minimal v0.3.5 adoption only to `integration/auto-buyer-offer` if exact and conflict-free.
+2. Start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
+3. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, root-guard-before-planning ordering, post-write uniqueness verification and fresh runtime probe.
+4. Web Sol independently reviews #149/#147 evidence. If the v0.3.5 sample passes, close the takeover-repair qualification without replaying historical samples.
+5. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
