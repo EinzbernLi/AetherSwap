@@ -8,7 +8,7 @@ import ssl
 import unittest
 from pathlib import Path
 
-import sent_history_probe_outcome as outcome
+from tests import sent_history_probe_outcome as outcome
 
 try:
     import requests
