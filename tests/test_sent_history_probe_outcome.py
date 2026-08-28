@@ -349,6 +349,17 @@ class ProbeOutcomeTests(unittest.TestCase):
             self.assertEqual(result.request_reached_server, outcome.ReachedServer.UNKNOWN)
             self.assertEqual(result.http_status_class, outcome.HttpStatusClass.NONE)
 
+    def test_request_count_is_callable_invocation_count_only(self):
+        wire_attempts = []
+
+        def send_once():
+            # Simulate internal wire attempts hidden inside the injected callable.
+            wire_attempts.extend(("attempt", "internal_retry"))
+            return FakeResponse(200, {"safe": True})
+
+        result = outcome.probe_once(send_once)
+        self.assertEqual(result.request_count, 1)
+        self.assertEqual(len(wire_attempts), 2)
     def test_success_payload_is_only_explicitly_available(self):
         payload = {"SECRET_MARKER": {"item": 1}}
         result = self.run_once(FakeResponse(200, payload))
