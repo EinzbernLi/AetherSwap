@@ -8,7 +8,7 @@ import ssl
 import unittest
 from pathlib import Path
 
-from tests import sent_history_probe_outcome as outcome
+import sent_history_probe_outcome as outcome
 
 try:
     import requests
@@ -117,11 +117,10 @@ class ProbeOutcomeTests(unittest.TestCase):
             (ssl.SSLError("SECRET_MARKER"), outcome.TLSSubtype.UNKNOWN),
         )
         for exception, subtype in cases:
-            with self.subTest(exception=type(exception).__name__):
-                result = self.run_once(exception)
-                self.assertEqual(result.failure_class, outcome.FailureClass.TLS)
-                self.assertEqual(result.tls_subtype, subtype)
-                self.assertNotIn("SECRET_MARKER", result.public_json())
+            result = self.run_once(exception)
+            self.assertEqual(result.failure_class, outcome.FailureClass.TLS)
+            self.assertEqual(result.tls_subtype, subtype)
+            self.assertNotIn("SECRET_MARKER", result.public_json())
 
     def test_tls_verify_code_is_bounded_and_text_free(self):
         direct = ssl.SSLCertVerificationError("SENTINEL_TEXT")
@@ -290,14 +289,13 @@ class ProbeOutcomeTests(unittest.TestCase):
             (600, outcome.FailureClass.HTTP_OTHER, outcome.HttpStatusClass.OTHER),
         ]
         for status, failure, status_class in cases:
-            with self.subTest(status=status):
-                result = self.run_once(FakeResponse(status, {"SECRET_MARKER": True}))
-                self.assertEqual(result.failure_class, failure)
-                self.assertEqual(result.http_status_class, status_class)
-                self.assertEqual(result.request_reached_server, outcome.ReachedServer.YES)
-                self.assertFalse(result.json_parsed)
-                self.assert_public_shape(result)
-                self.assertNotIn(str(status), result.public_json())
+            result = self.run_once(FakeResponse(status, {"SECRET_MARKER": True}))
+            self.assertEqual(result.failure_class, failure)
+            self.assertEqual(result.http_status_class, status_class)
+            self.assertEqual(result.request_reached_server, outcome.ReachedServer.YES)
+            self.assertFalse(result.json_parsed)
+            self.assert_public_shape(result)
+            self.assertNotIn(str(status), result.public_json())
 
     def test_json_and_schema_failures(self):
         result = self.run_once(FakeResponse(200, error=MarkerError("SECRET_MARKER")))
@@ -338,20 +336,18 @@ class ProbeOutcomeTests(unittest.TestCase):
             socket.gaierror("SECRET_MARKER"),
             TimeoutError("SECRET_MARKER"),
         ):
-            with self.subTest(error=type(error).__name__):
-                result = self.run_once(PropertyResponse(error))
-                self.assertEqual(result.failure_class, outcome.FailureClass.UNEXPECTED)
-                self.assertEqual(result.request_reached_server, outcome.ReachedServer.UNKNOWN)
-                self.assertEqual(result.http_status_class, outcome.HttpStatusClass.NONE)
-                self.assertFalse(result.json_parsed)
-                self.assertIsNone(result.schema_valid)
+            result = self.run_once(PropertyResponse(error))
+            self.assertEqual(result.failure_class, outcome.FailureClass.UNEXPECTED)
+            self.assertEqual(result.request_reached_server, outcome.ReachedServer.UNKNOWN)
+            self.assertEqual(result.http_status_class, outcome.HttpStatusClass.NONE)
+            self.assertFalse(result.json_parsed)
+            self.assertIsNone(result.schema_valid)
 
         for status_code in (None, "200", 200.0, True, object()):
-            with self.subTest(status_code=type(status_code).__name__):
-                result = self.run_once(FakeResponse(status_code, {"SECRET_MARKER": True}))
-                self.assertEqual(result.failure_class, outcome.FailureClass.UNEXPECTED)
-                self.assertEqual(result.request_reached_server, outcome.ReachedServer.UNKNOWN)
-                self.assertEqual(result.http_status_class, outcome.HttpStatusClass.NONE)
+            result = self.run_once(FakeResponse(status_code, {"SECRET_MARKER": True}))
+            self.assertEqual(result.failure_class, outcome.FailureClass.UNEXPECTED)
+            self.assertEqual(result.request_reached_server, outcome.ReachedServer.UNKNOWN)
+            self.assertEqual(result.http_status_class, outcome.HttpStatusClass.NONE)
 
     def test_success_payload_is_only_explicitly_available(self):
         payload = {"SECRET_MARKER": {"item": 1}}
@@ -370,12 +366,11 @@ class ProbeOutcomeTests(unittest.TestCase):
 
     def test_schema_validator_requires_exact_bool(self):
         for invalid in ("true", 1, [], None):
-            with self.subTest(value=type(invalid).__name__):
-                result = self.run_once(FakeResponse(200, {"safe": True}), lambda _, value=invalid: value)
-                self.assertEqual(result.failure_class, outcome.FailureClass.UNEXPECTED)
-                self.assertEqual(result.request_reached_server, outcome.ReachedServer.YES)
-                self.assertTrue(result.json_parsed)
-                self.assertIsNone(result.schema_valid)
+            result = self.run_once(FakeResponse(200, {"safe": True}), lambda _, value=invalid: value)
+            self.assertEqual(result.failure_class, outcome.FailureClass.UNEXPECTED)
+            self.assertEqual(result.request_reached_server, outcome.ReachedServer.YES)
+            self.assertTrue(result.json_parsed)
+            self.assertIsNone(result.schema_valid)
 
     def test_network_exception_categories(self):
         cases = [
@@ -396,36 +391,31 @@ class ProbeOutcomeTests(unittest.TestCase):
                 ]
             )
         for exception, failure, reached in cases:
-            with self.subTest(exception=type(exception).__name__):
-                result = self.run_once(exception)
-                self.assertEqual(result.failure_class, failure)
-                self.assertEqual(result.request_reached_server, reached)
-                self.assertEqual(result.http_status_class, outcome.HttpStatusClass.NONE)
-                self.assertFalse(result.json_parsed)
-                self.assertIsNone(result.schema_valid)
-                self.assertNotIn("SECRET_MARKER", repr(result))
-                self.assertNotIn("SECRET_MARKER", result.public_json())
+            result = self.run_once(exception)
+            self.assertEqual(result.failure_class, failure)
+            self.assertEqual(result.request_reached_server, reached)
+            self.assertEqual(result.http_status_class, outcome.HttpStatusClass.NONE)
+            self.assertFalse(result.json_parsed)
+            self.assertIsNone(result.schema_valid)
+            self.assertNotIn("SECRET_MARKER", repr(result))
+            self.assertNotIn("SECRET_MARKER", result.public_json())
 
     def test_control_exceptions_propagate_at_each_stage(self):
         for control in (KeyboardInterrupt("SECRET_MARKER"), SystemExit("SECRET_MARKER"), GeneratorExit()):
-            with self.subTest(stage="send_once", control=type(control).__name__):
-                with self.assertRaises(type(control)):
-                    outcome.probe_once(lambda error=control: (_ for _ in ()).throw(error))
+            with self.assertRaises(type(control)):
+                outcome.probe_once(lambda error=control: (_ for _ in ()).throw(error))
 
-            with self.subTest(stage="status_code", control=type(control).__name__):
-                with self.assertRaises(type(control)):
-                    outcome.probe_once(lambda error=control: PropertyResponse(error))
+            with self.assertRaises(type(control)):
+                outcome.probe_once(lambda error=control: PropertyResponse(error))
 
-            with self.subTest(stage="json", control=type(control).__name__):
-                with self.assertRaises(type(control)):
-                    outcome.probe_once(lambda error=control: ControlJSONResponse(error))
+            with self.assertRaises(type(control)):
+                outcome.probe_once(lambda error=control: ControlJSONResponse(error))
 
-            with self.subTest(stage="schema", control=type(control).__name__):
-                with self.assertRaises(type(control)):
-                    outcome.probe_once(
-                        lambda: FakeResponse(200, {"safe": True}),
-                        lambda _, error=control: (_ for _ in ()).throw(error),
-                    )
+            with self.assertRaises(type(control)):
+                outcome.probe_once(
+                    lambda: FakeResponse(200, {"safe": True}),
+                    lambda _, error=control: (_ for _ in ()).throw(error),
+                )
 
     def test_exception_chain_uses_types_without_message_inspection(self):
         try:
