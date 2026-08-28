@@ -1,104 +1,139 @@
 # AetherSwap Current Project State
 
-Status: **brownfield governance adoption candidate**  
-State date: **2026-08-28**  
-Adoption tracking: **Issue #145**
+Status: **governance v0.3.4 adoption candidate; product work unchanged**  
+State date: **2026-08-28**
 
-This file is the compact current-state entry point. It is not a transcript of historical development. Task contracts, Results, Reviews, CI evidence and Lead Acceptance remain in GitHub Issues/PRs.
+This file is a compact current-state entry point, not a transcript. GitHub Issues/PRs remain the durable Task/Result/Review/Acceptance source.
 
 ## 1. Current code line
 
-- Active development branch: `integration/auto-buyer-offer`
-- Current accepted integration ref at adoption freeze: `cc87881cc5ea10c7564494a8be89691249cee1fb`
-- Latest accepted product change at that ref: TASK-053 / Issue #135 / PR #136, disabling the legacy Steam bulk listing confirmer fail-closed.
-- `main` currently points to `b26ff06cd1d89452523c5246414dca472c75df7a` and is not the active Auto Offer integration line.
-- `main` is one commit ahead of the integration merge-base because it contains the older `docs/PROJECT_GOVERNANCE.md` governance document. That main-only document is a legacy governance artifact, not the active authority for the integration line. Reconcile it explicitly before a future integration -> main release; do not silently cherry-pick it into the active line during this adoption.
+- Active development branch: `integration/auto-buyer-offer`.
+- v0.3.4 adoption source ref: `180324fc67836fefb3a487ee5ea9dcf6b522c394`.
+- That source ref is the accepted v0.3.2 governance adoption commit; no product code has advanced during the G8/G9/G10 takeover qualification work.
+- `main` remains the release line and is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
 
 Do not silently treat `main` and `integration/auto-buyer-offer` as synchronized baselines.
 
-## 2. Current product architecture / accepted direction
+## 2. Governance baseline
 
-- Host/source retains purchase selection, order creation, payment and Host Purchase persistence authority.
-- Auto Offer is a delivery-lifecycle module after a Host Purchase exists; it must not create a second purchase scheduler or competing purchase authority.
-- First-send authority must be singular and fail closed on ambiguous/non-idempotent outcomes.
-- Worker/runtime recovery is for reconciliation/recovery, not a second first-send path.
-- Exact identity and lifecycle evidence are required for sensitive delivery/confirmation/reconciliation operations.
-- Legacy broad Steam listing confirmation authority was removed in TASK-053; any future automatic listing confirmation requires a new exact-identity, TLS-verified, single-mutation, RESULT_UNKNOWN/no-blind-retry design and separate validation.
+This candidate upgrades only the ordinary central-governance pin from Aether v0.3.2 to central governance v0.3.4:
 
-Long-form historical/domain evidence remains in `AGENTS.md`, `.agent/WORKFLOW.md`, `.agent/PROJECT_CONTEXT.md`, `.agent/CURRENT_INVARIANTS.md` and `.agent/AUTO_OFFER_*.md`.
+- central governance: `EinzbernLi/agent-dev-governance@d000f0768a6e8dad27c8f893165791b67815ff24` (`v0.3.4`);
+- canonical Lead Claim sink: `github:EinzbernLi/AetherSwap#149`;
+- takeover qualification evidence: `github:EinzbernLi/AetherSwap#147`;
+- LPRL remains separately pinned and unchanged at `c769bc0b7b102cd12e54fcd966d638fb88a5a2cc` (`v0.2.2`).
 
-## 3. Primary business work
+The v0.3.4 repair is deliberately narrow: Lead activation must complete before Task recovery/execution, and control scope must be inherited without widening by inference. No Agent Bus, session DB, distributed lock, second Task authority, local daemon, automatic migration, or automatic cleanup is introduced.
+
+## 3. Current Lead / qualification state
+
+Current durable control chain in #149:
+
+- G8 Codex staging claim `5449198598`: accepted staging PASS;
+- G9 Codex claim `5449282726`: control takeover succeeded, qualification `FAIL_CLOSED` because external control-workspace `progress.md` was written before scope recovery;
+- G10 Codex claim `5449449417`: latest valid claim, parent G9;
+- G10 activation verify `5449453374`: `ACTIVE_CONTROL_ONLY`, unique/monotonic claim, fresh runtime probe recorded, formal continuation not allowed;
+- #147 comment `5449455674`: G10 qualification `FAIL_CLOSED` for the same preclaim external planning-file mutation.
+
+The repeated G9/G10 failure is retained as evidence. Do not delete, overwrite, renumber, or synthesize replacement generations.
+
+Effective next takeover scope after v0.3.4 adoption:
+
+```yaml
+control_scope:
+  mode: qualification_only
+  source_ref: "github:EinzbernLi/AetherSwap#149@5449453374 + github:EinzbernLi/AetherSwap#147@5449455674"
+next_expected_generation: 11
+parent_claim_ref: 5449449417
+```
+
+The first post-adoption validation is one fresh Codex session started by ordinary natural language. It must complete the v0.3.4 Lead Activation Gate before any local/planning mutation and then stop for independent review. Do not replay all historical qualification samples.
+
+## 4. Primary business work
 
 ### TASK-050 / Issue #130
 
 Current status: **BLOCKED**.
 
-Blocking reason: the live `/api/market/steam_trade` field contract required for exact BUFF order -> Trade Offer binding has not been verified. The previous implementation whitelist is revoked.
+Blocking reason: the live `/api/market/steam_trade` field contract required for exact BUFF order -> Trade Offer binding remains unverified.
 
 Current terminal marker:
 
 `TASK050_REPLAN_BLOCKED_PENDING_LIVE_STEAM_TRADE_SCHEMA`
 
-Standing rule: do not create a TASK-050 implementation branch, do not infer undocumented fields, and do not run a live BUFF/Steam diagnostic without a new explicit OWNER authorization packet.
+Standing rules:
 
-## 4. Governance / local-resource tracks
+- do not create a TASK-050 implementation branch;
+- do not infer undocumented fields;
+- do not run a live BUFF/Steam diagnostic without a new explicit OWNER authorization packet;
+- takeover qualification or governance adoption does not grant such authorization.
 
-These tracks may progress independently of the blocked business task when they do not mutate the same runtime/state authority.
+## 5. Product architecture / accepted direction
 
-- Issue #141 — accepted read-only LPRL inventory/correction factual basis. No cleanup or migration authority.
-- Issue #143 — effective draft fact-record set `5440287345 + 5440560816` passed independent composite validation at `5446240299` and Sol acceptance at `5446252616`. The only authorized next step is **project-local fact-file materialization design**; no project-local fact files, Snapshot, Gate, Retirement, migration, cleanup, or reclamation are authorized yet.
-- Issue #144 — Codex native-subagent dispatch pilot is **CLOSED / PASS**. Codex Sol natively dispatched `gpt-5.6-terra / high` with isolated context; child result `5446240299`, Lead acceptance `5446252616`, pilot result `5446264237`. No OWNER manual child launch and no project mutation occurred.
-- Issue #145 / PR #146 — brownfield adoption of central governance v0.3.1 into the active integration line. Adoption is additive and preserves existing legacy/domain governance files.
+- Host/source retains purchase selection, order creation, payment and Host Purchase persistence authority.
+- Auto Offer is delivery lifecycle after a Host Purchase exists; it must not create a second purchase authority.
+- First-send authority is singular and must fail closed on ambiguous/non-idempotent outcomes.
+- Worker/runtime recovery is reconciliation/recovery, not a second first-send path.
+- Exact identity and lifecycle evidence are required for sensitive delivery/confirmation/reconciliation operations.
+- Broad/`accept_all` Steam confirmation authority remains forbidden.
 
-LPRL authority for the ongoing Aether evidence remains pinned to `EinzbernLi/agent-dev-governance@c769bc0b7b102cd12e54fcd966d638fb88a5a2cc` until separately upgraded/replayed.
-
-## 5. REAL-WRITE / safety state
+## 6. REAL-WRITE / safety state
 
 `REAL-WRITE GATE: CLOSED`
 
-No standing permission exists for real Steam/BUFF/platform mutations, payment, trade send/accept/confirmation, or destructive local-resource changes. Exact OWNER authorization is required for the affected action/packet.
+No standing permission exists for real Steam/BUFF/platform mutations, payment, trade send/accept/confirmation, or destructive local-resource changes. Exact OWNER authorization remains required for the affected action/packet.
 
-No LPRL Snapshot/Gate/Retirement/migration/cleanup/reclamation authority exists from the current governance work.
+No LPRL Snapshot/Gate/Retirement/migration/cleanup/reclamation authority is created by this governance adoption.
 
-## 6. Local-development model
+## 7. LPRL / local-resource track
+
+- Issue #143 effective draft fact records remain accepted.
+- Issue #148 remains design-only and substantively paused while takeover repair is being validated.
+- No `.local/lprl/` materialization, `.gitignore` change, Snapshot, Gate, Retirement, migration, cleanup, or reclaimability authority exists from this adoption.
+- The LPRL module pin is intentionally unchanged.
+
+## 8. Local-development model
 
 - GitHub is the durable Task/Result/Review/Acceptance source.
 - Local workspaces/worktrees are execution surfaces, not durable project authority.
-- Historical protected checkout and verifier details are retained in `.agent/PROJECT_CONTEXT.md` until a later reviewed compaction replaces them.
-- Local-required tasks use isolated workspaces/worktrees and exact source/tree handoff when necessary.
-- Local resource discovery has identified mixed Source/Workspace/State/Data/Evidence/Cache and shared Git topology; these remain under LPRL fail-closed handling rather than folder-name cleanup heuristics.
-- The Codex runtime has one accepted session-level capability sample showing native Terra dispatch with explicit model/reasoning selection and isolated child context. This is runtime evidence, not a permanent guarantee for future Codex sessions; every new Lead session must re-probe.
+- Historical protected-checkout rules remain in `.agent/PROJECT_CONTEXT.md`.
+- Local-required tasks use isolated workspaces/worktrees and exact source/tree handoff where required.
+- Every new formal Lead session must fresh-probe runtime capability; prior Codex dispatch evidence is not a permanent capability promise.
 
-## 7. Governance migration status
+## 9. Lead Activation Gate
 
-This adoption **adds a minimal authority layer; it does not delete legacy governance**.
+For projects using #149 durable Lead Claims, v0.3.4 precedence is:
 
-New authority entry points:
+```text
+Lead activation gate
+>
+Task recovery / execution
 
-- `.agent/GOVERNANCE_LOCK.yaml`
-- `.agent/LOCAL_POLICY.yaml`
-- `.agent/PROJECT_STATE.md`
-- `.agent/BOOTSTRAP.md`
+current Lead control scope
+>
+active_task_ref / primary product task
+```
 
-Legacy governance/domain documents remain referenced compatibility evidence in this phase. Later retirement/compaction requires a separate review proving that no current project-specific invariant or operational boundary would be lost.
+Before `ACTIVE`, only control-plane recovery/verification is allowed. No formal Task execution/dispatch, tests, source/project-local planning mutation, external control-workspace planning/progress mutation for Aether, network/platform/business action, or premature authorization request may occur.
 
-## 8. Do Not Change without a new accepted Task / explicit gate
+If claim persistence, post-write uniqueness verification, or fresh runtime probe cannot complete, use `LEAD_ACTIVATION_BLOCKED` and fail closed.
+
+## 10. Do Not Change without new accepted authority
 
 - Do not weaken REAL-WRITE gates.
 - Do not merge integration to main without OWNER approval.
 - Do not implement TASK-050 while its live schema blocker remains open.
-- Do not reintroduce broad/`accept_all` Steam confirmation authority.
 - Do not blindly retry ambiguous non-idempotent writes.
 - Do not publish secrets/credentials/session material.
 - Do not clean/reset/delete/move protected local project resources based only on age, task number or folder name.
-- Do not perform LPRL cleanup/migration before the required future Snapshot/Gate/authorization chain exists.
-- Do not persist one Codex native-dispatch observation as a permanent runtime capability assumption.
+- Do not perform LPRL cleanup/migration before a separately authorized future chain exists.
+- Do not widen takeover control scope from the natural-language prompt, primary Task ref, or planning files.
 
-## 9. Next actions
+## 11. Next actions
 
-1. Complete review and acceptance of PR #146, then merge the minimal governance authority layer to `integration/auto-buyer-offer` if still exact and conflict-free.
-2. After adoption merge, run the v0.3.1 natural-language Web <-> Codex takeover qualification: normal takeover, stale checkpoint reconciliation, and stale Lead generation.
-3. Design the project-local LPRL fact-file materialization from the accepted #143 effective draft; keep this as a separately reviewed step and do not create Snapshot/Gate/Retirement authority.
-4. Keep TASK-050 blocked until a separately authorized sanitized live schema capture closes its exact contract gap.
-5. After governance/takeover stability is proven, perform a separate reviewed compaction of legacy `.agent` documents; do not combine that cleanup with initial adoption.
+1. Review this minimal v0.3.4 governance adoption PR and merge only to `integration/auto-buyer-offer` if exact and conflict-free.
+2. Start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
+3. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, claim-before-task ordering, post-write uniqueness verification and fresh runtime probe, with zero pre-ACTIVE local/planning mutation.
+4. Web Sol independently reviews #149/#147 evidence. If the v0.3.4 sample passes, close the takeover-repair qualification without replaying all historical samples.
+5. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
