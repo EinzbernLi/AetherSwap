@@ -1,6 +1,6 @@
 # AetherSwap Current Project State
 
-Status: **governance v0.3.5 cold-start guard adoption candidate; product work unchanged**  
+Status: **governance v0.3.5 cold-start guard adopted; post-adoption validation pending; product work unchanged**  
 State date: **2026-08-28**
 
 This file is a compact current-state entry point, not a transcript. GitHub Issues/PRs remain the durable Task/Result/Review/Acceptance source.
@@ -17,9 +17,10 @@ Do not silently treat `main` and `integration/auto-buyer-offer` as synchronized 
 
 ## 2. Governance baseline
 
-This candidate upgrades only the ordinary central-governance pin from v0.3.4 to v0.3.5:
+This adoption upgrades only the ordinary central-governance pin from v0.3.4 to v0.3.5:
 
 - central governance: `EinzbernLi/agent-dev-governance@a42359b56210b02a66cefd809c5851f53a252590` (`v0.3.5`);
+- Aether v0.3.5 adoption commit: `1b96791cc95fbcafcf9941ed2d3bbbce1a5fb978`;
 - canonical Lead Claim sink: `github:EinzbernLi/AetherSwap#149`;
 - takeover qualification evidence: `github:EinzbernLi/AetherSwap#147`;
 - LPRL remains separately pinned and unchanged at `c769bc0b7b102cd12e54fcd966d638fb88a5a2cc` (`v0.2.2`).
@@ -152,8 +153,7 @@ If claim persistence, post-write uniqueness verification, or fresh runtime probe
 
 ## 11. Next actions
 
-1. Review and merge this minimal v0.3.5 adoption only to `integration/auto-buyer-offer` if exact and conflict-free.
-2. Start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
-3. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, root-guard-before-planning ordering, post-write uniqueness verification and fresh runtime probe.
-4. Web Sol independently reviews #149/#147 evidence. If the v0.3.5 sample passes, close the takeover-repair qualification without replaying historical samples.
-5. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
+1. Start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
+2. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, root-guard-before-planning ordering, post-write uniqueness verification and fresh runtime probe.
+3. Web Sol independently reviews #149/#147 evidence. If the v0.3.5 sample passes, close the takeover-repair qualification without replaying historical samples.
+4. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
