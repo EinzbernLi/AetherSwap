@@ -1,15 +1,14 @@
 # AetherSwap Current Project State
 
-Status: **governance v0.3.5 cold-start guard adopted; post-adoption validation pending; product work unchanged**  
+Status: **governance v0.3.5 adopted; LPRL v0.2.3-pilot accepted for Aether repin; product work unchanged**  
 State date: **2026-08-28**
 
-This file is a compact current-state entry point, not a transcript. GitHub Issues/PRs remain the durable Task/Result/Review/Acceptance source.
+This file is a compact current-state entry point, not a transcript. GitHub Issues/PRs remain the durable Task/Result/Review/Acceptance source. When this file lags a newer exact Issue/PR/Lead record, reconcile against the newer durable record rather than treating stale prose as authority.
 
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- v0.3.5 adoption source ref: `4aee488af792627be6c50c0880647073a9f67023`.
-- That source ref is the accepted Aether v0.3.4 governance adoption commit; no product code has advanced during the post-adoption takeover validation.
+- Current pre-repin integration baseline: `52d00bca0468cdfb5745f32cae16df4bea301a54`.
 - `main` remains the release line and is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
 
@@ -17,45 +16,27 @@ Do not silently treat `main` and `integration/auto-buyer-offer` as synchronized 
 
 ## 2. Governance baseline
 
-This adoption upgrades only the ordinary central-governance pin from v0.3.4 to v0.3.5:
+Ordinary central governance and LPRL are separately pinned:
 
-- central governance: `EinzbernLi/agent-dev-governance@a42359b56210b02a66cefd809c5851f53a252590` (`v0.3.5`);
+- ordinary central governance: `EinzbernLi/agent-dev-governance@a42359b56210b02a66cefd809c5851f53a252590` (`v0.3.5`), unchanged by the LPRL repin;
 - Aether v0.3.5 adoption commit: `1b96791cc95fbcafcf9941ed2d3bbbce1a5fb978`;
 - canonical Lead Claim sink: `github:EinzbernLi/AetherSwap#149`;
-- takeover qualification evidence: `github:EinzbernLi/AetherSwap#147`;
-- LPRL remains separately pinned and unchanged at `c769bc0b7b102cd12e54fcd966d638fb88a5a2cc` (`v0.2.2`).
+- LPRL profile: `EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478` (`v0.2.3-pilot`), separately pinned;
+- central LPRL qualification: Issue `agent-dev-governance#25` completed, PR #26 merge commit `d63dae9ac1de65420f410cb36e6c2ccb58cc0478`, focused Terra PASS `5451292545`, Sol final acceptance `5451454492`.
 
-v0.3.5 does not change Lead Claim or `control_scope` semantics. It adds one minimal runtime cold-start rule: because Codex already auto-loads the repository-root `AGENTS.md`, Aether places a short non-authoritative guard at the top of that existing file so a new Lead/takeover/resume reaches the existing Lead Activation Gate before planning/progress/test/source/local mutation or Task recovery.
+The LPRL repin updates the Facts representation profile only. It does not move ordinary governance to central `main`, does not introduce a second Task authority, and does not create local lifecycle action authority.
 
-No Agent Bus, session DB, distributed lock, second Task authority, local daemon, automatic launcher, migration, or cleanup mechanism is introduced.
+## 3. Current Lead / control state
 
-## 3. Current Lead / qualification state
+Current durable control is in Issue #149:
 
-Current durable control chain in #149:
+- G12 claim `5450113411` resumed #148 design work under explicit task-scoped authority;
+- G13 claim `5451471369` is the current Web Sol Lead claim, parent G12;
+- G13 activation verify `5451474266` establishes `ACTIVE` after post-write uniqueness verification and a fresh runtime capability probe;
+- current control scope is `task_scoped`, sourced from `github:EinzbernLi/AetherSwap#148@5450111293`;
+- current safe work is #148 LPRL design / accepted-profile repin review only.
 
-- G8 Codex staging claim `5449198598`: accepted staging PASS;
-- G9 Codex claim `5449282726`: control takeover succeeded, qualification `FAIL_CLOSED` because external control-workspace `progress.md` was written before scope recovery;
-- G10 Codex claim `5449449417`: latest valid claim, parent G9;
-- G10 activation verify `5449453374`: `ACTIVE_CONTROL_ONLY`, unique/monotonic claim, fresh runtime probe recorded, formal continuation not allowed;
-- #147 comment `5449455674`: G10 qualification `FAIL_CLOSED` for the same preclaim external planning-file mutation;
-- Aether v0.3.4 adoption merged at `4aee488af792627be6c50c0880647073a9f67023`;
-- the first fresh post-v0.3.4 Codex takeover created no durable G11; independent Web audit `5449566016` records that post-adoption sample as not qualified.
-
-Because the v0.3.4 sample created no G11, generation did not advance. Do not delete, overwrite, renumber, or synthesize a replacement generation.
-
-Effective next takeover scope after v0.3.5 adoption:
-
-```yaml
-control_scope:
-  mode: qualification_only
-  source_ref: "github:EinzbernLi/AetherSwap#149@5449453374"
-next_expected_generation: 11
-parent_claim_ref: 5449449417
-```
-
-The next sample is exactly one fresh Codex Sol session started by the ordinary natural-language Aether takeover request. Root `AGENTS.md` must route it into governance recovery before any planning/progress mutation. PASS requires G11 from exact parent G10, inherited `qualification_only` scope, post-write uniqueness verification and fresh runtime probe, with zero pre-ACTIVE Task/test/source/local/network action.
-
-Do not replay all historical qualification samples.
+Current G13 does **not** authorize local materialization, local workspace restructuring, mutation of `F:\AetherSwap\`, Snapshot/Gate/Retirement/Migration/Cleanup/Reclamation, TASK-050 product work, live Steam/BUFF diagnostics, or integration-to-main.
 
 ## 4. Primary business work
 
@@ -74,7 +55,7 @@ Standing rules:
 - do not create a TASK-050 implementation branch;
 - do not infer undocumented fields;
 - do not run a live BUFF/Steam diagnostic without a new explicit OWNER authorization packet;
-- takeover qualification or governance adoption does not grant such authorization.
+- governance/LPRL work does not grant such authorization.
 
 ## 5. Product architecture / accepted direction
 
@@ -91,14 +72,17 @@ Standing rules:
 
 No standing permission exists for real Steam/BUFF/platform mutations, payment, trade send/accept/confirmation, or destructive local-resource changes. Exact OWNER authorization remains required for the affected action/packet.
 
-No LPRL Snapshot/Gate/Retirement/migration/cleanup/reclamation authority is created by this governance adoption.
+No LPRL Snapshot/Gate/Retirement/migration/cleanup/reclamation authority is created by the v0.2.3-pilot repin.
 
 ## 7. LPRL / local-resource track
 
-- Issue #143 effective draft fact records remain accepted.
-- Issue #148 remains design-only and substantively paused while takeover repair is being validated.
-- No `.local/lprl/` materialization, `.gitignore` change, Snapshot, Gate, Retirement, migration, cleanup, or reclaimability authority exists from this adoption.
-- The LPRL module pin is intentionally unchanged.
+- Issue #143 effective draft fact records remain accepted historical evidence.
+- Issue #148 remains the active design track.
+- Central LPRL v0.2.3-pilot closed the five representation gaps exposed by #148: non-resource container endpoints, deployment-definition/runtime separation, measurement-basis separation, equality-only observation closure, and Source provenance / controlled-Workspace separation.
+- `F:\AetherSwap\` remains an upstream-derived deployed/reference Source location and must not be relabeled or mutated into the controlled `EinzbernLi/AetherSwap` development Workspace.
+- A future controlled development Workspace remains a separate subject and requires its own later authorized creation/selection step.
+- No `.local/lprl/` materialization, `.gitignore` change, Snapshot, Gate, Retirement, migration, cleanup, or reclaimability action is authorized by this repin.
+- Any materialization must be a separate frozen Task after the repin itself is reviewed and accepted.
 
 ## 8. Local-development model
 
@@ -136,9 +120,7 @@ current Lead control scope
 active_task_ref / primary product task
 ```
 
-Before `ACTIVE`, only control-plane recovery/verification is allowed. No formal Task execution/dispatch, tests, source/project-local planning mutation, external control-workspace planning/progress mutation for Aether, network/platform/business action, or premature authorization request may occur.
-
-If claim persistence, post-write uniqueness verification, or fresh runtime probe cannot complete, use `LEAD_ACTIVATION_BLOCKED` and fail closed.
+Before `ACTIVE`, only control-plane recovery/verification is allowed. If claim persistence, post-write uniqueness verification, or fresh runtime probe cannot complete, use `LEAD_ACTIVATION_BLOCKED` and fail closed.
 
 ## 10. Do Not Change without new accepted authority
 
@@ -148,12 +130,12 @@ If claim persistence, post-write uniqueness verification, or fresh runtime probe
 - Do not blindly retry ambiguous non-idempotent writes.
 - Do not publish secrets/credentials/session material.
 - Do not clean/reset/delete/move protected local project resources based only on age, task number or folder name.
-- Do not perform LPRL cleanup/migration before a separately authorized future chain exists.
+- Do not perform LPRL materialization/cleanup/migration before a separately authorized future chain exists.
 - Do not widen takeover control scope from the natural-language prompt, primary Task ref, `AGENTS.md`, or planning files.
 
-## 11. Next actions
+## 11. Next safe actions
 
-1. Start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
-2. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, root-guard-before-planning ordering, post-write uniqueness verification and fresh runtime probe.
-3. Web Sol independently reviews #149/#147 evidence. If the v0.3.5 sample passes, close the takeover-repair qualification without replaying historical samples.
-4. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
+1. Independently validate the exact Aether LPRL repin change against central accepted v0.2.3-pilot and current #148 boundaries.
+2. If that exact candidate passes Lead acceptance, merge only into `integration/auto-buyer-offer` using the repository merge-commit policy; do not merge integration to `main`.
+3. After repin acceptance, #148 may finalize the post-v0.2.3 materialization design and freeze a **separate** implementation Task.
+4. Local `.local/lprl/` creation and controlled-workspace creation remain blocked until such a separate Task explicitly authorizes them.
