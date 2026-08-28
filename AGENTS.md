@@ -1,3 +1,18 @@
+# AetherSwap Cold-Start Guard — MUST RUN FIRST
+
+当当前会话是新的正式 Lead、项目接管或恢复会话（包括“接管 Aether 的开发，我们继续。”这类自然语言入口）时，**在任何 planning/progress 写入、测试、源码修改、Task 恢复/执行、executor dispatch、network/platform/business action 之前**，必须先完成以下控制面恢复：
+
+1. 读取 `.agent/GOVERNANCE_LOCK.yaml`、`.agent/LOCAL_POLICY.yaml`、`.agent/PROJECT_STATE.md`、`.agent/BOOTSTRAP.md`；
+2. 读取 canonical Lead Claim sink `github:EinzbernLi/AetherSwap#149`，找到最新有效 parent claim 和当前 control scope；
+3. 创建下一单调 generation，并精确绑定 `parent_claim_ref`，不得凭“继续开发”扩大 scope；
+4. 写后重新读取 #149，确认无 sibling / duplicate generation / newer competing claim；
+5. 执行 fresh Runtime Capability Probe；
+6. 只有上述全部成功后才可视为 `ACTIVE`，然后才能恢复 Task/Result/代码工作。
+
+如果 claim sink 不可读/不可写、唯一性无法验证或 fresh probe 无法完成，返回 `LEAD_ACTIVATION_BLOCKED` 并 fail closed。**不得先写 `progress.md` / planning 文件、先跑测试或先做 Task，再补 claim。**
+
+本 guard 仅用于把 runtime cold-start 路由到现有治理入口；它不是新的 Task/Result/Lead Claim authority，不镜像当前 generation，不授予 Steam/BUFF/业务/本地资源权限。具体状态和权限仍以 pinned governance、#149、Task/Result/Acceptance 及 OWNER gate 为准。
+
 # AetherSwap 协作与安全规则
 
 项目固定事实见 [`.agent/PROJECT_CONTEXT.md`](.agent/PROJECT_CONTEXT.md)，流程见 [`.agent/WORKFLOW.md`](.agent/WORKFLOW.md)，任务模板见 [`.agent/TASK_TEMPLATE.md`](.agent/TASK_TEMPLATE.md)，审查清单见 [`.agent/REVIEW_CHECKLIST.md`](.agent/REVIEW_CHECKLIST.md)，PR 模板见 [`.github/pull_request_template.md`](.github/pull_request_template.md)。
