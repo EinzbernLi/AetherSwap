@@ -366,7 +366,7 @@ def test_coordinator_routes_result_unknown_to_read_and_never_resends():
     assert result.after.snapshot.delivery_error is None
 
 
-def test_coordinator_result_unknown_history_recovery_binds_exact_offer_without_send():
+def test_coordinator_result_unknown_never_uses_history_for_offer_identity():
     before = make_delivery(
         DeliveryStatus.RESULT_UNKNOWN,
         delivery_error="write_result_unknown",
@@ -388,92 +388,21 @@ def test_coordinator_result_unknown_history_recovery_binds_exact_offer_without_s
         },
         timeout_seconds=5.0,
         allow_writes=True,
-        clock=lambda: 14.0,
+        clock=lambda: (_ for _ in ()).throw(
+            AssertionError("unproven recovery must not read the clock")
+        ),
     )
 
     result = coordinator.recover_result_unknown_readonly(before)
 
-    assert result.persisted is True
-    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
-    assert result.after.snapshot.steam_tradeoffer_id == "history-offer-1"
-    assert result.after.snapshot.counterparty_steam_id == "76561198000000002"
-    assert result.after.snapshot.offer_sent_at == 14.0
-    assert result.after.snapshot.delivery_error is None
+    assert result.persisted is False
+    assert result.after == before
+    assert result.decision.result is AutoOfferResult.WAITING
+    assert result.decision.detail == "read_result_unknown"
     assert client.steam_calls == 1
-    assert client.history_calls == [(1, "csgo")]
+    assert client.history_calls == []
     assert send_adapter.calls == []
-    assert len(store.advance_calls) == 1
-
-
-def test_history_recovery_continues_existing_steam_lifecycle_to_awaiting_inventory():
-    before = make_delivery(
-        DeliveryStatus.RESULT_UNKNOWN,
-        delivery_error="write_result_unknown",
-    )
-    store = SpyStore(before)
-    client = HistoryClient(
-        history_pages={1: history_page(items=[history_record()])},
-    )
-    buff_adapter = BuffReadOnlyAdapter(
-        client,
-        account_id=IDENTITY["account_id"],
-    )
-
-    def accepted_trade_offer(request):
-        return PlatformResult(
-            request=request,
-            status=PlatformResultStatus.SUCCESS,
-            detail="trade_offer_read",
-            evidence=SteamTradeOfferEvidence(
-                steam_tradeoffer_id=request.steam_tradeoffer_id,
-                account_steam_id=IDENTITY["recipient_steam_id"],
-                counterparty_steam_id="76561198000000002",
-                is_our_offer=True,
-                lifecycle=SteamTradeOfferLifecycle.ACCEPTED,
-                items_to_give=(),
-                items_to_receive=(
-                    TradeOfferItemEvidence(
-                        appid=730,
-                        contextid="2",
-                        assetid="asset-source-1",
-                        amount=1,
-                    ),
-                ),
-            ),
-        )
-
-    steam_adapter = SpyAdapter(
-        PlatformCapability.READ_STEAM_TRADE_OFFER,
-        accepted_trade_offer,
-    )
-    send_adapter = NeverSendAdapter()
-    coordinator = DeliveryCoordinator(
-        store,
-        {
-            PlatformCapability.READ_OFFER_STATE: buff_adapter,
-            PlatformCapability.READ_STEAM_TRADE_OFFER: steam_adapter,
-            PlatformCapability.SEND_OFFER: send_adapter,
-        },
-        timeout_seconds=5.0,
-        allow_writes=True,
-        clock=lambda: 14.0,
-    )
-
-    recovered = coordinator.recover_result_unknown_readonly(before).after
-    confirmed = coordinator.step(recovered).after
-    awaiting_inventory = coordinator.step(confirmed)
-
-    assert recovered.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
-    assert confirmed.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
-    assert awaiting_inventory.after.snapshot.delivery_status is (
-        DeliveryStatus.AWAITING_INVENTORY
-    )
-    assert awaiting_inventory.after.snapshot.steam_tradeoffer_id == (
-        "history-offer-1"
-    )
-    assert len(steam_adapter.calls) == 2
-    assert client.history_calls == [(1, "csgo")]
-    assert send_adapter.calls == []
+    assert store.advance_calls == []
 
 
 def test_coordinator_history_recovery_is_not_used_for_seller_awaiting_offer():
@@ -516,7 +445,7 @@ def test_coordinator_history_recovery_is_not_used_for_seller_awaiting_offer():
     assert store.advance_calls == []
 
 
-def test_repeated_unresolved_history_recovery_never_sends_or_mutates():
+def test_repeated_unresolved_recovery_never_reads_history_sends_or_mutates():
     before = make_delivery(
         DeliveryStatus.RESULT_UNKNOWN,
         delivery_error="write_result_unknown",
@@ -555,14 +484,7 @@ def test_repeated_unresolved_history_recovery_never_sends_or_mutates():
     assert first.decision.detail == "read_result_unknown"
     assert second.decision.detail == "read_result_unknown"
     assert client.steam_calls == 2
-    assert client.history_calls == [
-        (1, "csgo"),
-        (2, "csgo"),
-        (3, "csgo"),
-        (1, "csgo"),
-        (2, "csgo"),
-        (3, "csgo"),
-    ]
+    assert client.history_calls == []
     assert store.advance_calls == []
     assert send_adapter.calls == []
 

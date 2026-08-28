@@ -1,141 +1,157 @@
 # AetherSwap Current Project State
 
-Status: **governance v0.3.5 adopted; LPRL v0.2.3-pilot accepted for Aether repin; product work unchanged**  
+Status: **central governance v0.3.6 adopted; G16 Web Lead ACTIVE; TASK-050 offline foundation merged; next live sent-history probe still separately gated**  
 State date: **2026-08-28**
 
-This file is a compact current-state entry point, not a transcript. GitHub Issues/PRs remain the durable Task/Result/Review/Acceptance source. When this file lags a newer exact Issue/PR/Lead record, reconcile against the newer durable record rather than treating stale prose as authority.
+This is a compact current-state entry point, not a transcript. Newer exact GitHub Issue/PR/Lead records always supersede stale prose here.
 
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- Current pre-repin integration baseline: `52d00bca0468cdfb5745f32cae16df4bea301a54`.
-- `main` remains the release line and is not the active Auto Offer integration line.
+- Current integration baseline after governance v0.3.6 adoption: `d484d6268ef9fc7cef1f1ba538e0b6818fb4ad27`.
+- `main` is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
-
-Do not silently treat `main` and `integration/auto-buyer-offer` as synchronized baselines.
 
 ## 2. Governance baseline
 
-Ordinary central governance and LPRL are separately pinned:
+Ordinary governance and LPRL are separately pinned.
 
-- ordinary central governance: `EinzbernLi/agent-dev-governance@a42359b56210b02a66cefd809c5851f53a252590` (`v0.3.5`), unchanged by the LPRL repin;
-- Aether v0.3.5 adoption commit: `1b96791cc95fbcafcf9941ed2d3bbbce1a5fb978`;
-- canonical Lead Claim sink: `github:EinzbernLi/AetherSwap#149`;
-- LPRL profile: `EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478` (`v0.2.3-pilot`), separately pinned;
-- central LPRL qualification: Issue `agent-dev-governance#25` completed, PR #26 merge commit `d63dae9ac1de65420f410cb36e6c2ccb58cc0478`, focused Terra PASS `5451292545`, Sol final acceptance `5451454492`.
+Governance adopted through PR #159 / merge `d484d6268ef9fc7cef1f1ba538e0b6818fb4ad27`:
 
-The LPRL repin updates the Facts representation profile only. It does not move ordinary governance to central `main`, does not introduce a second Task authority, and does not create local lifecycle action authority.
+- central governance: `EinzbernLi/agent-dev-governance@c06b82de61de9249d91473bda974228725bdb714` (`v0.3.6`);
+- one Active project Lead + bounded same-project Web/Codex/Luna/Terra workers;
+- `parallel workers != parallel Leads`;
+- Lead owns integration and final acceptance;
+- Worker/Validator sessions must not create project Lead Claims merely because they execute a Task in another runtime;
+- actual project Lead handoff requires explicit OWNER intent to move the project Lead.
+
+LPRL remains separately pinned:
+
+- `EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478` (`v0.2.3-pilot`).
+
+The ordinary governance repin does not grant local-resource lifecycle authority and does not change REAL-WRITE.
 
 ## 3. Current Lead / control state
 
-Current durable control is in Issue #149:
+Canonical sink: Issue #149.
 
-- G12 claim `5450113411` resumed #148 design work under explicit task-scoped authority;
-- G13 claim `5451471369` is the current Web Sol Lead claim, parent G12;
-- G13 activation verify `5451474266` establishes `ACTIVE` after post-write uniqueness verification and a fresh runtime capability probe;
-- current control scope is `task_scoped`, sourced from `github:EinzbernLi/AetherSwap#148@5450111293`;
-- current safe work is #148 LPRL design / accepted-profile repin review only.
+Current exact state:
 
-Current G13 does **not** authorize local materialization, local workspace restructuring, mutation of `F:\AetherSwap\`, Snapshot/Gate/Retirement/Migration/Cleanup/Reclamation, TASK-050 product work, live Steam/BUFF diagnostics, or integration-to-main.
+- G15 claim `5452116330` was a historical task-scoped LPRL-materialization Lead state;
+- OWNER subsequently clarified that the separate file-management/LPRL line is not intended to own the Aether project Lead while this Sol/Web session owns the Aether functional line;
+- G16 claim `5452445521`, parent G15, restores one Web Aether Lead under `normal_project_continuation`;
+- G16 activation verify `5452448339` confirms uniqueness and no G17/newer competing claim;
+- runtime: Web / GPT-5.6 Sol;
+- TASK-050 offline/program development is within G16 scope;
+- file-management/LPRL may run as a separately bounded worker/workstream but not as a sibling Aether Lead;
+- live authenticated one-shot remains separately gated;
+- REAL-WRITE remains CLOSED;
+- integration -> main remains OWNER-gated.
 
-## 4. Primary business work
+## 4. Lead vs Worker launch semantics
 
-### TASK-050 / Issue #130
+Formal project takeover examples:
 
-Current status: **BLOCKED**.
+```text
+接管 Aether 的开发，我们继续。
+把 Aether 项目 Lead 移交给 Codex。
+```
 
-Blocking reason: the live `/api/market/steam_trade` field contract required for exact BUFF order -> Trade Offer binding remains unverified.
+These enter the Lead Activation Gate.
 
-Current terminal marker:
+Task execution examples:
 
-`TASK050_REPLAN_BLOCKED_PENDING_LIVE_STEAM_TRADE_SCHEMA`
+```text
+执行 <task_ref>；作为该 Task 的执行者，不接管项目 Lead。
+审计 <task_ref>；作为该 Task 的验证者，不接管项目 Lead。
+```
 
-Standing rules:
+These are Worker/Validator sessions and must not modify #149.
 
-- do not create a TASK-050 implementation branch;
-- do not infer undocumented fields;
-- do not run a live BUFF/Steam diagnostic without a new explicit OWNER authorization packet;
-- governance/LPRL work does not grant such authorization.
+An actual project Lead handoff requires explicit OWNER intent to move the **project Lead**. `接管 TASK` / `执行 TASK` / `continue TASK` does not itself transfer Lead.
 
-## 5. Product architecture / accepted direction
+## 5. Parallel workstreams
 
-- Host/source retains purchase selection, order creation, payment and Host Purchase persistence authority.
-- Auto Offer is delivery lifecycle after a Host Purchase exists; it must not create a second purchase authority.
-- First-send authority is singular and must fail closed on ambiguous/non-idempotent outcomes.
-- Worker/runtime recovery is reconciliation/recovery, not a second first-send path.
-- Exact identity and lifecycle evidence are required for sensitive delivery/confirmation/reconciliation operations.
-- Broad/`accept_all` Steam confirmation authority remains forbidden.
+Same-project workers may run concurrently only after the Active Lead marks each Task `parallel_safe` and verifies:
 
-## 6. REAL-WRITE / safety state
+- exact frozen baseline;
+- declared dependencies and no unmet ordering dependency;
+- pairwise disjoint substantive write scopes;
+- isolated write surface for implementation work;
+- no same-file/shared-mutable-state multiwriter.
+
+Read overlap and unambiguous append-only Result comments are allowed. Merge conflict is not a coordination mechanism. Lead owns rebase/replan/serialisation, integration order and acceptance.
+
+## 6. TASK-050 current state
+
+Issue #130 has been reconciled to the Steam sent-history architecture.
+
+Merged:
+
+- Slice A / PR #155 -> merge `1a62c7b40c784543b398217df4bb17e365ac19c0`, exact-head CI `2180/2180` PASS.
+  - BUFF buy-order history retired as Trade Offer identity source.
+  - lifecycle/refund history preserved.
+- Slice B / PR #158 -> merge `f3ba4dd8746d299e87d01f5e06d01eca5a2dbd93`, exact-head CI `2215/2215` PASS.
+  - normalized sent-offer discovery/binding contract exists.
+  - 0 candidate -> no binding / caller may WAIT.
+  - exactly 1 candidate -> eligible for exact `GetTradeOffer` closure.
+  - 2+ -> ambiguity / fail closed.
+
+Current target flow:
+
+```text
+persist OFFER_ATTEMPTED + offer_attempted_at
+-> exactly one buyer SEND
+-> RESULT_UNKNOWN when immutable offer identity is not durably proven
+-> bounded Steam sent-history discovery
+-> 0 / 1 / 2+
+-> unique candidate exact GetTradeOffer closure
+-> one Store CAS bind
+-> existing confirmation / lifecycle / completed-trade receipt flow
+```
+
+No production `GetTradeOffers` transport/parser is implemented yet because real response shape/TLS/time semantics remain unverified.
+
+Latest one-shot packet is #130 comment `5452286470`. It remains **NOT AUTHORIZED** by ordinary continuation.
+
+## 7. Codex ↔ GitHub reconciliation
+
+Cross-runtime audit is recorded in #130 comment `5452399614`.
+
+- TASK-042 and TASK-047 production work are represented in GitHub history and current integration descendants.
+- prior TASK-050 production-simulation branch/commit is not repository-resolvable and must not be reconstructed from prose.
+- Windows sent-history probe harness (`test_sent_history_probe_outcome.py`, `test_sent_history_direct_probe.py` plus companion control script) was locally verified by Codex but is not present in GitHub source.
+- exact local harness recovery/export is defined by #130 comment `5452404406`; that is offline source audit only, not a live probe.
+
+## 8. Safety state
 
 `REAL-WRITE GATE: CLOSED`
 
-No standing permission exists for real Steam/BUFF/platform mutations, payment, trade send/accept/confirmation, or destructive local-resource changes. Exact OWNER authorization remains required for the affected action/packet.
+Still requires exact separate OWNER authority where applicable:
 
-No LPRL Snapshot/Gate/Retirement/migration/cleanup/reclamation authority is created by the v0.2.3-pilot repin.
+- live authenticated Steam/BUFF schema/probe requests marked separately gated by Task;
+- Steam/BUFF SEND/ACCEPT/CONFIRM/payment/purchase/platform mutation;
+- destructive local-resource migration/retirement/cleanup/reclamation;
+- integration -> main;
+- actual project Lead handoff.
 
-## 7. LPRL / local-resource track
+No generic “continue” instruction opens these gates.
 
-- Issue #143 effective draft fact records remain accepted historical evidence.
-- Issue #148 remains the active design track.
-- Central LPRL v0.2.3-pilot closed the five representation gaps exposed by #148: non-resource container endpoints, deployment-definition/runtime separation, measurement-basis separation, equality-only observation closure, and Source provenance / controlled-Workspace separation.
-- `F:\AetherSwap\` remains an upstream-derived deployed/reference Source location and must not be relabeled or mutated into the controlled `EinzbernLi/AetherSwap` development Workspace.
-- A future controlled development Workspace remains a separate subject and requires its own later authorized creation/selection step.
-- No `.local/lprl/` materialization, `.gitignore` change, Snapshot, Gate, Retirement, migration, cleanup, or reclaimability action is authorized by this repin.
-- Any materialization must be a separate frozen Task after the repin itself is reviewed and accepted.
+## 9. Cold-start rule
 
-## 8. Local-development model
-
-- GitHub is the durable Task/Result/Review/Acceptance source.
-- Local workspaces/worktrees are execution surfaces, not durable project authority.
-- Historical protected-checkout rules remain in `.agent/PROJECT_CONTEXT.md`.
-- Local-required tasks use isolated workspaces/worktrees and exact source/tree handoff where required.
-- Every new formal Lead session must fresh-probe runtime capability; prior Codex dispatch evidence is not a permanent capability promise.
-- Root `AGENTS.md` cold-start guard is routing only and is not a local state or authority store.
-
-## 9. Lead Activation Gate / cold-start order
-
-For new formal Lead/takeover/resume sessions:
+A new session first decides whether it is:
 
 ```text
-runtime-auto-loaded root AGENTS guard
--> GOVERNANCE_LOCK / LOCAL_POLICY / PROJECT_STATE / BOOTSTRAP
--> canonical #149 parent + current control scope
--> next parent-bound claim
--> re-read uniqueness
--> fresh Runtime Capability Probe
--> ACTIVE
--> only then Task recovery / execution
+project Lead takeover/resume
+or
+bounded Task Worker/Validator
 ```
 
-Precedence remains:
+Only the first path creates the next #149 generation. Worker/Validator sessions operate under their Task package and return Results to the Active Lead.
 
-```text
-Lead activation gate
->
-Task recovery / execution
+## 10. Next safe actions
 
-current Lead control scope
->
-active_task_ref / primary product task
-```
-
-Before `ACTIVE`, only control-plane recovery/verification is allowed. If claim persistence, post-write uniqueness verification, or fresh runtime probe cannot complete, use `LEAD_ACTIVATION_BLOCKED` and fail closed.
-
-## 10. Do Not Change without new accepted authority
-
-- Do not weaken REAL-WRITE gates.
-- Do not merge integration to main without OWNER approval.
-- Do not implement TASK-050 while its live schema blocker remains open.
-- Do not blindly retry ambiguous non-idempotent writes.
-- Do not publish secrets/credentials/session material.
-- Do not clean/reset/delete/move protected local project resources based only on age, task number or folder name.
-- Do not perform LPRL materialization/cleanup/migration before a separately authorized future chain exists.
-- Do not widen takeover control scope from the natural-language prompt, primary Task ref, `AGENTS.md`, or planning files.
-
-## 11. Next safe actions
-
-1. Independently validate the exact Aether LPRL repin change against central accepted v0.2.3-pilot and current #148 boundaries.
-2. If that exact candidate passes Lead acceptance, merge only into `integration/auto-buyer-offer` using the repository merge-commit policy; do not merge integration to `main`.
-3. After repin acceptance, #148 may finalize the post-v0.2.3 materialization design and freeze a **separate** implementation Task.
-4. Local `.local/lprl/` creation and controlled-workspace creation remain blocked until such a separate Task explicitly authorizes them.
+1. For the Codex-local probe harness audit, launch Codex as a **Task Worker**, not a Lead takeover.
+2. Review any recovered exact local probe source against current integration before deciding whether it belongs in GitHub.
+3. Continue TASK-050 offline work under G16.
+4. Do not execute the live sent-history one-shot without its separate explicit OWNER authorization.

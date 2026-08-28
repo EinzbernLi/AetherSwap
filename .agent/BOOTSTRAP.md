@@ -1,184 +1,155 @@
 # AetherSwap Project Bootstrap
 
-This is the minimal cold-start / takeover entry point for a new Lead session. It references durable facts instead of copying project history.
+This is the minimal cold-start entry point. It distinguishes a **project Lead takeover** from a **Task Worker/Validator launch**.
 
 ## Project
 
 ```yaml
 project_name: AetherSwap
-project_aliases:
-  - Aether
-  - AetherSwap
-current_phase: auto-offer-integration-plus-governance-continuity
+project_aliases: [Aether, AetherSwap]
 active_development_branch: integration/auto-buyer-offer
 primary_product_task_ref: github:EinzbernLi/AetherSwap#130
-governance_work_refs:
-  - github:EinzbernLi/AetherSwap#147
-  - github:EinzbernLi/AetherSwap#149
-lprl_work_refs:
-  - github:EinzbernLi/AetherSwap#143
-  - github:EinzbernLi/AetherSwap#148
-governance_ref: EinzbernLi/agent-dev-governance@a42359b56210b02a66cefd809c5851f53a252590
-lprl_ref: EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478
-lprl_profile: v0.2.3-pilot
 task_fact_source: github_issue_pr
 lead_claim_sink: github:EinzbernLi/AetherSwap#149
-last_stable_checkpoint: null
+governance_ref: EinzbernLi/agent-dev-governance@c06b82de61de9249d91473bda974228725bdb714
+governance_version: v0.3.6
+lprl_ref: EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478
+lprl_profile: v0.2.3-pilot
 ```
 
-Ordinary governance and LPRL are separately pinned. Do not infer that the LPRL merge moves Aether's ordinary governance pin to central `main`.
+Ordinary governance and LPRL remain separately pinned.
 
-## Natural-language takeover
+## 1. Decide the session role before doing anything else
 
-The following kinds of user messages should be sufficient when repository/GitHub access is available:
+### A. Formal project Lead takeover / resume
+
+Only choose this path when the OWNER explicitly asks this session to become or take over the **Aether project Lead**, e.g.:
 
 ```text
 接管 Aether 的开发，我们继续。
-接管 AetherSwap，继续上次开发。
-切到 Aether 项目接着做。
+把 Aether 项目 Lead 移交给 Codex。
+由这个 Web 会话接任 Aether 总控。
 ```
 
-Interpret them as `TAKEOVER_PROJECT + RESUME_LATEST_DURABLE_STATE`.
+Then run the Lead Activation Gate below.
 
-Do not ask the OWNER to re-paste development baselines, governance rules, Task IDs, checkpoint IDs or commit SHAs when current durable facts can resolve them. Natural language triggers recovery; it does not widen control scope.
+### B. Task Worker / Validator launch
 
-## Root cold-start guard
+Choose this path when the session is asked to execute/audit/test/export/review a bounded Task/Issue/PR, including when OWNER opens another Web/Codex session.
 
-Aether's root `AGENTS.md` carries the v0.3.5 runtime-auto-loaded cold-start guard for Codex. It exists only to route a new formal Lead/takeover/resume into this Bootstrap and the existing Lead Activation Gate before any planning/progress/test/source/local mutation or Task recovery.
-
-`AGENTS.md` is not a second Task/Result/Lead Claim authority and must not mirror the current generation. Durable control still comes from #149 and the pinned governance facts below.
-
-## Required read / activation order
-
-1. `.agent/GOVERNANCE_LOCK.yaml`
-2. `.agent/LOCAL_POLICY.yaml`
-3. `.agent/PROJECT_STATE.md`
-4. this `.agent/BOOTSTRAP.md`
-5. canonical Lead Claim sink `github:EinzbernLi/AetherSwap#149`
-6. latest valid parent claim plus its effective current control scope / activation evidence
-7. create the next parent-bound claim with inherited or explicitly authorized `control_scope`
-8. re-read #149 and verify no sibling/duplicate generation or newer competing claim
-9. perform a fresh Runtime Capability Probe
-10. only after 5-9 succeed, treat the new Lead as `ACTIVE`
-11. then locate/reconcile checkpoint, active Task, latest Result/Acceptance, current branch/commit/PR/CI and task-relevant source/contracts
-
-Do not load the full Issue history or every `.agent/AUTO_OFFER_*` document by default.
-
-Precedence:
+Canonical wording:
 
 ```text
-Lead activation gate
->
-Task recovery / execution
-
-current Lead control scope
->
-active_task_ref / primary product task
+执行 <task_ref>；作为该 Task 的执行者，不接管项目 Lead。
 ```
 
-## Pre-ACTIVE boundary
+Worker rules:
 
-Before the new Lead is `ACTIVE`, only control-plane recovery and verification are allowed.
+- do not create/advance a claim in #149;
+- do not run Lead takeover merely because the prompt contains a Task reference or asks to “continue” that Task;
+- do not integrate sibling work or declare final project acceptance;
+- obey exact Task scope and return Result to the declared GitHub sink;
+- if asked ambiguously to both execute a Task and become Lead, fail closed on Lead claim until OWNER explicitly states the project Lead handoff.
 
-Do not perform before activation:
+`parallel workers != parallel Leads`.
 
-- formal Task execution or formal executor dispatch;
-- project test runs;
-- source edits, project-local planning edits, or other project-local mutation;
-- writes to external control-workspace planning/progress files used for this project;
-- network/platform/business actions;
-- requests for new business/platform execution authorization inferred from a Task that has not yet been recovered within the current control scope.
+## 2. Lead Activation Gate
 
-If #149 cannot be read/written, post-write uniqueness cannot be verified, or the fresh runtime probe cannot complete, use `LEAD_ACTIVATION_BLOCKED` and fail closed. Do not do the Task first and repair the claim later.
+For a real project Lead takeover/resume:
 
-## Lead control / scope inheritance
+1. read `.agent/GOVERNANCE_LOCK.yaml`;
+2. read `.agent/LOCAL_POLICY.yaml`;
+3. read `.agent/PROJECT_STATE.md`;
+4. read this file;
+5. read canonical Lead Claim sink #149;
+6. identify latest valid parent claim and effective control scope;
+7. create exactly the next parent-bound claim without implicit scope widening;
+8. re-read #149, verifying no sibling/duplicate generation or newer competing claim;
+9. perform a fresh Runtime Capability Probe;
+10. only then become `ACTIVE`;
+11. then recover the active Task/PR/CI/source state.
 
-Aether uses Issue #149 as the long-lived canonical Lead Claim sink. Issue #147 contains qualification evidence; it is not the claim sink.
+Before `ACTIVE`, only control-plane recovery/verification is allowed. If persistence/uniqueness/probe fails, return `LEAD_ACTIVATION_BLOCKED`.
 
-For every new formal Lead session, including Web->Web or Codex->Codex rollover:
+## 3. Current Lead state
 
-1. identify the latest valid claim in #149;
-2. recover its effective control scope from the claim or newer explicit durable activation/qualification evidence;
-3. create exactly the next generation bound to the exact parent;
-4. persist `control_scope` without widening it by inference;
-5. re-read #149 and verify uniqueness;
-6. perform a fresh runtime probe;
-7. only then become `ACTIVE` within that scope.
+Canonical current control is Issue #149, not this convenience file.
 
-`control_scope` modes follow central governance v0.3.5: `normal_project_continuation`, `qualification_only`, `task_scoped`, or `blocked`.
+At this revision:
 
-A takeover may preserve or narrow scope. It must not widen scope merely because the prompt says “continue development”, because a primary Task exists, or because a planning file mentions work.
+- G16 claim: `5452445521`;
+- parent: G15 `5452116330`;
+- activation verify: `5452448339`;
+- runtime: Web / GPT-5.6 Sol;
+- scope: `normal_project_continuation` for Aether functional development plus governance reconciliation;
+- file-management/LPRL work may run as a bounded worker/workstream but is not a sibling Aether Lead;
+- TASK-050 offline/program development is allowed under its Task boundaries;
+- live authenticated one-shot is NOT authorized;
+- REAL-WRITE remains CLOSED;
+- integration -> main remains OWNER-gated.
 
-If sibling/duplicate claims are found, fail closed before formal dispatch/project mutation and recover only through the next generation with explicit conflict evidence.
+Always prefer newer exact #149 evidence if the chain advances.
 
-## Current durable control reconciliation
+## 4. v0.3.6 same-project workstreams
 
-The adoption-era G8-G11 samples remain historical qualification evidence, but they are no longer the current parent chain. Do not synthesize, renumber, or replay them as current state.
+One Active Lead may dispatch multiple bounded Web/Codex/Luna/Terra workers. Concurrent execution requires the Lead to mark each Task `parallel_safe` and prove:
 
-At this state revision:
+- exact frozen baseline;
+- explicit dependencies with no unmet ordering dependency;
+- pairwise disjoint substantive write scopes;
+- isolated branch/PR/worktree or equivalent write surfaces for implementation tasks;
+- no shared mutable-state multiwriter.
 
-- G12 claim `5450113411` resumed Issue #148 under `task_scoped` authority;
-- G13 claim `5451471369`, parent G12, is the current Web Lead claim;
-- G13 activation verify `5451474266` records uniqueness and the fresh runtime capability probe;
-- the effective scope remains sourced from `github:EinzbernLi/AetherSwap#148@5450111293`;
-- exact newer #149 evidence always supersedes this compact snapshot if the chain advances again.
+Read overlap is allowed. Append-only Result comments may share a GitHub sink when Task ownership stays unambiguous. Same-file multiwriter and shared schema/runtime mutation are not parallel-safe by default.
 
-## Runtime rule
+Workers never modify #149, integrate sibling work, or perform final acceptance. Lead owns rebase/replan/serialisation, integration order and final acceptance.
 
-Every new formal Active Lead session performs a fresh Runtime Capability Probe. Do not infer capability from `web`, `codex`, `desktop`, or a previous session.
+## 5. Current product work
 
-The accepted historical subagent pilot proves only capabilities of that tested session. It is calibration evidence, not a permanent capability promise.
+TASK-050 / Issue #130 is the primary Aether functional task.
 
-## Current blocking / accepted facts
+Current architecture is buyer-send convergence through Steam sent history:
 
-- Primary product Task #130 remains BLOCKED pending verified live `/api/market/steam_trade` field semantics.
-- REAL-WRITE remains CLOSED.
-- No new Steam/BUFF/network authorization is granted by governance adoption, takeover, or LPRL repin.
-- Aether's LPRL module is separately pinned to central accepted v0.2.3-pilot merge `d63dae9ac1de65420f410cb36e6c2ccb58cc0478`.
-- Central LPRL Issue #25 is completed; PR #26 passed independent Terra review after one correction and Sol final acceptance.
-- Issue #143 effective draft fact records remain accepted historical evidence.
-- Issue #148 is the active LPRL design track. The v0.2.3-pilot representation replay closes the prior schema gaps but does **not** authorize local materialization.
-- `F:\AetherSwap\` is an upstream-derived deployed/reference Source location, not the controlled `EinzbernLi/AetherSwap` development Workspace. Do not reset/clean/repurpose it into the fork workspace.
-- No `.local/lprl/` creation, controlled-workspace creation, Snapshot/Gate/Retirement/migration/cleanup/reclaimability action is authorized by this repin.
-- `integration/auto-buyer-offer -> main` remains OWNER-gated.
+```text
+OFFER_ATTEMPTED + offer_attempted_at
+-> exactly one SEND
+-> RESULT_UNKNOWN when identity is unproven
+-> future bounded Steam sent-offer discovery
+-> 0 candidate WAIT / 1 candidate exact GetTradeOffer / 2+ fail closed
+-> exact closure
+-> one Store CAS bind
+-> existing confirmation/lifecycle/receipt flow
+```
 
-## LPRL next-step boundary
+Merged foundation:
 
-The accepted v0.2.3-pilot pin makes the #148 design representable. It does not make the design executable by itself.
+- Slice A PR #155: BUFF history retired as offer identity; lifecycle/refund history preserved.
+- Slice B PR #158: pure sent-offer discovery/binding contract merged.
+- integration baseline after Slice B: `f3ba4dd8746d299e87d01f5e06d01eca5a2dbd93`.
 
-A future local materialization step requires a **separate frozen Task** that explicitly defines at minimum:
+Next production transport/parser remains blocked on a separately OWNER-authorized read-only Steam sent-history TLS/schema capture. Generic “continue development” does not authorize that probe.
 
-- exact Aether code/ref baseline and isolated/controlled execution surface;
-- exact accepted LPRL pin;
-- allowed local paths and anchored source-control exclusion;
-- accepted historical evidence mapping and no implicit fact refresh;
-- no secret/session content;
-- draft/null status and digest semantics;
-- no invented runtime Deployment;
-- no Snapshot/Gate/Retirement/Migration/Cleanup/Reclamation;
-- exact Result handoff and independent review.
+## 6. Safety boundaries
 
-Until such a Task is accepted, local materialization remains blocked.
+- REAL-WRITE CLOSED by default.
+- Separately gated live authenticated probes require their own exact OWNER authorization.
+- No blind retry of non-idempotent SEND/ACCEPT/CONFIRM.
+- No name/price/latest/closest/manual-ID identity recovery.
+- No secrets/session material in durable evidence.
+- integration -> main requires explicit OWNER approval.
+- Destructive local-resource lifecycle actions require separate authority.
 
-## Legacy/domain documents — load only when relevant
+## 7. Legacy/domain documents
+
+Load only when relevant:
 
 - `AGENTS.md`
 - `.agent/WORKFLOW.md`
 - `.agent/PROJECT_CONTEXT.md`
 - `.agent/CURRENT_INVARIANTS.md`
 - `.agent/AUTO_OFFER_*.md`
-- `.agent/TASK_TEMPLATE.md`, `.agent/REVIEW_CHECKLIST.md`, `.github/pull_request_template.md`
+- `.agent/TASK_TEMPLATE.md`
+- `.agent/REVIEW_CHECKLIST.md`
+- `.github/pull_request_template.md`
 
-If legacy material conflicts with pinned governance, `LOCAL_POLICY`, effective `PROJECT_STATE`, current Lead scope, or newer exact Task/Result/Acceptance facts, follow current authority precedence rather than combining contradictory rules.
-
-## Completion of bootstrap
-
-A resumed Lead should be able to state, without chat-history replay:
-
-- current development branch and effective code ref;
-- current Lead generation/parent and effective control scope;
-- whether the Lead Activation Gate passed;
-- current runtime capabilities from a fresh probe;
-- primary product Task status and standing REAL-WRITE/local-resource boundaries;
-- ordinary governance pin and separately pinned LPRL profile/ref;
-- the next safe action allowed by the current control scope.
+If legacy wording conflicts with pinned v0.3.6 governance, `LOCAL_POLICY`, current #149 Lead state, or newer exact Task/Result/Acceptance facts, follow the newer authority.
