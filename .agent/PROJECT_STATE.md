@@ -1,6 +1,6 @@
 # AetherSwap Current Project State
 
-Status: **governance v0.3.4 adoption candidate; product work unchanged**  
+Status: **governance v0.3.4 adoption; post-adoption validation pending; product work unchanged**  
 State date: **2026-08-28**
 
 This file is a compact current-state entry point, not a transcript. GitHub Issues/PRs remain the durable Task/Result/Review/Acceptance source.
@@ -17,7 +17,7 @@ Do not silently treat `main` and `integration/auto-buyer-offer` as synchronized 
 
 ## 2. Governance baseline
 
-This candidate upgrades only the ordinary central-governance pin from Aether v0.3.2 to central governance v0.3.4:
+This adoption upgrades only the ordinary central-governance pin from Aether v0.3.2 to central governance v0.3.4:
 
 - central governance: `EinzbernLi/agent-dev-governance@d000f0768a6e8dad27c8f893165791b67815ff24` (`v0.3.4`);
 - canonical Lead Claim sink: `github:EinzbernLi/AetherSwap#149`;
@@ -43,10 +43,12 @@ Effective next takeover scope after v0.3.4 adoption:
 ```yaml
 control_scope:
   mode: qualification_only
-  source_ref: "github:EinzbernLi/AetherSwap#149@5449453374 + github:EinzbernLi/AetherSwap#147@5449455674"
+  source_ref: "github:EinzbernLi/AetherSwap#149@5449453374"
 next_expected_generation: 11
 parent_claim_ref: 5449449417
 ```
+
+The #147 G10 FAIL_CLOSED record `5449455674` is corroborating qualification evidence for that inherited boundary; it is not a second scope authority.
 
 The first post-adoption validation is one fresh Codex session started by ordinary natural language. It must complete the v0.3.4 Lead Activation Gate before any local/planning mutation and then stop for independent review. Do not replay all historical qualification samples.
 
@@ -132,8 +134,7 @@ If claim persistence, post-write uniqueness verification, or fresh runtime probe
 
 ## 11. Next actions
 
-1. Review this minimal v0.3.4 governance adoption PR and merge only to `integration/auto-buyer-offer` if exact and conflict-free.
-2. Start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
-3. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, claim-before-task ordering, post-write uniqueness verification and fresh runtime probe, with zero pre-ACTIVE local/planning mutation.
-4. Web Sol independently reviews #149/#147 evidence. If the v0.3.4 sample passes, close the takeover-repair qualification without replaying all historical samples.
-5. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
+1. After the v0.3.4 adoption is merged to `integration/auto-buyer-offer`, start one fresh Codex Sol session with only the ordinary natural-language Aether takeover request.
+2. Expect G11 with parent G10 `5449449417`, inherited `qualification_only` scope, claim-before-task ordering, post-write uniqueness verification and fresh runtime probe, with zero pre-ACTIVE local/planning mutation.
+3. Web Sol independently reviews #149/#147 evidence. If the v0.3.4 sample passes, close the takeover-repair qualification without replaying all historical samples.
+4. Only after that review decide whether #148 substantive design work may resume. TASK-050 and REAL-WRITE remain governed by their own separate blockers/authorization rules.
