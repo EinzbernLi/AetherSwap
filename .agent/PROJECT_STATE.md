@@ -1,6 +1,6 @@
 # AetherSwap Current Project State
 
-Status: **central governance v0.3.6 adoption in progress; G16 Web Lead ACTIVE; TASK-050 offline foundation merged; next live sent-history probe still separately gated**  
+Status: **central governance v0.3.6 adopted; G16 Web Lead ACTIVE; TASK-050 offline foundation merged; next live sent-history probe still separately gated**  
 State date: **2026-08-28**
 
 This is a compact current-state entry point, not a transcript. Newer exact GitHub Issue/PR/Lead records always supersede stale prose here.
@@ -8,7 +8,7 @@ This is a compact current-state entry point, not a transcript. Newer exact GitHu
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- Current integration baseline before this governance adoption PR: `f3ba4dd8746d299e87d01f5e06d01eca5a2dbd93`.
+- Current integration baseline after governance v0.3.6 adoption: `d484d6268ef9fc7cef1f1ba538e0b6818fb4ad27`.
 - `main` is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
 
@@ -16,12 +16,14 @@ This is a compact current-state entry point, not a transcript. Newer exact GitHu
 
 Ordinary governance and LPRL are separately pinned.
 
-Governance adoption target in this revision:
+Governance adopted through PR #159 / merge `d484d6268ef9fc7cef1f1ba538e0b6818fb4ad27`:
 
 - central governance: `EinzbernLi/agent-dev-governance@c06b82de61de9249d91473bda974228725bdb714` (`v0.3.6`);
-- central v0.3.6 principle: one Active project Lead + bounded same-project Web/Codex workers; `parallel workers != parallel Leads`;
+- one Active project Lead + bounded same-project Web/Codex/Luna/Terra workers;
+- `parallel workers != parallel Leads`;
 - Lead owns integration and final acceptance;
-- Worker/Validator sessions must not create project Lead Claims merely because they execute a Task in another runtime.
+- Worker/Validator sessions must not create project Lead Claims merely because they execute a Task in another runtime;
+- actual project Lead handoff requires explicit OWNER intent to move the project Lead.
 
 LPRL remains separately pinned:
 
@@ -149,7 +151,7 @@ Only the first path creates the next #149 generation. Worker/Validator sessions 
 
 ## 10. Next safe actions
 
-1. Complete and review this v0.3.6 governance adoption PR.
-2. Merge it only to `integration/auto-buyer-offer` after exact-head verification.
-3. For the Codex-local probe harness audit, launch Codex as a **Task Worker**, not a Lead takeover.
-4. Continue TASK-050 offline work under G16; do not execute the live sent-history one-shot without its separate explicit OWNER authorization.
+1. For the Codex-local probe harness audit, launch Codex as a **Task Worker**, not a Lead takeover.
+2. Review any recovered exact local probe source against current integration before deciding whether it belongs in GitHub.
+3. Continue TASK-050 offline work under G16.
+4. Do not execute the live sent-history one-shot without its separate explicit OWNER authorization.
