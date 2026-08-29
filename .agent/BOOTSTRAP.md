@@ -1,6 +1,8 @@
 # AetherSwap Project Bootstrap
 
-This is the minimal cold-start entry point. It distinguishes a **project Lead takeover** from a **Task Worker/Validator launch**.
+This is the minimal cold-start entry point. It distinguishes a **project Lead takeover** from a **Task Worker/Validator launch** and implements PF-014 durable re-anchor semantics.
+
+Runtime-local planning, memory, session restore, IDE state, checkpoint, cached notes, and scratch may restore before this entrypoint is reached. They are non-authoritative execution aids and remain provisional until reconciled with durable project/control facts.
 
 ## Project
 
@@ -11,7 +13,7 @@ active_development_branch: integration/auto-buyer-offer
 primary_product_task_ref: github:EinzbernLi/AetherSwap#130
 task_fact_source: github_issue_pr
 lead_claim_sink: github:EinzbernLi/AetherSwap#149
-governance_ref: EinzbernLi/agent-dev-governance@c06b82de61de9249d91473bda974228725bdb714
+governance_ref: EinzbernLi/agent-dev-governance@ef250219070dea0d7861e4817831b8f447a91118
 governance_version: v0.3.6
 lprl_ref: EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478
 lprl_profile: v0.2.3-pilot
@@ -19,7 +21,7 @@ lprl_profile: v0.2.3-pilot
 
 Ordinary governance and LPRL remain separately pinned.
 
-## 1. Decide the session role before doing anything else
+## 1. Decide the session role before authority-bearing work
 
 ### A. Formal project Lead takeover / resume
 
@@ -31,7 +33,7 @@ Only choose this path when the OWNER explicitly asks this session to become or t
 由这个 Web 会话接任 Aether 总控。
 ```
 
-Then run the Lead Activation Gate below.
+Then complete the durable re-anchor / Lead Activation transaction below before formal governed work.
 
 ### B. Task Worker / Validator launch
 
@@ -53,23 +55,43 @@ Worker rules:
 
 `parallel workers != parallel Leads`.
 
-## 2. Lead Activation Gate
+## 2. Durable Re-anchor / Lead Activation Gate
 
-For a real project Lead takeover/resume:
+For a real project Lead takeover/resume, use this canonical transaction:
 
-1. read `.agent/GOVERNANCE_LOCK.yaml`;
-2. read `.agent/LOCAL_POLICY.yaml`;
-3. read `.agent/PROJECT_STATE.md`;
-4. read this file;
-5. read canonical Lead Claim sink #149;
-6. identify latest valid parent claim and effective control scope;
-7. create exactly the next parent-bound claim without implicit scope widening;
-8. re-read #149, verifying no sibling/duplicate generation or newer competing claim;
-9. perform a fresh Runtime Capability Probe;
-10. only then become `ACTIVE`;
-11. then recover the active Task/PR/CI/source state.
+```text
+runtime-local context may restore/read (non-authoritative)
+-> resolve Aether + read durable project/control facts
+-> read latest valid G(N)
+-> write exactly one next parent-bound G(N+1)
+-> reread canonical sink / verify uniqueness
+-> fresh Runtime Capability Probe
+-> ACTIVE
+-> formal governed work
+```
 
-Before `ACTIVE`, only control-plane recovery/verification is allowed. If persistence/uniqueness/probe fails, return `LEAD_ACTIVATION_BLOCKED`.
+Expanded sequence:
+
+1. runtime-local continuity context may already be restored; keep it non-authoritative;
+2. resolve Aether and read `.agent/GOVERNANCE_LOCK.yaml`;
+3. read `.agent/LOCAL_POLICY.yaml`;
+4. read `.agent/PROJECT_STATE.md`;
+5. read this file;
+6. read canonical Lead Claim sink #149;
+7. identify latest valid parent claim `G(N)` and effective control scope;
+8. create exactly one next parent-bound `G(N+1)` without implicit scope widening;
+9. re-read #149, verifying the new claim is visible and unique with no sibling/duplicate generation or newer competing claim;
+10. perform a fresh Runtime Capability Probe;
+11. only then become `ACTIVE`;
+12. then recover/reconcile the active Task/PR/CI/source state and perform formal governed work.
+
+Missing or unverifiable `G(N+1)` means takeover did **not** complete. The prior valid `G(N)` remains authoritative. Reviewer/runtime must not synthesize a missing generation from UI, planning, memory, checkpoint, or session state.
+
+Before durable re-anchor/ACTIVE, allowed work is limited to non-authoritative recovery/read, durable-fact/capability inspection, and bounded diagnostics/tests that are known no-write or isolated, offline/no network-platform-business effect, and do not touch source/ref/config/data/state/protected runtime. Authority-bearing Task execution, formal dispatch, mutation, network/platform/business action, protected-runtime mutation, or durable PASS/Acceptance remains fail-closed.
+
+Pre-anchor diagnostic evidence is provisional. It may be reused after re-anchor only when exact input/baseline plus the evidence/test contract are unchanged and are explicitly reconciled/revalidated; otherwise rerun it.
+
+If persistence, reread/uniqueness, or the fresh probe fails, return `LEAD_ACTIVATION_BLOCKED` and preserve the prior valid Lead as authoritative.
 
 ## 3. Current Lead state
 
@@ -88,7 +110,7 @@ At this revision:
 - REAL-WRITE remains CLOSED;
 - integration -> main remains OWNER-gated.
 
-Always prefer newer exact #149 evidence if the chain advances.
+Always prefer newer exact #149 evidence if the chain advances. This section is a convenience snapshot only; canonical #149 truth wins.
 
 ## 4. v0.3.6 same-project workstreams
 
