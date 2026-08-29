@@ -221,7 +221,7 @@ def test_result_unknown_recovery_without_exact_offer_id_blocks(
     outcome = integration.run_delivery_tick([_host_row()])
 
     assert outcome.result is AutoOfferResult.BLOCKED
-    assert outcome.visited_order_ids == (ORDER_ID,)
+    assert outcome.visited_order_ids == ()
     assert len(bridge.recovery_calls) == 1
     assert bridge.step_calls == []
 
