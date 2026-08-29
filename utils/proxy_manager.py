@@ -175,7 +175,7 @@ class ProxyManager:
         """策略1：请求失败后才用代理。"""
         return self.is_proxy_enabled() and self.get_strategy() == 1
     def should_always_use_proxy(self) -> bool:
-        """策略2：一直走代理。"""
+        """策略2：一直走代理池。"""
         return self.is_proxy_enabled() and self.get_strategy() == 2
     def get_proxies_for_request(self, failed: bool = False) -> Optional[dict]:
         """
@@ -205,7 +205,7 @@ class ProxyManager:
             proxy = self.get_next_proxy_dict()
             _pm_log(
                 f"[ProxyManager] get_proxies_for_request(failed={failed}): "
-                f"策略2=始终代理 → {proxy.get('http') if proxy else 'None(池空)'}"
+                f"策略2=始终代理 → {'已选择' if proxy else 'None(池空)'}"
             )
             return proxy
         if strategy == 1:
@@ -213,7 +213,7 @@ class ProxyManager:
                 proxy = self.get_next_proxy_dict()
                 _pm_log(
                     f"[ProxyManager] get_proxies_for_request(failed=True): "
-                    f"策略1=失败切代理 → {proxy.get('http') if proxy else 'None(池空)'}"
+                    f"策略1=失败切代理 → {'已选择' if proxy else 'None(池空)'}"
                 )
                 return proxy
             else:
