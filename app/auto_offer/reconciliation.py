@@ -143,14 +143,13 @@ def _plan_buyer_offer_recovery(
         return _blocked(delivery, "recovery_observation_time_invalid")
     if snapshot.steam_tradeoffer_id is not None:
         return _blocked(delivery, "evidence_not_allowed")
-    counterparty = evidence.counterparty_steam_id
     target = replace(
         snapshot,
         delivery_status=DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id=evidence.steam_tradeoffer_id,
-        counterparty_steam_id=counterparty,
+        counterparty_steam_id=evidence.counterparty_steam_id,
         offer_sent_at=sent_at,
-        delivery_error=(None if counterparty is not None else "offer_identity_pending"),
+        delivery_error=None,
     )
     return _propose(delivery, target, "buyer_offer_recovered")
 
@@ -181,14 +180,11 @@ def _safe_steam_trade_offer_evidence(
             return "counterparty_not_bound"
         if evidence.counterparty_steam_id != expected_counterparty:
             return "trade_offer_counterparty_mismatch"
-    elif expected_counterparty is not None:
-        if evidence.counterparty_steam_id != expected_counterparty:
-            return "trade_offer_counterparty_mismatch"
     elif (
-        snapshot.delivery_status is DeliveryStatus.OFFER_SENT
-        and snapshot.delivery_error != "offer_identity_pending"
+        expected_counterparty is not None
+        and evidence.counterparty_steam_id != expected_counterparty
     ):
-        return "counterparty_not_bound"
+        return "trade_offer_counterparty_mismatch"
     return evidence
 
 
@@ -261,30 +257,20 @@ def _plan_steam_trade_offer_lifecycle(
     delivery: StoredDelivery,
     evidence: SteamTradeOfferEvidence,
 ) -> ReconciliationDecision:
-    """Plan the one allowed transition from exact typed offer evidence.
-
-    For buyer-send deliveries created by the realtime BUFF recovery path, the
-    first exact Steam read is the counterparty authority.  The explicit
-    ``offer_identity_pending`` marker prevents historical unbound rows from
-    silently adopting a counterparty under this new contract.
-    """
+    """Plan the one allowed transition from exact typed offer evidence."""
 
     snapshot = delivery.snapshot
     lifecycle = evidence.lifecycle
-    pending_buyer_identity = (
+    if (
         snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         and snapshot.counterparty_steam_id is None
         and snapshot.delivery_status is DeliveryStatus.OFFER_SENT
-    )
-    if pending_buyer_identity:
-        if snapshot.delivery_error != "offer_identity_pending":
-            return _blocked(delivery, "counterparty_not_bound")
-        if not lifecycle.is_terminal_without_trade:
-            snapshot = replace(
-                snapshot,
-                counterparty_steam_id=evidence.counterparty_steam_id,
-                delivery_error=None,
-            )
+        and not lifecycle.is_terminal_without_trade
+    ):
+        snapshot = replace(
+            snapshot,
+            counterparty_steam_id=evidence.counterparty_steam_id,
+        )
     status = snapshot.delivery_status
 
     if lifecycle.is_terminal_without_trade:
