@@ -181,11 +181,14 @@ def _safe_steam_trade_offer_evidence(
             return "counterparty_not_bound"
         if evidence.counterparty_steam_id != expected_counterparty:
             return "trade_offer_counterparty_mismatch"
+    elif expected_counterparty is not None:
+        if evidence.counterparty_steam_id != expected_counterparty:
+            return "trade_offer_counterparty_mismatch"
     elif (
-        expected_counterparty is not None
-        and evidence.counterparty_steam_id != expected_counterparty
+        snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+        and snapshot.delivery_error != "offer_identity_pending"
     ):
-        return "trade_offer_counterparty_mismatch"
+        return "counterparty_not_bound"
     return evidence
 
 
@@ -267,19 +270,22 @@ def _plan_steam_trade_offer_lifecycle(
     """
 
     snapshot = delivery.snapshot
-    if (
+    lifecycle = evidence.lifecycle
+    pending_buyer_identity = (
         snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         and snapshot.counterparty_steam_id is None
         and snapshot.delivery_status is DeliveryStatus.OFFER_SENT
-        and snapshot.delivery_error == "offer_identity_pending"
-    ):
-        snapshot = replace(
-            snapshot,
-            counterparty_steam_id=evidence.counterparty_steam_id,
-            delivery_error=None,
-        )
+    )
+    if pending_buyer_identity:
+        if snapshot.delivery_error != "offer_identity_pending":
+            return _blocked(delivery, "counterparty_not_bound")
+        if not lifecycle.is_terminal_without_trade:
+            snapshot = replace(
+                snapshot,
+                counterparty_steam_id=evidence.counterparty_steam_id,
+                delivery_error=None,
+            )
     status = snapshot.delivery_status
-    lifecycle = evidence.lifecycle
 
     if lifecycle.is_terminal_without_trade:
         return _propose(
