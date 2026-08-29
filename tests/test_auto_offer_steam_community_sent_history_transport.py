@@ -6,10 +6,12 @@ import pytest
 
 from app.auto_offer.sent_offer_binding import SentOfferDiscoveryQuery
 from app.auto_offer.steam_community_sent_history_transport import (
+    COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES,
     CommunitySentHistoryDisposition,
     CommunitySentHistoryHttpResponse,
     CommunitySentHistoryNetworkError,
     CommunitySentHistoryRequestPlan,
+    CommunitySentHistorySanitizedOutcome,
     CommunitySentHistoryTransportError,
     build_community_sent_history_request,
     read_community_sent_history_once,
@@ -41,11 +43,19 @@ def offer_html(*ids: str) -> str:
     )
 
 
-def response(status=200, content_type="text/html; charset=UTF-8", body=""):
+def response(
+    status=200,
+    content_type="text/html; charset=UTF-8",
+    body="",
+    redirect_subtype=None,
+):
+    if redirect_subtype is None:
+        redirect_subtype = "same_origin_other" if 300 <= status <= 399 else "none"
     return CommunitySentHistoryHttpResponse(
         status_code=status,
         content_type=content_type,
         body=body,
+        redirect_subtype=redirect_subtype,
     )
 
 
@@ -136,6 +146,7 @@ def test_sender_is_invoked_exactly_once_and_receives_frozen_plan():
     assert result.outcome.request_count == 1
     assert result.outcome.identity_surface_proven is True
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == "none"
 
 
 def test_lifecycle_classinfo_and_dom_order_do_not_enter_sanitized_outcome():
@@ -152,6 +163,7 @@ def test_lifecycle_classinfo_and_dom_order_do_not_enter_sanitized_outcome():
     assert not hasattr(result.outcome, "tradeoffer_ids")
     assert not hasattr(result.outcome, "body")
     assert not hasattr(result.outcome, "url")
+    assert not hasattr(result.outcome, "location")
     assert not hasattr(result.outcome, "exception")
     assert not hasattr(result.outcome, "error_text")
 
@@ -170,6 +182,7 @@ def test_empty_html_identity_set_is_explicitly_unproven_not_authorized_empty_sna
     assert result.outcome.canonical_count == 0
     assert result.outcome.unique_count == 0
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == "none"
 
 
 @pytest.mark.parametrize("status", [100, 204, 400, 401, 403, 404, 500, 503])
@@ -184,13 +197,25 @@ def test_non_200_status_fails_closed_without_parsing_identity(status):
     assert result.outcome.status_class == f"{status // 100}xx"
     assert result.outcome.identity_surface_proven is False
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == "none"
 
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308])
-def test_redirect_response_is_separately_rejected(status):
+@pytest.mark.parametrize(
+    "redirect_subtype",
+    sorted(COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES - {"none"}),
+)
+def test_redirect_response_is_separately_rejected_with_only_sanitized_subtype(
+    status,
+    redirect_subtype,
+):
     result = read_community_sent_history_once(
         query(),
-        lambda plan: response(status=status, body=offer_html("100")),
+        lambda plan: response(
+            status=status,
+            body=offer_html("100"),
+            redirect_subtype=redirect_subtype,
+        ),
     )
 
     assert result.snapshot is None
@@ -199,6 +224,9 @@ def test_redirect_response_is_separately_rejected(status):
     )
     assert result.outcome.identity_surface_proven is False
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == redirect_subtype
+    assert not hasattr(result.outcome, "location")
+    assert not hasattr(result.outcome, "headers")
 
 
 @pytest.mark.parametrize(
@@ -219,6 +247,7 @@ def test_http_200_non_html_content_type_fails_closed(content_type):
         CommunitySentHistoryDisposition.NON_HTML_REJECTED
     )
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == "none"
 
 
 @pytest.mark.parametrize("content_type", ["text/html", "application/xhtml+xml"])
@@ -235,6 +264,7 @@ def test_supported_html_media_types_reach_d1_parser(content_type):
         CommunitySentHistoryDisposition.IDENTITY_SURFACE_PROVEN
     )
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == "none"
 
 
 def test_malformed_or_duplicate_identity_evidence_fails_closed_without_raw_detail():
@@ -257,6 +287,7 @@ def test_malformed_or_duplicate_identity_evidence_fails_closed_without_raw_detai
         assert result.outcome.canonical_count == 0
         assert result.outcome.unique_count == 0
         assert result.outcome.transport_subtype == "none"
+        assert result.outcome.redirect_subtype == "none"
 
 
 @pytest.mark.parametrize("subtype", ["tls", "timeout", "other"])
@@ -275,6 +306,7 @@ def test_safe_transport_subtypes_are_preserved_without_exception_text(subtype):
     assert result.outcome.status_class == "none"
     assert result.outcome.request_count == 1
     assert result.outcome.transport_subtype == subtype
+    assert result.outcome.redirect_subtype == "none"
     assert not hasattr(result.outcome, "error")
     assert not hasattr(result.outcome, "detail")
     assert not hasattr(result.outcome, "exception")
@@ -297,6 +329,7 @@ def test_unknown_transport_exception_collapses_to_other_and_never_retries():
     assert result.outcome.status_class == "none"
     assert result.outcome.request_count == 1
     assert result.outcome.transport_subtype == "other"
+    assert result.outcome.redirect_subtype == "none"
     assert not hasattr(result.outcome, "error")
     assert not hasattr(result.outcome, "detail")
 
@@ -304,6 +337,78 @@ def test_unknown_transport_exception_collapses_to_other_and_never_retries():
 def test_invalid_transport_subtype_is_rejected():
     with pytest.raises(CommunitySentHistoryTransportError, match="invalid_transport_subtype"):
         CommunitySentHistoryNetworkError("certificate-text")
+
+
+def test_redirect_http_response_requires_bounded_non_none_subtype():
+    with pytest.raises(
+        CommunitySentHistoryTransportError,
+        match="redirect_response_requires_subtype",
+    ):
+        CommunitySentHistoryHttpResponse(
+            status_code=302,
+            content_type="text/html",
+            body="redirect",
+            redirect_subtype="none",
+        )
+
+    with pytest.raises(
+        CommunitySentHistoryTransportError,
+        match="invalid_redirect_subtype",
+    ):
+        CommunitySentHistoryHttpResponse(
+            status_code=302,
+            content_type="text/html",
+            body="redirect",
+            redirect_subtype="raw-destination",
+        )
+
+
+def test_non_redirect_http_response_forbids_redirect_subtype():
+    with pytest.raises(
+        CommunitySentHistoryTransportError,
+        match="non_redirect_response_has_subtype",
+    ):
+        CommunitySentHistoryHttpResponse(
+            status_code=200,
+            content_type="text/html",
+            body="ok",
+            redirect_subtype="same_origin_other",
+        )
+
+
+def test_redirect_sanitized_outcome_requires_subtype_and_non_redirect_forbids_it():
+    base = dict(
+        status_class="3xx",
+        canonical_count=0,
+        unique_count=0,
+        request_count=1,
+        identity_surface_proven=False,
+        transport_subtype="none",
+    )
+    with pytest.raises(
+        CommunitySentHistoryTransportError,
+        match="redirect_outcome_requires_subtype",
+    ):
+        CommunitySentHistorySanitizedOutcome(
+            disposition=CommunitySentHistoryDisposition.REDIRECT_REJECTED,
+            redirect_subtype="none",
+            **base,
+        )
+
+    with pytest.raises(
+        CommunitySentHistoryTransportError,
+        match="non_redirect_outcome_has_subtype",
+    ):
+        CommunitySentHistorySanitizedOutcome(
+            disposition=CommunitySentHistoryDisposition.HTTP_REJECTED,
+            status_class="4xx",
+            canonical_count=0,
+            unique_count=0,
+            request_count=1,
+            identity_surface_proven=False,
+            transport_subtype="none",
+            redirect_subtype="same_origin_other",
+        )
 
 
 def test_invalid_sender_return_type_is_contract_error_not_guessed_http_response():
