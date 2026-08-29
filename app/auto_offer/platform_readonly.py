@@ -65,7 +65,15 @@ STEAM_COMPLETED_TRADE_CAPABILITIES: Final[frozenset[PlatformCapability]] = froze
     {PlatformCapability.READ_STEAM_COMPLETED_TRADE}
 )
 
+# Existing seller/direction semantics retain the legacy explicit aliases.  The
+# buyer realtime identity bridge additionally accepts BUFF's canonical ``id``
+# field without broadening seller-side authority.
 _ORDER_FIELDS: Final[tuple[str, ...]] = ("buff_order_id", "bill_order_id")
+_REALTIME_ORDER_FIELDS: Final[tuple[str, ...]] = (
+    "id",
+    "buff_order_id",
+    "bill_order_id",
+)
 _TRADE_OFFER_FIELDS: Final[tuple[str, ...]] = (
     "tradeofferid",
     "trade_offer_id",
@@ -385,16 +393,22 @@ def _canonical_alias_values(
     return tuple(values)
 
 
-def _canonical_order_values(record: Mapping[str, Any]) -> tuple[str, ...] | None:
-    return _canonical_alias_values(record, _ORDER_FIELDS)
+def _canonical_order_values(
+    record: Mapping[str, Any],
+    fields: tuple[str, ...] = _ORDER_FIELDS,
+) -> tuple[str, ...] | None:
+    return _canonical_alias_values(record, fields)
 
 
 def _exact_order_matches(
-    records: list[Mapping[str, Any]], order_id: str
+    records: list[Mapping[str, Any]],
+    order_id: str,
+    *,
+    fields: tuple[str, ...] = _ORDER_FIELDS,
 ) -> list[Mapping[str, Any]] | None:
     matches: list[Mapping[str, Any]] = []
     for record in records:
-        values = _canonical_order_values(record)
+        values = _canonical_order_values(record, fields)
         if values is None:
             return None
         if order_id in values:
@@ -447,8 +461,20 @@ def _recipient_binding_failure(
     return None
 
 
-def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
+def _optional_recipient_binding_failure(
+    record: Mapping[str, Any], recipient: str
+) -> tuple[PlatformResultStatus, str] | None:
+    """Validate an explicit BUFF recipient without requiring the field to exist."""
 
+    recipient_values = _identity_values(record, _RECIPIENT_FIELDS)
+    if recipient_values is None:
+        return (PlatformResultStatus.MALFORMED, "malformed_payload")
+    if recipient_values and recipient_values[0] != recipient:
+        return (PlatformResultStatus.FAILURE, "identity_mismatch")
+    return None
+
+
+def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
     direction_values = _identity_values(record, _DIRECTION_FIELDS)
     if direction_values is None:
         return None
@@ -508,7 +534,16 @@ class BuffReadOnlyAdapter:
         if request.capability is PlatformCapability.READ_SELLER_OFFER_ITEM:
             return self._execute_seller_offer_item(request, parsed)
 
-        matches = _exact_order_matches(parsed, request.buff_order_id)
+        match_fields = (
+            _REALTIME_ORDER_FIELDS
+            if request.capability is PlatformCapability.READ_OFFER_STATE
+            else _ORDER_FIELDS
+        )
+        matches = _exact_order_matches(
+            parsed,
+            request.buff_order_id,
+            fields=match_fields,
+        )
         if matches is None:
             return _result(
                 request, PlatformResultStatus.MALFORMED, "malformed_payload"
@@ -525,12 +560,12 @@ class BuffReadOnlyAdapter:
             )
 
         record = matches[0]
-        recipient_failure = _recipient_binding_failure(
-            record, request.recipient_steam_id
-        )
-        if recipient_failure is not None:
-            return _result(request, *recipient_failure)
         if request.capability is PlatformCapability.READ_DELIVERY_DIRECTION:
+            recipient_failure = _recipient_binding_failure(
+                record, request.recipient_steam_id
+            )
+            if recipient_failure is not None:
+                return _result(request, *recipient_failure)
             proven = _proves_seller_direction(record)
             if proven is None:
                 return _result(
@@ -559,6 +594,53 @@ class BuffReadOnlyAdapter:
                 ),
             )
 
+        # Legacy synthetic/explicit alias records retain their original strict
+        # seller+recipient+pending semantics.  The canonical realtime ``id``
+        # record is the narrow buyer recovery bridge and delegates
+        # counterparty/direction/items/lifecycle authority to exact Steam read.
+        if "id" not in record:
+            recipient_failure = _recipient_binding_failure(
+                record, request.recipient_steam_id
+            )
+            if recipient_failure is not None:
+                return _result(request, *recipient_failure)
+            offer_values = _canonical_alias_values(record, _TRADE_OFFER_FIELDS)
+            if offer_values is None:
+                return _result(
+                    request, PlatformResultStatus.MALFORMED, "malformed_payload"
+                )
+            if not offer_values:
+                return _result(
+                    request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+                )
+            try:
+                counterparty = seller_counterparty_from_exact_buff_record(record).steam_id
+            except CounterpartyEvidenceError as exc:
+                if str(exc) == "seller_steam_id_not_proven":
+                    return _result(
+                        request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+                    )
+                return _result(
+                    request, PlatformResultStatus.MALFORMED, "malformed_payload"
+                )
+            if counterparty == request.recipient_steam_id:
+                return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
+            if record.get("state") not in _PENDING_STATES:
+                return _result(
+                    request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
+                )
+            return _result(
+                request,
+                PlatformResultStatus.SUCCESS,
+                "offer_pending",
+                OfferStateEvidence(offer_values[0], counterparty),
+            )
+
+        recipient_failure = _optional_recipient_binding_failure(
+            record, request.recipient_steam_id
+        )
+        if recipient_failure is not None:
+            return _result(request, *recipient_failure)
         offer_values = _canonical_alias_values(record, _TRADE_OFFER_FIELDS)
         if offer_values is None:
             return _result(
@@ -569,27 +651,27 @@ class BuffReadOnlyAdapter:
                 request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
             )
         offer_id = offer_values[0]
-        try:
-            counterparty = seller_counterparty_from_exact_buff_record(record).steam_id
-        except CounterpartyEvidenceError as exc:
-            if str(exc) == "seller_steam_id_not_proven":
-                return _result(
-                    request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
-                )
+
+        seller_values = _identity_values(record, _SELLER_FIELDS)
+        if seller_values is None:
             return _result(
                 request, PlatformResultStatus.MALFORMED, "malformed_payload"
             )
-        if counterparty == request.recipient_steam_id:
-            return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
-        state = record.get("state")
-        if state not in _PENDING_STATES:
-            return _result(
-                request, PlatformResultStatus.RESULT_UNKNOWN, "order_not_proven"
-            )
+        counterparty: str | None = None
+        if seller_values:
+            try:
+                counterparty = seller_counterparty_from_exact_buff_record(record).steam_id
+            except CounterpartyEvidenceError:
+                return _result(
+                    request, PlatformResultStatus.MALFORMED, "malformed_payload"
+                )
+            if counterparty == request.recipient_steam_id:
+                return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
+
         return _result(
             request,
             PlatformResultStatus.SUCCESS,
-            "offer_pending",
+            "offer_bound_realtime",
             OfferStateEvidence(offer_id, counterparty),
         )
 

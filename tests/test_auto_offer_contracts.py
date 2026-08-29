@@ -695,7 +695,7 @@ def test_legitimate_seller_and_buyer_first_tradeoffer_bindings_are_allowed():
     validate_delivery_transition(buyer_current, buyer_target)
 
 
-def test_buyer_first_offer_binding_requires_offer_and_counterparty_together():
+def test_buyer_first_offer_binding_may_defer_counterparty_until_exact_steam_read():
     buyer_current = snapshot(
         delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
         delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
@@ -709,28 +709,25 @@ def test_buyer_first_offer_binding_requires_offer_and_counterparty_together():
         counterparty_steam_id="76561198000000002",
     )
     validate_delivery_transition(buyer_current, buyer_target)
-
-    with pytest.raises(DeliveryContractError, match="requires counterparty"):
-        validate_delivery_transition(
-            buyer_current,
-            replace(buyer_target, counterparty_steam_id=None),
-        )
+    validate_delivery_transition(
+        buyer_current,
+        replace(buyer_target, counterparty_steam_id=None),
+    )
 
     unknown_current = snapshot(
         delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
         delivery_status=DeliveryStatus.RESULT_UNKNOWN,
         delivery_error="write_result_unknown",
     )
-    with pytest.raises(DeliveryContractError, match="requires counterparty"):
-        validate_delivery_transition(
-            unknown_current,
-            replace(
-                buyer_target,
-                offer_attempted_at=1.0,
-                offer_sent_at=2.0,
-                counterparty_steam_id=None,
-            ),
-        )
+    validate_delivery_transition(
+        unknown_current,
+        replace(
+            buyer_target,
+            offer_attempted_at=1.0,
+            offer_sent_at=2.0,
+            counterparty_steam_id=None,
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -945,7 +942,7 @@ def test_bound_result_unknown_terminal_recovery_cannot_adopt_counterparty():
         validate_delivery_transition(current, target)
 
 
-def test_historical_unbound_counterparty_cannot_adopt_late():
+def test_unbound_buyer_offer_may_adopt_counterparty_once_on_forward_transition():
     buyer_sent = snapshot(
         delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
         delivery_status=DeliveryStatus.OFFER_SENT,
@@ -953,15 +950,12 @@ def test_historical_unbound_counterparty_cannot_adopt_late():
         offer_attempted_at=1.0,
         offer_sent_at=2.0,
     )
-    with pytest.raises(DeliveryContractError, match="cannot be adopted"):
-        validate_delivery_transition(
-            buyer_sent,
-            replace(
-                buyer_sent,
-                delivery_status=DeliveryStatus.OFFER_CONFIRMED,
-                counterparty_steam_id="76561198000000002",
-            ),
-        )
+    buyer_confirmed = replace(
+        buyer_sent,
+        delivery_status=DeliveryStatus.OFFER_CONFIRMED,
+        counterparty_steam_id="76561198000000002",
+    )
+    validate_delivery_transition(buyer_sent, buyer_confirmed)
 
 
 def test_bound_tradeoffer_id_is_immutable_across_normal_paths():

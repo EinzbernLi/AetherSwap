@@ -65,8 +65,6 @@ def _validate_platform_result(platform_result: object) -> None:
     if type(platform_result) is not PlatformResult:
         raise DeliveryContractError("platform_result must be a PlatformResult")
     try:
-        # Re-run the immutable result contract for defensive handling of a
-        # forged instance created without invoking dataclass validation.
         PlatformResult.__post_init__(platform_result)
     except Exception as exc:
         raise DeliveryContractError("platform_result violates its contract") from exc
@@ -262,8 +260,18 @@ def _plan_steam_trade_offer_lifecycle(
     """Plan the one allowed transition from exact typed offer evidence."""
 
     snapshot = delivery.snapshot
-    status = snapshot.delivery_status
     lifecycle = evidence.lifecycle
+    if (
+        snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and snapshot.counterparty_steam_id is None
+        and snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+        and not lifecycle.is_terminal_without_trade
+    ):
+        snapshot = replace(
+            snapshot,
+            counterparty_steam_id=evidence.counterparty_steam_id,
+        )
+    status = snapshot.delivery_status
 
     if lifecycle.is_terminal_without_trade:
         return _propose(
@@ -536,7 +544,6 @@ def plan_read_evidence_transition(
     _validate_delivery(delivery)
     _validate_platform_result(platform_result)
 
-    # Identity is checked before interpreting status or evidence semantics.
     if not _identity_matches(delivery, platform_result):
         return _blocked(delivery, "identity_mismatch")
 

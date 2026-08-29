@@ -129,13 +129,22 @@ class DeliveryDirectionEvidence:
 
 @dataclass(frozen=True)
 class OfferStateEvidence:
-    """The exact Steam offer and seller proven for one canonical BUFF order."""
+    """The exact Steam offer proven for one canonical BUFF order.
+
+    ``counterparty_steam_id`` is optional because the realtime BUFF surface is
+    authoritative for order -> Trade Offer identity, while the subsequent
+    exact Steam read is authoritative for counterparty, direction, items and
+    lifecycle.  When BUFF does expose a seller identity it is still validated
+    and may be carried as corroborating evidence.
+    """
 
     steam_tradeoffer_id: str
-    counterparty_steam_id: str
+    counterparty_steam_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_id(self.steam_tradeoffer_id, "steam_tradeoffer_id")
+        if self.counterparty_steam_id is None:
+            return
         try:
             seller_counterparty_from_exact_buff_record(
                 {"seller_steam_id": self.counterparty_steam_id}
