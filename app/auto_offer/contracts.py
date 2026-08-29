@@ -54,13 +54,15 @@ DELIVERY_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "steam_id_mismatch",
         "contract_unknown",
         "write_result_unknown",
-        "offer_identity_pending",
         "offer_not_found",
         "offer_terminated",
         "inventory_reconciliation_failed",
         "module_disabled",
         "module_contract_mismatch",
     }
+)
+_TRANSIENT_DELIVERY_MARKERS: Final[frozenset[str]] = frozenset(
+    {"offer_identity_pending"}
 )
 
 TERMINAL_DELIVERY_STATUSES: Final[frozenset[DeliveryStatus]] = frozenset(
@@ -195,7 +197,10 @@ def _validate_snapshot_shape(snapshot: DeliverySnapshot) -> None:
     if snapshot.delivery_error is not None:
         if (
             type(snapshot.delivery_error) is not str
-            or snapshot.delivery_error not in DELIVERY_ERROR_CODES
+            or (
+                snapshot.delivery_error not in DELIVERY_ERROR_CODES
+                and snapshot.delivery_error not in _TRANSIENT_DELIVERY_MARKERS
+            )
         ):
             raise DeliveryContractError("delivery_error is not an allowed code")
     if snapshot.delivery_error == "offer_identity_pending" and not (
@@ -519,7 +524,6 @@ def _validate_counterparty_binding(
         and target.delivery_status in {
             DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
             DeliveryStatus.OFFER_CONFIRMED,
-            DeliveryStatus.OFFER_TERMINATED,
         }
     )
     if first_buyer_exact_steam_binding:
