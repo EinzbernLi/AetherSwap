@@ -80,9 +80,11 @@ def buyer_snapshot(
     return value
 
 
-def steam_offer_evidence(*, is_our_offer=True, items_to_give=()):
+def steam_offer_evidence(
+    *, steam_tradeoffer_id="offer-1", is_our_offer=True, items_to_give=()
+):
     return SteamTradeOfferEvidence(
-        steam_tradeoffer_id="offer-1",
+        steam_tradeoffer_id=steam_tradeoffer_id,
         account_steam_id=RECIPIENT,
         counterparty_steam_id=COUNTERPARTY,
         is_our_offer=is_our_offer,
@@ -276,7 +278,7 @@ def test_unbound_offer_sent_does_not_adopt_counterparty_from_wrong_offer():
         ),
         status=PlatformResultStatus.SUCCESS,
         detail="active",
-        evidence=steam_offer_evidence(),
+        evidence=steam_offer_evidence(steam_tradeoffer_id="offer-2"),
     )
 
     decision = plan_read_evidence_transition(stored, read_result)
