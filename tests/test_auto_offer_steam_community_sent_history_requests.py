@@ -222,6 +222,7 @@ def test_exact_d2_plan_becomes_exact_single_get_with_tls_and_no_redirect():
     result = sender(plan)
 
     assert isinstance(result, CommunitySentHistoryHttpResponse)
+    assert result.redirect_subtype == "none"
     assert len(session.calls) == 1
     url, kwargs = session.calls[0]
     assert url == (
@@ -233,6 +234,109 @@ def test_exact_d2_plan_becomes_exact_single_get_with_tls_and_no_redirect():
         "allow_redirects": False,
         "verify": True,
     }
+
+
+@pytest.mark.parametrize(
+    "location,expected_subtype",
+    [
+        (
+            f"https://steamcommunity.com/profiles/{RECIPIENT}/tradeoffers/sent/?history=1",
+            "same_target",
+        ),
+        ("?history=1", "same_target"),
+        (f"/profiles/{RECIPIENT}/tradeoffers/", "same_profile_tradeoffers"),
+        (f"/profiles/{RECIPIENT}/tradeoffers/sent/", "same_profile_tradeoffers"),
+        ("/login/home/?goto=synthetic", "steam_login_or_auth"),
+        ("/openid/login", "steam_login_or_auth"),
+        ("/oauth/authorize", "steam_login_or_auth"),
+        ("/market/", "same_origin_other"),
+        ("https://example.invalid/next", "cross_origin"),
+        ("http://steamcommunity.com/next", "cross_origin"),
+        (None, "missing_or_invalid"),
+        ("", "missing_or_invalid"),
+        (" https://steamcommunity.com/login/", "missing_or_invalid"),
+        ("javascript:synthetic", "missing_or_invalid"),
+        ("https://[", "missing_or_invalid"),
+        ("/lo\ngin/home/", "missing_or_invalid"),
+        ("/lo\tgin/home/", "missing_or_invalid"),
+    ],
+)
+def test_redirect_location_is_reduced_in_memory_without_following_or_raw_leakage(
+    location,
+    expected_subtype,
+):
+    marker = "synthetic-redirect-marker"
+    headers = {"Content-Type": "text/html"}
+    if location is not None:
+        headers["Location"] = location.replace("synthetic", marker)
+    session = FakeSession(
+        response=SimpleNamespace(status_code=302, headers=headers, text="redirect-body")
+    )
+    q = query()
+    sender = make_sender(session, q=q)
+    plan = build_community_sent_history_request(q)
+
+    response = sender(plan)
+
+    assert len(session.calls) == 1
+    assert session.calls[0][1]["allow_redirects"] is False
+    assert response.redirect_subtype == expected_subtype
+    assert not hasattr(response, "location")
+    assert not hasattr(response, "headers")
+    assert marker not in repr(response)
+
+
+def test_redirect_subtype_reaches_sanitized_outcome_without_raw_location():
+    marker = "synthetic-redirect-marker"
+    session = FakeSession(
+        response=SimpleNamespace(
+            status_code=302,
+            headers={
+                "Content-Type": "text/html",
+                "Location": f"/login/home/?goto={marker}",
+            },
+            text="redirect-body",
+        )
+    )
+    q = query()
+    sender = make_sender(session, q=q)
+
+    result = read_community_sent_history_once(q, sender)
+
+    assert len(session.calls) == 1
+    assert result.snapshot is None
+    assert result.outcome.disposition is CommunitySentHistoryDisposition.REDIRECT_REJECTED
+    assert result.outcome.redirect_subtype == "steam_login_or_auth"
+    assert result.outcome.transport_subtype == "none"
+    assert marker not in repr(result.outcome)
+    assert not hasattr(result.outcome, "location")
+    assert not hasattr(result.outcome, "headers")
+
+
+def test_non_redirect_location_header_is_ignored_and_not_retained():
+    marker = "synthetic-redirect-marker"
+    session = FakeSession(
+        response=SimpleNamespace(
+            status_code=200,
+            headers={
+                "Content-Type": "text/html; charset=UTF-8",
+                "Location": f"https://example.invalid/{marker}",
+            },
+            text=(
+                '<div class="tradeoffer" id="tradeofferid_100">'
+                '<div class="tradeoffer_items_ctn inactive">'
+                '<div class="tradeoffer_items_banner accepted"></div>'
+                "</div></div>"
+            ),
+        )
+    )
+    q = query()
+    sender = make_sender(session, q=q)
+
+    result = read_community_sent_history_once(q, sender)
+
+    assert result.outcome.redirect_subtype == "none"
+    assert marker not in repr(result.outcome)
 
 
 def test_sender_rejects_arbitrary_host_plan_before_dispatching_cookies():
@@ -296,6 +400,7 @@ def test_d2_integration_proves_identity_surface_from_fake_html():
     assert result.outcome.canonical_count == 1
     assert result.outcome.unique_count == 1
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == "none"
     assert not hasattr(result.outcome, "body")
     assert not hasattr(result.outcome, "headers")
     assert not hasattr(result.outcome, "cookies")
@@ -312,6 +417,7 @@ def test_d2_query_mismatch_is_sanitized_other_without_request():
     assert result.snapshot is None
     assert result.outcome.disposition is CommunitySentHistoryDisposition.TRANSPORT_ERROR
     assert result.outcome.transport_subtype == "other"
+    assert result.outcome.redirect_subtype == "none"
 
 
 @pytest.mark.parametrize(
@@ -335,6 +441,7 @@ def test_request_exceptions_are_safely_classified_and_never_retried(error, expec
     assert result.outcome.disposition is CommunitySentHistoryDisposition.TRANSPORT_ERROR
     assert result.outcome.status_class == "none"
     assert result.outcome.transport_subtype == expected_subtype
+    assert result.outcome.redirect_subtype == "none"
     assert not hasattr(result.outcome, "error")
     assert not hasattr(result.outcome, "detail")
     assert not hasattr(result.outcome, "exception")
@@ -356,6 +463,7 @@ def test_response_content_type_and_body_are_only_transient_d2_inputs():
     assert result.snapshot is None
     assert result.outcome.disposition is CommunitySentHistoryDisposition.NON_HTML_REJECTED
     assert result.outcome.transport_subtype == "none"
+    assert result.outcome.redirect_subtype == "none"
     assert not hasattr(result.outcome, "body")
 
 
@@ -419,4 +527,5 @@ def test_bad_response_shape_propagates_to_d2_as_sanitized_other_transport_error(
 
     assert result.outcome.disposition is CommunitySentHistoryDisposition.TRANSPORT_ERROR
     assert result.outcome.transport_subtype == "other"
+    assert result.outcome.redirect_subtype == "none"
     assert len(session.calls) == 1
