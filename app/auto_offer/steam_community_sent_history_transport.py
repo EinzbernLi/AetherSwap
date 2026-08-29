@@ -5,8 +5,8 @@ bind runtime configuration. A caller supplies one sender callable. The module
 builds the exact GET plan, invokes the sender at most once, classifies a minimal
 response view, and hands canonical identity evidence to the D1 parser.
 
-Raw HTML, exception text, request URLs and secrets never appear in the
-sanitized outcome object.
+Raw HTML, redirect destinations, exception text, request URLs and secrets never
+appear in the sanitized outcome object.
 """
 
 from __future__ import annotations
@@ -49,6 +49,19 @@ class CommunitySentHistoryDisposition(str, Enum):
     TRANSPORT_ERROR = "transport_error"
 
 
+COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES = frozenset(
+    {
+        "none",
+        "missing_or_invalid",
+        "same_target",
+        "same_profile_tradeoffers",
+        "steam_login_or_auth",
+        "same_origin_other",
+        "cross_origin",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class CommunitySentHistoryRequestPlan:
     method: str
@@ -86,6 +99,7 @@ class CommunitySentHistoryHttpResponse:
     status_code: int
     content_type: str
     body: str
+    redirect_subtype: str = "none"
 
     def __post_init__(self) -> None:
         if type(self.status_code) is not int or not 100 <= self.status_code <= 599:
@@ -94,6 +108,14 @@ class CommunitySentHistoryHttpResponse:
             raise CommunitySentHistoryTransportError("content_type_must_be_string")
         if type(self.body) is not str:
             raise CommunitySentHistoryTransportError("body_must_be_string")
+        if self.redirect_subtype not in COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES:
+            raise CommunitySentHistoryTransportError("invalid_redirect_subtype")
+
+        is_redirect = 300 <= self.status_code <= 399
+        if is_redirect and self.redirect_subtype == "none":
+            raise CommunitySentHistoryTransportError("redirect_response_requires_subtype")
+        if not is_redirect and self.redirect_subtype != "none":
+            raise CommunitySentHistoryTransportError("non_redirect_response_has_subtype")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +127,7 @@ class CommunitySentHistorySanitizedOutcome:
     request_count: int
     identity_surface_proven: bool
     transport_subtype: str = "none"
+    redirect_subtype: str = "none"
 
     def __post_init__(self) -> None:
         if type(self.disposition) is not CommunitySentHistoryDisposition:
@@ -123,6 +146,8 @@ class CommunitySentHistorySanitizedOutcome:
             raise CommunitySentHistoryTransportError("invalid_identity_surface_proven")
         if self.transport_subtype not in {"none", "tls", "timeout", "other"}:
             raise CommunitySentHistoryTransportError("invalid_transport_subtype")
+        if self.redirect_subtype not in COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES:
+            raise CommunitySentHistoryTransportError("invalid_redirect_subtype")
 
         expected = self.disposition is CommunitySentHistoryDisposition.IDENTITY_SURFACE_PROVEN
         if self.identity_surface_proven is not expected:
@@ -132,6 +157,12 @@ class CommunitySentHistorySanitizedOutcome:
                 raise CommunitySentHistoryTransportError("transport_error_requires_subtype")
         elif self.transport_subtype != "none":
             raise CommunitySentHistoryTransportError("non_transport_outcome_has_subtype")
+
+        if self.disposition is CommunitySentHistoryDisposition.REDIRECT_REJECTED:
+            if self.redirect_subtype == "none":
+                raise CommunitySentHistoryTransportError("redirect_outcome_requires_subtype")
+        elif self.redirect_subtype != "none":
+            raise CommunitySentHistoryTransportError("non_redirect_outcome_has_subtype")
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +227,7 @@ def _outcome(
     count: int = 0,
     request_count: int = 1,
     transport_subtype: str = "none",
+    redirect_subtype: str = "none",
 ) -> CommunitySentHistorySanitizedOutcome:
     return CommunitySentHistorySanitizedOutcome(
         disposition=disposition,
@@ -207,6 +239,7 @@ def _outcome(
             disposition is CommunitySentHistoryDisposition.IDENTITY_SURFACE_PROVEN
         ),
         transport_subtype=transport_subtype,
+        redirect_subtype=redirect_subtype,
     )
 
 
@@ -217,8 +250,8 @@ def read_community_sent_history_once(
     """Invoke exactly one injected sender and classify D1 identity evidence.
 
     Network exceptions are reduced to a bounded subtype. Exception text,
-    headers, URL values, response excerpts and credential material are never
-    retained by this contract.
+    headers, redirect destinations, URL values, response excerpts and credential
+    material are never retained by this contract.
     """
 
     if not callable(sender):
@@ -257,6 +290,7 @@ def read_community_sent_history_once(
             outcome=_outcome(
                 CommunitySentHistoryDisposition.REDIRECT_REJECTED,
                 status_class=status_class,
+                redirect_subtype=response.redirect_subtype,
             ),
         )
     if response.status_code != 200:
@@ -306,6 +340,7 @@ def read_community_sent_history_once(
 
 
 __all__ = [
+    "COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES",
     "CommunitySentHistoryDisposition",
     "CommunitySentHistoryHttpResponse",
     "CommunitySentHistoryNetworkError",
