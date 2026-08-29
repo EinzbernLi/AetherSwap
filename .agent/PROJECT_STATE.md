@@ -1,14 +1,15 @@
 # AetherSwap Current Project State
 
-Status: **central governance v0.3.6 adopted; G16 Web Lead ACTIVE; TASK-050 offline foundation merged; next live sent-history probe still separately gated**  
-State date: **2026-08-28**
+Status: **central governance v0.3.6 / PF-014 adopted; G16 Web Lead ACTIVE; TASK-050 offline foundation merged; live sent-history actions remain separately gated**  
+State date: **2026-08-29**
 
 This is a compact current-state entry point, not a transcript. Newer exact GitHub Issue/PR/Lead records always supersede stale prose here.
 
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- Current integration baseline after governance v0.3.6 adoption: `d484d6268ef9fc7cef1f1ba538e0b6818fb4ad27`.
+- PF-014 adoption exact base: `3966722d23412ee1360df8123cad66e60aab1438` (tree `4fc4219a8b19681bad68d99c31edee78e91d367c`).
+- Read GitHub for the current integration head; do not treat a recorded adoption base as permanent current-head truth.
 - `main` is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
 
@@ -16,16 +17,24 @@ This is a compact current-state entry point, not a transcript. Newer exact GitHu
 
 Ordinary governance and LPRL are separately pinned.
 
-Governance adopted through PR #159 / merge `d484d6268ef9fc7cef1f1ba538e0b6818fb4ad27`:
+Current ordinary governance:
 
-- central governance: `EinzbernLi/agent-dev-governance@c06b82de61de9249d91473bda974228725bdb714` (`v0.3.6`);
-- one Active project Lead + bounded same-project Web/Codex/Luna/Terra workers;
-- `parallel workers != parallel Leads`;
-- Lead owns integration and final acceptance;
-- Worker/Validator sessions must not create project Lead Claims merely because they execute a Task in another runtime;
-- actual project Lead handoff requires explicit OWNER intent to move the project Lead.
+- central governance: `EinzbernLi/agent-dev-governance@ef250219070dea0d7861e4817831b8f447a91118` (`v0.3.6`);
+- PF-014 durable re-anchor semantics are adopted without a version bump;
+- runtime-local planning/memory/session/IDE/checkpoint/scratch is non-authoritative execution aid and provisional until durable re-anchor;
+- durable Task contract and durable project/control facts outrank executor-local planning;
+- durable completion requires the required Result to exist in the canonical sink and be read back before acceptance;
+- Source identity, physical Location, controlled Workspace, and runtime Deployment remain distinct;
+- stale candidate currency is separate from reusable evidence: stale source cannot be accepted as current merely because evidence may be reusable;
+- safe pre-anchor bounded diagnostics may run only when known no-write or isolated, offline/no network-platform-business effect, and they remain provisional;
+- pre-anchor evidence may be reused only after exact input/baseline plus unchanged evidence/test contract are reconciled/revalidated; otherwise rerun;
+- authority-bearing/formal Task execution, dispatch, mutation, network/platform/business action, protected-runtime mutation, and durable PASS/Acceptance require applicable durable re-anchor and Lead activation;
+- if expected `G(N+1)` is missing/unverifiable, takeover did not complete: prior valid `G(N)` remains authoritative until a successful retry completes claim write, reread/uniqueness, and fresh capability probe;
+- one Active project Lead + bounded same-project Web/Codex/Luna/Terra workers remains the project model;
+- `parallel workers != parallel Leads`; Lead owns integration and final acceptance;
+- actual project Lead handoff still requires explicit OWNER intent.
 
-LPRL remains separately pinned:
+LPRL remains separately pinned and unchanged:
 
 - `EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478` (`v0.2.3-pilot`).
 
@@ -35,18 +44,20 @@ The ordinary governance repin does not grant local-resource lifecycle authority 
 
 Canonical sink: Issue #149.
 
-Current exact state:
+Current exact state at this adoption:
 
 - G15 claim `5452116330` was a historical task-scoped LPRL-materialization Lead state;
 - OWNER subsequently clarified that the separate file-management/LPRL line is not intended to own the Aether project Lead while this Sol/Web session owns the Aether functional line;
 - G16 claim `5452445521`, parent G15, restores one Web Aether Lead under `normal_project_continuation`;
-- G16 activation verify `5452448339` confirms uniqueness and no G17/newer competing claim;
+- G16 activation verify `5452448339` confirms uniqueness and no G17/newer competing claim at the Task #162 execution fence;
 - runtime: Web / GPT-5.6 Sol;
 - TASK-050 offline/program development is within G16 scope;
 - file-management/LPRL may run as a separately bounded worker/workstream but not as a sibling Aether Lead;
 - live authenticated one-shot remains separately gated;
 - REAL-WRITE remains CLOSED;
 - integration -> main remains OWNER-gated.
+
+This section is a convenience snapshot only. Always reread #149 before takeover, authority-sensitive execution, and final governance acceptance; newer canonical evidence wins.
 
 ## 4. Lead vs Worker launch semantics
 
@@ -57,7 +68,7 @@ Formal project takeover examples:
 把 Aether 项目 Lead 移交给 Codex。
 ```
 
-These enter the Lead Activation Gate.
+These enter the durable re-anchor / Lead Activation transaction.
 
 Task execution examples:
 
@@ -110,9 +121,7 @@ persist OFFER_ATTEMPTED + offer_attempted_at
 -> existing confirmation / lifecycle / completed-trade receipt flow
 ```
 
-No production `GetTradeOffers` transport/parser is implemented yet because real response shape/TLS/time semantics remain unverified.
-
-Latest one-shot packet is #130 comment `5452286470`. It remains **NOT AUTHORIZED** by ordinary continuation.
+TASK-050 live/authenticated actions remain separately gated by their exact durable packets and OWNER authorization. PF-014 adoption does not authorize, repeat, or widen any such live action.
 
 ## 7. Codex ↔ GitHub reconciliation
 
@@ -120,8 +129,7 @@ Cross-runtime audit is recorded in #130 comment `5452399614`.
 
 - TASK-042 and TASK-047 production work are represented in GitHub history and current integration descendants.
 - prior TASK-050 production-simulation branch/commit is not repository-resolvable and must not be reconstructed from prose.
-- Windows sent-history probe harness (`test_sent_history_probe_outcome.py`, `test_sent_history_direct_probe.py` plus companion control script) was locally verified by Codex but is not present in GitHub source.
-- exact local harness recovery/export is defined by #130 comment `5452404406`; that is offline source audit only, not a live probe.
+- exact local evidence must be reconciled to current source/baseline and its evidence/test contract before reuse; local planning or checkpoint state alone is never authority.
 
 ## 8. Safety state
 
@@ -137,21 +145,25 @@ Still requires exact separate OWNER authority where applicable:
 
 No generic “continue” instruction opens these gates.
 
-## 9. Cold-start rule
+## 9. Cold-start / durable re-anchor rule
 
-A new session first decides whether it is:
+Runtime-local continuity context may restore first, but it is non-authoritative. Before authority-bearing work, a project Lead takeover/resume follows:
 
 ```text
-project Lead takeover/resume
-or
-bounded Task Worker/Validator
+runtime-local context (provisional)
+-> durable project/control facts
+-> latest valid G(N)
+-> exactly one parent-bound G(N+1)
+-> canonical reread + uniqueness
+-> fresh Runtime Capability Probe
+-> ACTIVE
 ```
 
-Only the first path creates the next #149 generation. Worker/Validator sessions operate under their Task package and return Results to the Active Lead.
+If `G(N+1)` is absent or unverifiable, the prior valid `G(N)` remains authoritative. Worker/Validator sessions do not create the next Lead generation merely because they execute a bounded Task.
 
 ## 10. Next safe actions
 
-1. For the Codex-local probe harness audit, launch Codex as a **Task Worker**, not a Lead takeover.
-2. Review any recovered exact local probe source against current integration before deciding whether it belongs in GitHub.
-3. Continue TASK-050 offline work under G16.
-4. Do not execute the live sent-history one-shot without its separate explicit OWNER authorization.
+1. Continue bounded governance or TASK-050 offline/program work under the current G16 scope after reconciling current durable facts.
+2. Treat any pre-anchor diagnostic evidence as provisional and apply the exact-input/baseline/test-contract reuse rule.
+3. Do not execute separately gated live Steam/BUFF actions without their exact OWNER authorization.
+4. Do not merge `integration/auto-buyer-offer` to `main` without separate OWNER approval.
