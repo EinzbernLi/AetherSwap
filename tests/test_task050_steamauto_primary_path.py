@@ -60,13 +60,6 @@ def buyer_snapshot(
     delivery_error=None,
     counterparty_steam_id=None,
 ):
-    if (
-        status is DeliveryStatus.OFFER_SENT
-        and steam_tradeoffer_id is not None
-        and counterparty_steam_id is None
-        and delivery_error is None
-    ):
-        delivery_error = "offer_identity_pending"
     value = DeliverySnapshot(
         purchase_id="purchase-1",
         buff_order_id="order-1",
@@ -233,7 +226,7 @@ def test_buff_realtime_binding_recovers_buyer_without_counterparty(
     assert decision.target.delivery_status is DeliveryStatus.OFFER_SENT
     assert decision.target.steam_tradeoffer_id == "offer-1"
     assert decision.target.counterparty_steam_id is None
-    assert decision.target.delivery_error == "offer_identity_pending"
+    assert decision.target.delivery_error is None
     assert decision.target.offer_sent_at == 11.0
     validate_delivery_transition(current, decision.target)
 
@@ -268,29 +261,18 @@ def test_first_exact_steam_read_binds_counterparty_and_advances_buyer():
     validate_delivery_transition(current, decision.target)
 
 
-def test_historical_unmarked_offer_sent_cannot_adopt_counterparty():
-    current = DeliverySnapshot(
-        purchase_id="purchase-1",
-        buff_order_id="order-1",
-        account_id="account-1",
-        recipient_steam_id=RECIPIENT,
-        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
-        delivery_status=DeliveryStatus.OFFER_SENT,
+def test_unbound_offer_sent_does_not_adopt_counterparty_from_wrong_offer():
+    current = buyer_snapshot(
+        DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id="offer-1",
-        offer_attempted_at=10.0,
         offer_sent_at=11.0,
-        received_at=None,
-        delivery_error=None,
-        pending_receipt=True,
-        assetid=None,
-        counterparty_steam_id=None,
     )
     stored = StoredDelivery(snapshot=current, revision=2)
     read_result = PlatformResult(
         request=request(
             PlatformCapability.READ_STEAM_TRADE_OFFER,
             revision=2,
-            steam_tradeoffer_id="offer-1",
+            steam_tradeoffer_id="offer-2",
         ),
         status=PlatformResultStatus.SUCCESS,
         detail="active",
@@ -300,6 +282,7 @@ def test_historical_unmarked_offer_sent_cannot_adopt_counterparty():
     decision = plan_read_evidence_transition(stored, read_result)
 
     assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.detail == "identity_mismatch"
     assert decision.target is None
 
 
