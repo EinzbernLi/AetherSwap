@@ -17,8 +17,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-import requests
-
 from app.accounts import get_account, get_current_id
 from app.auto_offer.adapters import (
     PlatformCapability,
@@ -71,6 +69,7 @@ from app.auto_offer.steam_readonly_transport import (
 from app.auto_offer.store import AutoOfferStore, StoredDelivery
 from app.config_loader import get_steam_credentials
 from app.services.buff_checkout_guard import get_unresolved_checkout
+from app.services.steam_egress import SteamHostEgressSession
 
 
 _STORE_PATH = Path(__file__).resolve().parents[2] / "config" / "auto_offer.db"
@@ -789,7 +788,7 @@ def _build_active_host_auto_offer_bridge(
     session = None
     store = None
     try:
-        session = requests.Session()
+        session = SteamHostEgressSession()
         if getattr(session, "verify", None) is False:
             raise HostAutoOfferIntegrationError("steam_tls_verification_disabled")
 
@@ -1012,7 +1011,7 @@ def _build_recovery_only_host_auto_offer_bridge(
     session = None
     store = None
     try:
-        session = requests.Session()
+        session = SteamHostEgressSession()
         if getattr(session, "verify", None) is False:
             raise HostAutoOfferIntegrationError("steam_tls_verification_disabled")
 
