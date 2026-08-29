@@ -179,6 +179,8 @@ def _classify_redirect_location(
 
     if type(location) is not str or not location or location != location.strip():
         return "missing_or_invalid"
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in location):
+        return "missing_or_invalid"
 
     try:
         expected = urlsplit(plan.url)
