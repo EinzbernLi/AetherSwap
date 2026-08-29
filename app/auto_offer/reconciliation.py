@@ -65,8 +65,6 @@ def _validate_platform_result(platform_result: object) -> None:
     if type(platform_result) is not PlatformResult:
         raise DeliveryContractError("platform_result must be a PlatformResult")
     try:
-        # Re-run the immutable result contract for defensive handling of a
-        # forged instance created without invoking dataclass validation.
         PlatformResult.__post_init__(platform_result)
     except Exception as exc:
         raise DeliveryContractError("platform_result violates its contract") from exc
@@ -145,13 +143,14 @@ def _plan_buyer_offer_recovery(
         return _blocked(delivery, "recovery_observation_time_invalid")
     if snapshot.steam_tradeoffer_id is not None:
         return _blocked(delivery, "evidence_not_allowed")
+    counterparty = evidence.counterparty_steam_id
     target = replace(
         snapshot,
         delivery_status=DeliveryStatus.OFFER_SENT,
         steam_tradeoffer_id=evidence.steam_tradeoffer_id,
-        counterparty_steam_id=evidence.counterparty_steam_id,
+        counterparty_steam_id=counterparty,
         offer_sent_at=sent_at,
-        delivery_error=None,
+        delivery_error=(None if counterparty is not None else "offer_identity_pending"),
     )
     return _propose(delivery, target, "buyer_offer_recovered")
 
@@ -261,10 +260,10 @@ def _plan_steam_trade_offer_lifecycle(
 ) -> ReconciliationDecision:
     """Plan the one allowed transition from exact typed offer evidence.
 
-    For buyer-send deliveries the first exact Steam read is the counterparty
-    authority.  If BUFF bound only the Trade Offer ID, adopt the Steam-proven
-    counterparty on this same forward lifecycle transition.  Once present, the
-    normal transition contract keeps that counterparty immutable.
+    For buyer-send deliveries created by the realtime BUFF recovery path, the
+    first exact Steam read is the counterparty authority.  The explicit
+    ``offer_identity_pending`` marker prevents historical unbound rows from
+    silently adopting a counterparty under this new contract.
     """
 
     snapshot = delivery.snapshot
@@ -272,10 +271,12 @@ def _plan_steam_trade_offer_lifecycle(
         snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
         and snapshot.counterparty_steam_id is None
         and snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+        and snapshot.delivery_error == "offer_identity_pending"
     ):
         snapshot = replace(
             snapshot,
             counterparty_steam_id=evidence.counterparty_steam_id,
+            delivery_error=None,
         )
     status = snapshot.delivery_status
     lifecycle = evidence.lifecycle
@@ -551,7 +552,6 @@ def plan_read_evidence_transition(
     _validate_delivery(delivery)
     _validate_platform_result(platform_result)
 
-    # Identity is checked before interpreting status or evidence semantics.
     if not _identity_matches(delivery, platform_result):
         return _blocked(delivery, "identity_mismatch")
 
