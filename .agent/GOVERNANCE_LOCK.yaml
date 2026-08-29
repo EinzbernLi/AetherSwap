@@ -6,9 +6,9 @@ adopted_from_code_ref: "integration/auto-buyer-offer@cc87881cc5ea10c7564494a8be8
 central_governance:
   repository: EinzbernLi/agent-dev-governance
   version: "0.3.6"
-  ref: c06b82de61de9249d91473bda974228725bdb714
+  ref: ef250219070dea0d7861e4817831b8f447a91118
   follow_main: false
-  note: "v0.3.6 keeps one Active Lead while allowing bounded same-project Web/Codex parallel workers. Parallel workers are not parallel Leads and Lead owns integration/final acceptance."
+  note: "v0.3.6 includes PF-014 durable re-anchor semantics: runtime-local context is non-authoritative/provisional, safe bounded pre-anchor diagnostics are allowed, and authority-bearing action remains fail-closed until durable re-anchor plus applicable Lead activation complete. One Active Lead and bounded same-project workers remain unchanged."
 
 modules:
   lprl:
