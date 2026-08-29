@@ -487,12 +487,23 @@ def _validate_counterparty_binding(
         and target.steam_tradeoffer_id is not None
     )
     if first_buyer_offer_binding:
-        if target_id is None:
-            raise DeliveryContractError(
-                "buyer offer binding requires counterparty Steam ID"
-            )
+        # BUFF realtime evidence may bind only the exact Trade Offer ID.  The
+        # first exact Steam known-offer read owns counterparty/direction/items.
         return
     if target_id is None:
+        return
+    first_buyer_exact_steam_binding = (
+        mode is DeliveryMode.BUYER_SENDS_OFFER
+        and current.delivery_status is DeliveryStatus.OFFER_SENT
+        and current.steam_tradeoffer_id is not None
+        and target.steam_tradeoffer_id == current.steam_tradeoffer_id
+        and target.delivery_status in {
+            DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
+            DeliveryStatus.OFFER_CONFIRMED,
+            DeliveryStatus.OFFER_TERMINATED,
+        }
+    )
+    if first_buyer_exact_steam_binding:
         return
     if (
         current.delivery_status is DeliveryStatus.PENDING_DIRECTION
