@@ -1,21 +1,33 @@
-# AetherSwap Cold-Start Guard — MUST RUN FIRST
+# AetherSwap Cold-Start / Durable Re-anchor Guard
 
 This repository uses one Active project Lead plus bounded Task-scoped workers.
+
+The root/cold-start guard is a routing optimization, not authority and not a correctness dependency. Runtime-local planning, memory, session restore, IDE state, checkpoint, cached notes, or scratch may restore before governance is reached. Such context is non-authoritative execution aid and remains provisional until durable re-anchor completes.
+
+Before durable re-anchor, a session may only recover/read non-authoritative context and durable facts, inspect capabilities, or run bounded diagnostics/tests that are known no-write or isolated, offline/no network-platform-business effect, and do not touch source/ref/config/data/state/protected runtime. Any pre-anchor diagnostic evidence is provisional: it may be reused only after exact input/baseline and an unchanged evidence/test contract are reconciled/revalidated; otherwise rerun it.
+
+Authority-bearing/formal Task execution, formal dispatch, source/ref/config/data/state mutation, network/platform/business action, protected-runtime mutation, or durable PASS/Acceptance remains fail-closed until the applicable durable re-anchor and Lead activation are complete.
 
 ## Formal Lead / takeover entry
 
 Only when the OWNER explicitly asks the current session to become or take over the **Aether project Lead** (for example: `接管 Aether 的开发，我们继续。`, `把 Aether Lead 移交给 Codex`) does this session enter the Lead Activation Gate.
 
-Before any planning/progress write, project test, source mutation, formal dispatch, network/platform/business action, or Task execution as Lead:
+Canonical takeover transaction:
 
-1. read `.agent/GOVERNANCE_LOCK.yaml`, `.agent/LOCAL_POLICY.yaml`, `.agent/PROJECT_STATE.md`, `.agent/BOOTSTRAP.md`;
-2. read canonical Lead Claim sink `github:EinzbernLi/AetherSwap#149` and identify the latest valid parent plus effective control scope;
-3. create exactly the next parent-bound generation without widening scope by inference;
-4. re-read #149 and verify no sibling/duplicate generation or newer competing claim;
-5. perform a fresh Runtime Capability Probe;
-6. only after all gates pass may the session become `ACTIVE` and act as project Lead.
+```text
+runtime-local context may restore/read (non-authoritative)
+-> resolve Aether + read durable project/control facts
+-> read latest valid G(N)
+-> write exactly one next parent-bound G(N+1)
+-> reread canonical sink / verify uniqueness
+-> fresh Runtime Capability Probe
+-> ACTIVE
+-> formal governed work
+```
 
-If the claim sink cannot be read/written, uniqueness cannot be verified, or the fresh probe cannot complete, return `LEAD_ACTIVATION_BLOCKED` and fail closed.
+Missing or unverifiable `G(N+1)` means takeover did not complete. The prior valid `G(N)` remains authoritative; no reviewer/runtime may synthesize a missing generation from UI, memory, planning, or session state.
+
+If the claim sink cannot be read/written, uniqueness cannot be verified, or the fresh probe cannot complete, return `LEAD_ACTIVATION_BLOCKED` and fail closed on authority-bearing work.
 
 ## Task Worker / Validator entry — MUST NOT TAKE OVER LEAD
 
