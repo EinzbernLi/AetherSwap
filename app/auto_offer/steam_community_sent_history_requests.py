@@ -32,21 +32,27 @@ class CommunitySentHistoryRequestsError(CommunitySentHistoryTransportError):
 
 
 def _parse_injected_cookies(cookies_raw: object) -> dict[str, str]:
-    if type(cookies_raw) is not str or not cookies_raw.strip():
+    if type(cookies_raw) is not str or not cookies_raw:
         raise CommunitySentHistoryRequestsError("cookie_header_required")
 
     parsed: dict[str, str] = {}
     for raw_part in cookies_raw.split(";"):
-        part = raw_part.strip()
+        # Cookie headers conventionally place optional whitespace after ';'.
+        # Remove that structural separator whitespace only; credential values
+        # themselves are never stripped, normalized, hashed, or rewritten.
+        part = raw_part.lstrip(" \t")
         if not part:
             continue
         if "=" not in part:
             raise CommunitySentHistoryRequestsError("malformed_cookie_part")
-        name, _, value = part.partition("=")
-        name = name.strip()
-        value = value.strip()
+        raw_name, _, value = part.partition("=")
+        name = raw_name.strip()
         if not name or _COOKIE_NAME_RE.fullmatch(name) is None:
             raise CommunitySentHistoryRequestsError("malformed_cookie_name")
+        if raw_name != name:
+            raise CommunitySentHistoryRequestsError("noncanonical_cookie_name")
+        if value != value.strip():
+            raise CommunitySentHistoryRequestsError("noncanonical_cookie_value")
         if name in parsed:
             raise CommunitySentHistoryRequestsError("duplicate_cookie_name")
         parsed[name] = value
