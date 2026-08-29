@@ -113,9 +113,9 @@ legacy_governance_compatibility:
     - "Legacy governance/domain evidence when non-conflicting"
 
 lprl_boundary:
-  authority_ref: "EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478"
-  profile_version: "v0.2.3-pilot"
-  central_acceptance_ref: "github:EinzbernLi/agent-dev-governance#25@5451454492"
+  authority_ref: "EinzbernLi/agent-dev-governance@5f22e63414374b64ebbf4bd91601ede2f54e6f65"
+  profile_version: "v0.2.4-pilot"
+  central_acceptance_ref: "github:EinzbernLi/agent-dev-governance#40@5460859987"
   current_phase_is_not_cleanup_authority: true
   no_local_materialization_without_separate_authorization: true
   no_snapshot_gate_retirement_migration_or_reclamation_without_separate_authorization: true

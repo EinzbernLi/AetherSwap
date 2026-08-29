@@ -38,9 +38,12 @@ Current ordinary governance:
 - `parallel workers != parallel Leads`; Lead owns integration and final acceptance;
 - actual project Lead handoff still requires explicit OWNER intent.
 
-LPRL remains separately pinned and unchanged:
+LPRL remains separately pinned:
 
-- `EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478` (`v0.2.3-pilot`).
+- `EinzbernLi/agent-dev-governance@5f22e63414374b64ebbf4bd91601ede2f54e6f65` (`v0.2.4-pilot`), with canonical digest profile `lprl-cjson-v1` now available.
+- The accepted #156 16-file factual payload remains carry-forward/reusable; this repin does not rematerialize or reinterpret it.
+- Facts canonical digest preparation remains a later separate Task.
+- `control_snapshot_created: false`; Gate/Retirement authority is absent; `proven_retirable_set: []`; safe reclaimable bytes remain not evaluated.
 
 The ordinary governance repin does not grant local-resource lifecycle authority and does not change REAL-WRITE.
 
