@@ -257,6 +257,8 @@ def test_exact_d2_plan_becomes_exact_single_get_with_tls_and_no_redirect():
         (" https://steamcommunity.com/login/", "missing_or_invalid"),
         ("javascript:synthetic", "missing_or_invalid"),
         ("https://[", "missing_or_invalid"),
+        ("/lo\ngin/home/", "missing_or_invalid"),
+        ("/lo\tgin/home/", "missing_or_invalid"),
     ],
 )
 def test_redirect_location_is_reduced_in_memory_without_following_or_raw_leakage(
