@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import ssl
 from typing import Callable
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -17,6 +18,7 @@ from urllib3.util.retry import Retry
 
 from app.auto_offer.sent_offer_binding import SentOfferDiscoveryQuery
 from app.auto_offer.steam_community_sent_history_transport import (
+    COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES,
     CommunitySentHistoryHttpResponse,
     CommunitySentHistoryNetworkError,
     CommunitySentHistoryRequestPlan,
@@ -31,6 +33,7 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0.0.0 Safari/537.36"
 )
+_AUTH_PATH_PREFIXES = ("/login", "/openid", "/oauth")
 
 
 class CommunitySentHistoryRequestsError(CommunitySentHistoryTransportError):
@@ -151,6 +154,66 @@ def _classify_request_exception(exc: BaseException) -> CommunitySentHistoryNetwo
     return CommunitySentHistoryNetworkError("other")
 
 
+def _normalized_origin(parsed) -> tuple[str, str, int] | None:
+    try:
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname.lower() if parsed.hostname else ""
+        port = parsed.port
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return (scheme, hostname, port)
+
+
+def _classify_redirect_location(
+    plan: CommunitySentHistoryRequestPlan,
+    location: object,
+) -> str:
+    """Reduce an untrusted Location value to one bounded non-secret subtype."""
+
+    if type(location) is not str or not location or location != location.strip():
+        return "missing_or_invalid"
+
+    try:
+        expected = urlsplit(plan.url)
+        destination = urlsplit(urljoin(plan.url, location))
+    except (TypeError, ValueError):
+        return "missing_or_invalid"
+
+    expected_origin = _normalized_origin(expected)
+    destination_origin = _normalized_origin(destination)
+    if expected_origin is None or destination_origin is None:
+        return "missing_or_invalid"
+    if destination_origin != expected_origin:
+        return "cross_origin"
+
+    if destination.path == expected.path and destination.query == expected.query:
+        return "same_target"
+
+    profile_prefix, marker, _ = expected.path.partition("/tradeoffers/")
+    if marker and profile_prefix:
+        tradeoffers_root = f"{profile_prefix}/tradeoffers"
+        if destination.path == tradeoffers_root or destination.path.startswith(
+            f"{tradeoffers_root}/"
+        ):
+            return "same_profile_tradeoffers"
+
+    destination_path = destination.path.lower()
+    if any(
+        destination_path == prefix or destination_path.startswith(f"{prefix}/")
+        for prefix in _AUTH_PATH_PREFIXES
+    ):
+        return "steam_login_or_auth"
+
+    return "same_origin_other"
+
+
 class RequestsCommunitySentHistoryOneShotSender:
     """Single-use sender bound to one exact discovery query/request plan."""
 
@@ -243,10 +306,18 @@ class RequestsCommunitySentHistoryOneShotSender:
         content_type = headers.get("Content-Type", "")
         if type(content_type) is not str:
             raise CommunitySentHistoryRequestsError("invalid_content_type")
+
+        redirect_subtype = "none"
+        if 300 <= status_code <= 399:
+            redirect_subtype = _classify_redirect_location(plan, headers.get("Location"))
+        if redirect_subtype not in COMMUNITY_SENT_HISTORY_REDIRECT_SUBTYPES:
+            raise CommunitySentHistoryRequestsError("invalid_redirect_subtype")
+
         return CommunitySentHistoryHttpResponse(
             status_code=status_code,
             content_type=content_type,
             body=text,
+            redirect_subtype=redirect_subtype,
         )
 
     def close(self) -> None:
