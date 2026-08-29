@@ -259,9 +259,24 @@ def _plan_steam_trade_offer_lifecycle(
     delivery: StoredDelivery,
     evidence: SteamTradeOfferEvidence,
 ) -> ReconciliationDecision:
-    """Plan the one allowed transition from exact typed offer evidence."""
+    """Plan the one allowed transition from exact typed offer evidence.
+
+    For buyer-send deliveries the first exact Steam read is the counterparty
+    authority.  If BUFF bound only the Trade Offer ID, adopt the Steam-proven
+    counterparty on this same forward lifecycle transition.  Once present, the
+    normal transition contract keeps that counterparty immutable.
+    """
 
     snapshot = delivery.snapshot
+    if (
+        snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and snapshot.counterparty_steam_id is None
+        and snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+    ):
+        snapshot = replace(
+            snapshot,
+            counterparty_steam_id=evidence.counterparty_steam_id,
+        )
     status = snapshot.delivery_status
     lifecycle = evidence.lifecycle
 
