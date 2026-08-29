@@ -1,6 +1,6 @@
 # AetherSwap Current Project State
 
-Status: **central governance v0.3.6 / PF-014 adopted; G16 Web Lead ACTIVE; TASK-050 offline foundation merged; live sent-history actions remain separately gated**  
+Status: **central governance v0.3.7 adopted; PF-014 preserved; G16 Web Lead ACTIVE; TASK-050 authority unchanged; live sent-history actions remain separately gated**  
 State date: **2026-08-29**
 
 This is a compact current-state entry point, not a transcript. Newer exact GitHub Issue/PR/Lead records always supersede stale prose here.
@@ -19,10 +19,14 @@ Ordinary governance and LPRL are separately pinned.
 
 Current ordinary governance:
 
-- central governance: `EinzbernLi/agent-dev-governance@ef250219070dea0d7861e4817831b8f447a91118` (`v0.3.6`);
-- PF-014 durable re-anchor semantics are adopted without a version bump;
+- central governance: `EinzbernLi/agent-dev-governance@f49065796e277cb6859ebb3c92324d9b072b316d` (`v0.3.7`);
+- PF-014 durable re-anchor semantics remain adopted and unchanged by the v0.3.7 Worker/session simplification;
 - runtime-local planning/memory/session/IDE/checkpoint/scratch is non-authoritative execution aid and provisional until durable re-anchor;
 - durable Task contract and durable project/control facts outrank executor-local planning;
+- complete formal Task/evidence contracts remain in GitHub; activation uses short pointers;
+- after durable re-anchor, role-stable Worker/Validator sessions may be reused by default; a fresh conversation is mandatory only when the Task/evidence contract requires freshness or identity isolation;
+- bounded Worker/Validator sessions may use platform-native internal subagents under parent accountability, but children remain below the governance role layer and do not inherit Lead authority or widen scope/permissions/result sink;
+- executor self-check and same-parent child review are execution evidence, not governance-level independent validation; formal independent validation requires substantive independence but not a brand-new conversation unless the contract requires freshness;
 - durable completion requires the required Result to exist in the canonical sink and be read back before acceptance;
 - Source identity, physical Location, controlled Workspace, and runtime Deployment remain distinct;
 - stale candidate currency is separate from reusable evidence: stale source cannot be accepted as current merely because evidence may be reusable;
@@ -49,7 +53,7 @@ Current exact state at this adoption:
 - G15 claim `5452116330` was a historical task-scoped LPRL-materialization Lead state;
 - OWNER subsequently clarified that the separate file-management/LPRL line is not intended to own the Aether project Lead while this Sol/Web session owns the Aether functional line;
 - G16 claim `5452445521`, parent G15, restores one Web Aether Lead under `normal_project_continuation`;
-- G16 activation verify `5452448339` confirms uniqueness and no G17/newer competing claim at the Task #162 execution fence;
+- G16 activation verify `5452448339` confirms uniqueness; #149 must be reread before authority-sensitive execution/final acceptance to detect any G17/newer claim;
 - runtime: Web / GPT-5.6 Sol;
 - TASK-050 offline/program development is within G16 scope;
 - file-management/LPRL may run as a separately bounded worker/workstream but not as a sibling Aether Lead;
@@ -70,16 +74,17 @@ Formal project takeover examples:
 
 These enter the durable re-anchor / Lead Activation transaction.
 
-Task execution examples:
+Canonical bounded Task activation:
 
 ```text
-执行 <task_ref>；作为该 Task 的执行者，不接管项目 Lead。
-审计 <task_ref>；作为该 Task 的验证者，不接管项目 Lead。
+执行 <task_ref>；先读取 Issue/指定 comment；作为该 Task 的执行者，不接管项目 Lead。
 ```
 
-These are Worker/Validator sessions and must not modify #149.
+A formal Task does not require a fresh conversation by default after durable re-anchor. Lead guidance stays short: `reuse_existing`, `recommend_new`, or `must_be_fresh`; only a Task/evidence contract requiring freshness or identity isolation makes a new conversation mandatory.
 
-An actual project Lead handoff requires explicit OWNER intent to move the **project Lead**. `接管 TASK` / `执行 TASK` / `continue TASK` does not itself transfer Lead.
+A bounded Worker/Validator may use platform-native internal subagents under the parent session's accountability. Internal children do not inherit Lead authority, widen Task scope/permissions/result sink, or earn governance-level independent-validation credit merely by being different children. A child becomes a formal Worker/Validator only with a distinct durable role/Result contract.
+
+An actual project Lead handoff requires explicit OWNER intent to move the **project Lead**. `接管 TASK` / `执行 TASK` / `continue TASK` does not itself transfer Lead. Formal independent validation requires substantive independence, but a new conversation is not required unless the Task/evidence contract says so. Active Aether Lead retains final acceptance.
 
 ## 5. Parallel workstreams
 
@@ -121,7 +126,7 @@ persist OFFER_ATTEMPTED + offer_attempted_at
 -> existing confirmation / lifecycle / completed-trade receipt flow
 ```
 
-TASK-050 live/authenticated actions remain separately gated by their exact durable packets and OWNER authorization. PF-014 adoption does not authorize, repeat, or widen any such live action.
+TASK-050 live/authenticated actions remain separately gated by their exact durable packets and OWNER authorization. Governance v0.3.7 adoption does not authorize, repeat, or widen any such live action.
 
 ## 7. Codex ↔ GitHub reconciliation
 
@@ -164,6 +169,7 @@ If `G(N+1)` is absent or unverifiable, the prior valid `G(N)` remains authoritat
 ## 10. Next safe actions
 
 1. Continue bounded governance or TASK-050 offline/program work under the current G16 scope after reconciling current durable facts.
-2. Treat any pre-anchor diagnostic evidence as provisional and apply the exact-input/baseline/test-contract reuse rule.
-3. Do not execute separately gated live Steam/BUFF actions without their exact OWNER authorization.
-4. Do not merge `integration/auto-buyer-offer` to `main` without separate OWNER approval.
+2. Reuse role-stable Worker/Validator sessions where appropriate; require freshness only when the Task/evidence contract does.
+3. Treat any pre-anchor diagnostic evidence as provisional and apply the exact-input/baseline/test-contract reuse rule.
+4. Do not execute separately gated live Steam/BUFF actions without their exact OWNER authorization.
+5. Do not merge `integration/auto-buyer-offer` to `main` without separate OWNER approval.

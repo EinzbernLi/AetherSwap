@@ -36,18 +36,22 @@ A session launched to execute, audit, validate, export, reproduce, test, or revi
 Canonical launch wording:
 
 ```text
-执行 <task_ref>；作为该 Task 的执行者，不接管项目 Lead。
+执行 <task_ref>；先读取 Issue/指定 comment；作为该 Task 的执行者，不接管项目 Lead。
 ```
 
 For such a session:
 
+- complete Task/evidence contracts remain in GitHub; activation is only a short pointer;
+- after durable re-anchor, a role-stable Worker/Validator session may be reused by default; Lead guidance is only `reuse_existing` / `recommend_new` / `must_be_fresh`, and a fresh conversation is mandatory only when the Task/evidence contract requires freshness or identity isolation;
 - read the Task package and the minimum governance needed to obey it;
 - do **not** create or advance a Lead Claim in #149;
 - do **not** reinterpret `接管 TASK` / `执行 TASK` / `audit TASK` as project takeover;
 - do **not** integrate sibling work or announce final project acceptance;
-- return Results to the declared GitHub sink for the Active Lead to review/integrate.
+- return Results to the declared GitHub sink for the Active Lead to review/integrate;
+- a bounded Worker/Validator may use platform-native internal subagents under parent accountability, but internal children remain below the governance role layer and do not inherit Lead authority or widen Task scope, permissions, forbidden boundary, substantive-evidence boundary, or Result sink;
+- executor self-check and same-parent child review are execution evidence, not governance-level independent validation; formal independent validation requires substantive independence, while a new conversation is required only when the Task/evidence contract says so.
 
-An actual Lead handoff requires explicit OWNER intent to move the **project Lead**, not merely a request to run work in Codex/Web/Luna/Terra.
+An internal child becomes a formal Worker/Validator only when it receives a distinct durable role/Result contract. An actual Lead handoff requires explicit OWNER intent to move the **project Lead**, not merely a request to run work in Codex/Web/Luna/Terra.
 
 `parallel workers != parallel Leads`.
 
