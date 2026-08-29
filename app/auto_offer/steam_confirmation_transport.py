@@ -268,7 +268,7 @@ class SteamTradeOfferConfirmationTransport:
         cookie_string: str,
         identity_secret: str,
         *,
-        session: object | None = None,
+        session: object,
         timeout: tuple[float, float] = _DEFAULT_TIMEOUT,
         clock=None,
         max_json_bytes: int = _DEFAULT_MAX_JSON_BYTES,
@@ -277,7 +277,7 @@ class SteamTradeOfferConfirmationTransport:
         cookies = _parse_cookie_string(cookie_string)
         bound_account = _secure_cookie_identity(cookies["steamLoginSecure"])
         secret = _identity_secret_bytes(identity_secret)
-        client = session if session is not None else requests.Session()
+        client = session
         if getattr(client, "verify", None) is False:
             raise PlatformAdapterProtocolError("TLS verification must remain enabled")
         if not callable(getattr(client, "get", None)):
