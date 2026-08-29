@@ -12,10 +12,12 @@ from typing import Callable
 
 import requests
 
+from app.auto_offer.sent_offer_binding import SentOfferDiscoveryQuery
 from app.auto_offer.steam_community_sent_history_transport import (
     CommunitySentHistoryHttpResponse,
     CommunitySentHistoryRequestPlan,
     CommunitySentHistoryTransportError,
+    build_community_sent_history_request,
 )
 
 
@@ -63,18 +65,23 @@ def _parse_injected_cookies(cookies_raw: object) -> dict[str, str]:
 
 
 class RequestsCommunitySentHistoryOneShotSender:
-    """Single-use adapter from a frozen D2 request plan to its response view."""
+    """Single-use sender bound to one exact discovery query/request plan."""
 
-    __slots__ = ("_session", "_used")
+    __slots__ = ("_expected_plan", "_session", "_used")
 
     def __init__(
         self,
+        query: SentOfferDiscoveryQuery,
         cookies_raw: str,
         *,
         session_factory: Callable[[], requests.Session] = requests.Session,
     ) -> None:
         if not callable(session_factory):
             raise CommunitySentHistoryRequestsError("session_factory_must_be_callable")
+        # Bind the credential-bearing sender to the exact account/profile URL
+        # derived from the validated local discovery query before a session can
+        # become dispatch-capable.  Hand-crafted alternate URLs are rejected.
+        expected_plan = build_community_sent_history_request(query)
         cookies = _parse_injected_cookies(cookies_raw)
         session = session_factory()
         if session is None:
@@ -90,6 +97,7 @@ class RequestsCommunitySentHistoryOneShotSender:
                 "Referer": "https://steamcommunity.com/",
             }
         )
+        self._expected_plan = expected_plan
         self._session = session
         self._used = False
 
@@ -100,6 +108,8 @@ class RequestsCommunitySentHistoryOneShotSender:
         if type(plan) is not CommunitySentHistoryRequestPlan:
             raise CommunitySentHistoryRequestsError("invalid_request_plan")
         CommunitySentHistoryRequestPlan.__post_init__(plan)
+        if plan != self._expected_plan:
+            raise CommunitySentHistoryRequestsError("request_plan_identity_mismatch")
         if self._used:
             raise CommunitySentHistoryRequestsError("sender_already_used")
         self._used = True
