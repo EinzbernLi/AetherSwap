@@ -4,9 +4,10 @@ from app.services import steam_egress
 
 
 class FakeProxyManager:
-    def __init__(self, result=None, *, error=None):
+    def __init__(self, result=None, *, error=None, always_proxy=False):
         self.result = result
         self.error = error
+        self.always_proxy = always_proxy
         self.calls = []
 
     def get_proxies_for_request(self, failed=False):
@@ -14,6 +15,9 @@ class FakeProxyManager:
         if self.error is not None:
             raise self.error
         return self.result
+
+    def should_always_use_proxy(self):
+        return self.always_proxy
 
 
 class FakeSession:
@@ -50,7 +54,7 @@ class FakeSession:
     ],
 )
 def test_each_route_policy_performs_one_underlying_call(strategy, route):
-    manager = FakeProxyManager(route)
+    manager = FakeProxyManager(route, always_proxy=strategy == 2)
     session = FakeSession()
     facade = steam_egress.SteamHostEgressSession(
         session=session,
@@ -66,7 +70,6 @@ def test_each_route_policy_performs_one_underlying_call(strategy, route):
         allow_redirects=False,
     )
 
-    assert strategy in {1, 2, 3}
     assert manager.calls == [False]
     assert session.calls == [
         (
@@ -84,9 +87,31 @@ def test_each_route_policy_performs_one_underlying_call(strategy, route):
     ]
 
 
+def test_proxy_only_policy_without_route_fails_before_http():
+    manager = FakeProxyManager(None, always_proxy=True)
+    session = FakeSession()
+    facade = steam_egress.SteamHostEgressSession(
+        session=session,
+        proxy_manager=manager,
+    )
+
+    with pytest.raises(
+        steam_egress.SteamHostEgressError,
+        match="steam_egress_required_proxy_unavailable",
+    ):
+        facade.get(
+            "https://example.invalid/exact",
+            timeout=(5.0, 15.0),
+            allow_redirects=False,
+        )
+
+    assert manager.calls == [False]
+    assert session.calls == []
+
+
 def test_post_preserves_caller_kwargs_and_injects_only_source_route():
     route = {"http": "proxy-route", "https": "proxy-route"}
-    manager = FakeProxyManager(route)
+    manager = FakeProxyManager(route, always_proxy=True)
     session = FakeSession()
     facade = steam_egress.SteamHostEgressSession(
         session=session,
