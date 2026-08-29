@@ -262,17 +262,12 @@ def planner_decision(session):
     return before, result, plan_read_evidence_transition(before, result)
 
 
-def test_constructor_is_zero_io_and_binds_raw_cookie(monkeypatch):
+def test_constructor_requires_injected_session_and_is_zero_io():
+    with pytest.raises(TypeError, match="session"):
+        SteamCompletedTradeHttpReader(COOKIE)
+
     session = FakeSession()
-    constructed = []
-
-    def session_factory():
-        constructed.append(session)
-        return session
-
-    monkeypatch.setattr(transport.requests, "Session", session_factory)
-    reader = SteamCompletedTradeHttpReader(COOKIE)
-    assert constructed == [session]
+    reader = SteamCompletedTradeHttpReader(COOKIE, session=session)
     assert session.calls == []
     assert reader.bound_account_steam_id == STEAM_ID
 
@@ -1056,19 +1051,14 @@ def trade_offer_plan(session, delivery):
     return result, plan_read_evidence_transition(delivery, result)
 
 
-def test_trade_offer_reader_constructor_zero_io_and_reuses_strict_cookie_boundary(monkeypatch):
+def test_trade_offer_reader_requires_injected_session_and_preserves_strict_cookie_boundary():
     from app.auto_offer.steam_readonly_transport import SteamTradeOfferHttpReader
 
+    with pytest.raises(TypeError, match="session"):
+        SteamTradeOfferHttpReader(COOKIE)
+
     session = FakeSession()
-    created = []
-
-    def session_factory():
-        created.append(session)
-        return session
-
-    monkeypatch.setattr(transport.requests, "Session", session_factory)
-    reader = SteamTradeOfferHttpReader(COOKIE)
-    assert created == [session]
+    reader = SteamTradeOfferHttpReader(COOKIE, session=session)
     assert session.calls == []
     assert reader.bound_account_steam_id == STEAM_ID
     assert TOKEN not in repr(reader)

@@ -386,7 +386,7 @@ class SteamCompletedTradeHttpReader:
         self,
         cookie_string: str,
         *,
-        session: object | None = None,
+        session: object,
         timeout: tuple[float, float] = _DEFAULT_TIMEOUT,
         inventory_count: int = _DEFAULT_INVENTORY_COUNT,
         max_inventory_pages: int = _DEFAULT_MAX_INVENTORY_PAGES,
@@ -396,7 +396,7 @@ class SteamCompletedTradeHttpReader:
     ) -> None:
         cookies = _parse_cookie_string(cookie_string)
         bound_account, access_token = _secure_cookie_identity(cookies["steamLoginSecure"])
-        client = session if session is not None else requests.Session()
+        client = session
         if getattr(client, "verify", None) is False:
             raise PlatformAdapterProtocolError("TLS verification must remain enabled")
         if not callable(getattr(client, "get", None)):
@@ -633,7 +633,7 @@ class SteamTradeOfferHttpReader(SteamCompletedTradeHttpReader):
         self,
         cookie_string: str,
         *,
-        session: object | None = None,
+        session: object,
         timeout: tuple[float, float] = _DEFAULT_TIMEOUT,
         max_json_bytes: int = _DEFAULT_MAX_JSON_BYTES,
     ) -> None:
