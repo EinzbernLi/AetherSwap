@@ -13,8 +13,8 @@ active_development_branch: integration/auto-buyer-offer
 primary_product_task_ref: github:EinzbernLi/AetherSwap#130
 task_fact_source: github_issue_pr
 lead_claim_sink: github:EinzbernLi/AetherSwap#149
-governance_ref: EinzbernLi/agent-dev-governance@ef250219070dea0d7861e4817831b8f447a91118
-governance_version: v0.3.6
+governance_ref: EinzbernLi/agent-dev-governance@f49065796e277cb6859ebb3c92324d9b072b316d
+governance_version: v0.3.7
 lprl_ref: EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478
 lprl_profile: v0.2.3-pilot
 ```
@@ -37,20 +37,24 @@ Then complete the durable re-anchor / Lead Activation transaction below before f
 
 ### B. Task Worker / Validator launch
 
-Choose this path when the session is asked to execute/audit/test/export/review a bounded Task/Issue/PR, including when OWNER opens another Web/Codex session.
+Choose this path when the session is asked to execute/audit/test/export/review a bounded Task/Issue/PR, including when OWNER opens or reuses another Web/Codex session.
 
 Canonical wording:
 
 ```text
-执行 <task_ref>；作为该 Task 的执行者，不接管项目 Lead。
+执行 <task_ref>；先读取 Issue/指定 comment；作为该 Task 的执行者，不接管项目 Lead。
 ```
 
 Worker rules:
 
+- complete Task/evidence contracts remain in GitHub; activation is only a short pointer;
+- after durable re-anchor, a role-stable Worker/Validator session may be reused by default; use only the short guidance `reuse_existing` / `recommend_new` / `must_be_fresh`, and require a fresh conversation only when the Task/evidence contract requires freshness or identity isolation;
 - do not create/advance a claim in #149;
 - do not run Lead takeover merely because the prompt contains a Task reference or asks to “continue” that Task;
 - do not integrate sibling work or declare final project acceptance;
 - obey exact Task scope and return Result to the declared GitHub sink;
+- a bounded Worker/Validator may use platform-native internal subagents under parent accountability, but children remain below the governance role layer and do not inherit Lead authority or widen scope, permissions, forbidden boundaries, substantive-evidence boundaries, or Result sink;
+- executor self-check and same-parent child review are execution evidence, not governance-level independent validation; formal independent validation requires substantive independence, not a brand-new conversation unless the contract requires freshness;
 - if asked ambiguously to both execute a Task and become Lead, fail closed on Lead claim until OWNER explicitly states the project Lead handoff.
 
 `parallel workers != parallel Leads`.
@@ -112,9 +116,11 @@ At this revision:
 
 Always prefer newer exact #149 evidence if the chain advances. This section is a convenience snapshot only; canonical #149 truth wins.
 
-## 4. v0.3.6 same-project workstreams
+## 4. v0.3.7 Worker/session and same-project workstreams
 
-One Active Lead may dispatch multiple bounded Web/Codex/Luna/Terra workers. Concurrent execution requires the Lead to mark each Task `parallel_safe` and prove:
+One Active Lead may dispatch multiple bounded Web/Codex/Luna/Terra workers. A formal Task does not require a fresh conversation by default after durable re-anchor; role-stable Worker/Validator sessions may be reused unless the Task/evidence contract requires fresh-session or identity isolation.
+
+Concurrent execution still requires the Lead to mark each Task `parallel_safe` and prove:
 
 - exact frozen baseline;
 - explicit dependencies with no unmet ordering dependency;
@@ -124,7 +130,9 @@ One Active Lead may dispatch multiple bounded Web/Codex/Luna/Terra workers. Conc
 
 Read overlap is allowed. Append-only Result comments may share a GitHub sink when Task ownership stays unambiguous. Same-file multiwriter and shared schema/runtime mutation are not parallel-safe by default.
 
-Workers never modify #149, integrate sibling work, or perform final acceptance. Lead owns rebase/replan/serialisation, integration order and final acceptance.
+A bounded Worker/Validator may use platform-native internal subagents within its existing Task boundary. The parent session remains accountable; child agents do not become governance-role Workers/Validators or inherit Lead authority unless they receive a distinct durable role/Result contract. Same-parent child review does not count as governance-level independent validation.
+
+Workers never modify #149, integrate sibling work, or perform final acceptance. Formal independent validation requires a substantively independent Validator, while a new conversation is required only when the Task/evidence contract says so. Active Lead owns rebase/replan/serialisation, integration order and final acceptance.
 
 ## 5. Current product work
 
@@ -174,4 +182,4 @@ Load only when relevant:
 - `.agent/REVIEW_CHECKLIST.md`
 - `.github/pull_request_template.md`
 
-If legacy wording conflicts with pinned v0.3.6 governance, `LOCAL_POLICY`, current #149 Lead state, or newer exact Task/Result/Acceptance facts, follow the newer authority.
+If legacy wording conflicts with pinned v0.3.7 governance, `LOCAL_POLICY`, current #149 Lead state, or newer exact Task/Result/Acceptance facts, follow the newer authority.
