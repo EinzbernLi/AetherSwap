@@ -15,11 +15,11 @@ task_fact_source: github_issue_pr
 lead_claim_sink: github:EinzbernLi/AetherSwap#149
 governance_ref: EinzbernLi/agent-dev-governance@f49065796e277cb6859ebb3c92324d9b072b316d
 governance_version: v0.3.7
-lprl_ref: EinzbernLi/agent-dev-governance@d63dae9ac1de65420f410cb36e6c2ccb58cc0478
-lprl_profile: v0.2.3-pilot
+lprl_ref: EinzbernLi/agent-dev-governance@5f22e63414374b64ebbf4bd91601ede2f54e6f65
+lprl_profile: v0.2.4-pilot
 ```
 
-Ordinary governance and LPRL remain separately pinned.
+Ordinary governance and LPRL remain separately pinned. `lprl-cjson-v1` enables deterministic digest preparation, while actual Facts digest mutation and Control Snapshot remain separate Task authority.
 
 ## 1. Decide the session role before authority-bearing work
 
