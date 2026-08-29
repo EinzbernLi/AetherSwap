@@ -54,6 +54,7 @@ DELIVERY_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "steam_id_mismatch",
         "contract_unknown",
         "write_result_unknown",
+        "offer_identity_pending",
         "offer_not_found",
         "offer_terminated",
         "inventory_reconciliation_failed",
@@ -197,6 +198,15 @@ def _validate_snapshot_shape(snapshot: DeliverySnapshot) -> None:
             or snapshot.delivery_error not in DELIVERY_ERROR_CODES
         ):
             raise DeliveryContractError("delivery_error is not an allowed code")
+    if snapshot.delivery_error == "offer_identity_pending" and not (
+        snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+        and snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+        and snapshot.steam_tradeoffer_id is not None
+        and snapshot.counterparty_steam_id is None
+    ):
+        raise DeliveryContractError(
+            "offer_identity_pending requires an unverified buyer offer binding"
+        )
 
 
 def _validate_buyer_bound_offer_state(
@@ -487,8 +497,15 @@ def _validate_counterparty_binding(
         and target.steam_tradeoffer_id is not None
     )
     if first_buyer_offer_binding:
-        # BUFF realtime evidence may bind only the exact Trade Offer ID.  The
-        # first exact Steam known-offer read owns counterparty/direction/items.
+        if target_id is None:
+            if target.delivery_error != "offer_identity_pending":
+                raise DeliveryContractError(
+                    "buyer offer binding requires counterparty Steam ID or pending identity marker"
+                )
+        elif target.delivery_error == "offer_identity_pending":
+            raise DeliveryContractError(
+                "verified buyer counterparty cannot remain identity-pending"
+            )
         return
     if target_id is None:
         return
@@ -496,7 +513,9 @@ def _validate_counterparty_binding(
         mode is DeliveryMode.BUYER_SENDS_OFFER
         and current.delivery_status is DeliveryStatus.OFFER_SENT
         and current.steam_tradeoffer_id is not None
+        and current.delivery_error == "offer_identity_pending"
         and target.steam_tradeoffer_id == current.steam_tradeoffer_id
+        and target.delivery_error is None
         and target.delivery_status in {
             DeliveryStatus.OFFER_CONFIRMATION_REQUIRED,
             DeliveryStatus.OFFER_CONFIRMED,
