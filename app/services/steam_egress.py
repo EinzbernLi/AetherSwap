@@ -42,7 +42,10 @@ class SteamHostEgressSession:
                 raise SteamHostEgressError("steam_egress_trust_env_uncontrolled")
 
         manager = get_proxy_manager() if proxy_manager is None else proxy_manager
-        if not callable(getattr(manager, "get_proxies_for_request", None)):
+        if (
+            not callable(getattr(manager, "get_proxies_for_request", None))
+            or not callable(getattr(manager, "should_always_use_proxy", None))
+        ):
             if owns_session:
                 try:
                     client.close()
@@ -71,8 +74,11 @@ class SteamHostEgressSession:
 
         try:
             proxies = self._proxy_manager.get_proxies_for_request(failed=False)
+            proxy_required = self._proxy_manager.should_always_use_proxy()
         except Exception:
             raise SteamHostEgressError("steam_egress_route_selection_failed") from None
+        if proxy_required and proxies is None:
+            raise SteamHostEgressError("steam_egress_required_proxy_unavailable")
 
         request = getattr(self._session, method)
         return request(url, proxies=proxies, **kwargs)
