@@ -1289,7 +1289,10 @@ class HostRecoveryOnlyMaintenance:
             or snapshot.offer_attempted_at is None
             or snapshot.offer_sent_at is None
             or snapshot.steam_tradeoffer_id is None
-            or snapshot.counterparty_steam_id is None
+            or (
+                snapshot.delivery_status is not DeliveryStatus.OFFER_SENT
+                and snapshot.counterparty_steam_id is None
+            )
         ):
             raise HostAutoOfferIntegrationError("maintenance_target_not_recoverable")
 
@@ -2732,8 +2735,9 @@ class HostAutoOfferIntegration:
             or after.revision != current.revision + 1
             or snapshot.delivery_status is not DeliveryStatus.OFFER_SENT
             or snapshot.delivery_error is not None
+            or snapshot.offer_attempted_at is None
+            or snapshot.offer_sent_at is None
             or snapshot.steam_tradeoffer_id is None
-            or snapshot.counterparty_steam_id is None
             or snapshot.purchase_id != current.snapshot.purchase_id
             or snapshot.buff_order_id != current.snapshot.buff_order_id
             or snapshot.account_id != current.snapshot.account_id
