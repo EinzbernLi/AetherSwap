@@ -5,10 +5,10 @@ adopted_from_code_ref: "integration/auto-buyer-offer@cc87881cc5ea10c7564494a8be8
 
 central_governance:
   repository: EinzbernLi/agent-dev-governance
-  version: "0.3.6"
-  ref: ef250219070dea0d7861e4817831b8f447a91118
+  version: "0.3.7"
+  ref: f49065796e277cb6859ebb3c92324d9b072b316d
   follow_main: false
-  note: "v0.3.6 includes PF-014 durable re-anchor semantics: runtime-local context is non-authoritative/provisional, safe bounded pre-anchor diagnostics are allowed, and authority-bearing action remains fail-closed until durable re-anchor plus applicable Lead activation complete. One Active Lead and bounded same-project workers remain unchanged."
+  note: "v0.3.7 keeps complete Task contracts in GitHub, allows role-stable Worker/Validator session reuse after durable re-anchor unless freshness/identity isolation is required, and permits bounded platform-native internal subagents under parent accountability without granting Lead authority or independent-validation credit."
 
 modules:
   lprl:
