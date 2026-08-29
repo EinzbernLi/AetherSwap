@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 import pytest
 
 from app.auto_offer.adapters import (
@@ -62,6 +60,13 @@ def buyer_snapshot(
     delivery_error=None,
     counterparty_steam_id=None,
 ):
+    if (
+        status is DeliveryStatus.OFFER_SENT
+        and steam_tradeoffer_id is not None
+        and counterparty_steam_id is None
+        and delivery_error is None
+    ):
+        delivery_error = "offer_identity_pending"
     value = DeliverySnapshot(
         purchase_id="purchase-1",
         buff_order_id="order-1",
@@ -228,6 +233,7 @@ def test_buff_realtime_binding_recovers_buyer_without_counterparty(
     assert decision.target.delivery_status is DeliveryStatus.OFFER_SENT
     assert decision.target.steam_tradeoffer_id == "offer-1"
     assert decision.target.counterparty_steam_id is None
+    assert decision.target.delivery_error == "offer_identity_pending"
     assert decision.target.offer_sent_at == 11.0
     validate_delivery_transition(current, decision.target)
 
@@ -258,7 +264,43 @@ def test_first_exact_steam_read_binds_counterparty_and_advances_buyer():
     assert decision.target.delivery_status is DeliveryStatus.OFFER_CONFIRMED
     assert decision.target.steam_tradeoffer_id == "offer-1"
     assert decision.target.counterparty_steam_id == COUNTERPARTY
+    assert decision.target.delivery_error is None
     validate_delivery_transition(current, decision.target)
+
+
+def test_historical_unmarked_offer_sent_cannot_adopt_counterparty():
+    current = DeliverySnapshot(
+        purchase_id="purchase-1",
+        buff_order_id="order-1",
+        account_id="account-1",
+        recipient_steam_id=RECIPIENT,
+        delivery_mode=DeliveryMode.BUYER_SENDS_OFFER,
+        delivery_status=DeliveryStatus.OFFER_SENT,
+        steam_tradeoffer_id="offer-1",
+        offer_attempted_at=10.0,
+        offer_sent_at=11.0,
+        received_at=None,
+        delivery_error=None,
+        pending_receipt=True,
+        assetid=None,
+        counterparty_steam_id=None,
+    )
+    stored = StoredDelivery(snapshot=current, revision=2)
+    read_result = PlatformResult(
+        request=request(
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            revision=2,
+            steam_tradeoffer_id="offer-1",
+        ),
+        status=PlatformResultStatus.SUCCESS,
+        detail="active",
+        evidence=steam_offer_evidence(),
+    )
+
+    decision = plan_read_evidence_transition(stored, read_result)
+
+    assert decision.result is AutoOfferResult.BLOCKED
+    assert decision.target is None
 
 
 def test_exact_steam_wrong_direction_blocks_after_buff_binding():
