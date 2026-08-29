@@ -7,6 +7,7 @@ BUFF checkout-guard paths are redirected to pytest-managed temporary storage.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,7 @@ import pytest
 def isolate_host_runtime_state(tmp_path_factory: pytest.TempPathFactory):
     """Keep full-suite runtime artifacts outside the source workspace."""
     from app import database
+    from app.auto_offer import host_integration
     from app.services import buff_checkout_guard
 
     state_dir = tmp_path_factory.mktemp("aetherswap-host-state")
@@ -32,6 +34,16 @@ def isolate_host_runtime_state(tmp_path_factory: pytest.TempPathFactory):
         buff_checkout_guard,
         "_GUARD_PATH",
         Path(state_dir) / "buff_checkout_guard.json",
+    )
+    # H2 removed raw requests.Session ownership from host_integration. A few
+    # legacy tests still monkeypatch the old attribute during setup. Preserve
+    # only that pytest-time patch target until those large legacy suites are
+    # naturally migrated; production builders do not read this namespace.
+    patch.setattr(
+        host_integration,
+        "requests",
+        SimpleNamespace(Session=None),
+        raising=False,
     )
     database.init_db()
     try:
