@@ -8,6 +8,7 @@ from app.auto_offer.sent_offer_binding import SentOfferDiscoveryQuery
 from app.auto_offer.steam_community_sent_history_transport import (
     CommunitySentHistoryDisposition,
     CommunitySentHistoryHttpResponse,
+    CommunitySentHistoryNetworkError,
     CommunitySentHistoryRequestPlan,
     CommunitySentHistoryTransportError,
     build_community_sent_history_request,
@@ -134,6 +135,7 @@ def test_sender_is_invoked_exactly_once_and_receives_frozen_plan():
     assert result.outcome.unique_count == 2
     assert result.outcome.request_count == 1
     assert result.outcome.identity_surface_proven is True
+    assert result.outcome.transport_subtype == "none"
 
 
 def test_lifecycle_classinfo_and_dom_order_do_not_enter_sanitized_outcome():
@@ -150,6 +152,8 @@ def test_lifecycle_classinfo_and_dom_order_do_not_enter_sanitized_outcome():
     assert not hasattr(result.outcome, "tradeoffer_ids")
     assert not hasattr(result.outcome, "body")
     assert not hasattr(result.outcome, "url")
+    assert not hasattr(result.outcome, "exception")
+    assert not hasattr(result.outcome, "error_text")
 
 
 def test_empty_html_identity_set_is_explicitly_unproven_not_authorized_empty_snapshot():
@@ -165,6 +169,7 @@ def test_empty_html_identity_set_is_explicitly_unproven_not_authorized_empty_sna
     assert result.outcome.identity_surface_proven is False
     assert result.outcome.canonical_count == 0
     assert result.outcome.unique_count == 0
+    assert result.outcome.transport_subtype == "none"
 
 
 @pytest.mark.parametrize("status", [100, 204, 400, 401, 403, 404, 500, 503])
@@ -178,6 +183,7 @@ def test_non_200_status_fails_closed_without_parsing_identity(status):
     assert result.outcome.disposition is CommunitySentHistoryDisposition.HTTP_REJECTED
     assert result.outcome.status_class == f"{status // 100}xx"
     assert result.outcome.identity_surface_proven is False
+    assert result.outcome.transport_subtype == "none"
 
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308])
@@ -192,6 +198,7 @@ def test_redirect_response_is_separately_rejected(status):
         CommunitySentHistoryDisposition.REDIRECT_REJECTED
     )
     assert result.outcome.identity_surface_proven is False
+    assert result.outcome.transport_subtype == "none"
 
 
 @pytest.mark.parametrize(
@@ -211,6 +218,7 @@ def test_http_200_non_html_content_type_fails_closed(content_type):
     assert result.outcome.disposition is (
         CommunitySentHistoryDisposition.NON_HTML_REJECTED
     )
+    assert result.outcome.transport_subtype == "none"
 
 
 @pytest.mark.parametrize("content_type", ["text/html", "application/xhtml+xml"])
@@ -226,6 +234,7 @@ def test_supported_html_media_types_reach_d1_parser(content_type):
     assert result.outcome.disposition is (
         CommunitySentHistoryDisposition.IDENTITY_SURFACE_PROVEN
     )
+    assert result.outcome.transport_subtype == "none"
 
 
 def test_malformed_or_duplicate_identity_evidence_fails_closed_without_raw_detail():
@@ -247,9 +256,31 @@ def test_malformed_or_duplicate_identity_evidence_fails_closed_without_raw_detai
         )
         assert result.outcome.canonical_count == 0
         assert result.outcome.unique_count == 0
+        assert result.outcome.transport_subtype == "none"
 
 
-def test_transport_exception_is_sanitized_and_never_retried():
+@pytest.mark.parametrize("subtype", ["tls", "timeout", "other"])
+def test_safe_transport_subtypes_are_preserved_without_exception_text(subtype):
+    calls = []
+
+    def sender(plan):
+        calls.append(plan)
+        raise CommunitySentHistoryNetworkError(subtype)
+
+    result = read_community_sent_history_once(query(), sender)
+
+    assert len(calls) == 1
+    assert result.snapshot is None
+    assert result.outcome.disposition is CommunitySentHistoryDisposition.TRANSPORT_ERROR
+    assert result.outcome.status_class == "none"
+    assert result.outcome.request_count == 1
+    assert result.outcome.transport_subtype == subtype
+    assert not hasattr(result.outcome, "error")
+    assert not hasattr(result.outcome, "detail")
+    assert not hasattr(result.outcome, "exception")
+
+
+def test_unknown_transport_exception_collapses_to_other_and_never_retries():
     calls = []
 
     def sender(plan):
@@ -265,8 +296,14 @@ def test_transport_exception_is_sanitized_and_never_retried():
     assert result.outcome.disposition is CommunitySentHistoryDisposition.TRANSPORT_ERROR
     assert result.outcome.status_class == "none"
     assert result.outcome.request_count == 1
+    assert result.outcome.transport_subtype == "other"
     assert not hasattr(result.outcome, "error")
     assert not hasattr(result.outcome, "detail")
+
+
+def test_invalid_transport_subtype_is_rejected():
+    with pytest.raises(CommunitySentHistoryTransportError, match="invalid_transport_subtype"):
+        CommunitySentHistoryNetworkError("certificate-text")
 
 
 def test_invalid_sender_return_type_is_contract_error_not_guessed_http_response():

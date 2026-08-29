@@ -1,11 +1,12 @@
 """Bounded read contract for Steam Community sent-history HTML.
 
 This module deliberately does not create a network client, read credentials, or
-bind runtime configuration.  A caller supplies one sender callable.  The module
+bind runtime configuration. A caller supplies one sender callable. The module
 builds the exact GET plan, invokes the sender at most once, classifies a minimal
 response view, and hands canonical identity evidence to the D1 parser.
 
-Raw HTML and secrets never appear in the sanitized outcome object.
+Raw HTML, exception text, request URLs and secrets never appear in the
+sanitized outcome object.
 """
 
 from __future__ import annotations
@@ -24,6 +25,18 @@ from app.auto_offer.steam_community_sent_history import (
 
 class CommunitySentHistoryTransportError(ValueError):
     """Raised when the offline read contract itself is malformed."""
+
+
+class CommunitySentHistoryNetworkError(CommunitySentHistoryTransportError):
+    """Safe network exception carrying only a bounded non-secret subtype."""
+
+    __slots__ = ("subtype",)
+
+    def __init__(self, subtype: str) -> None:
+        if subtype not in {"tls", "timeout", "other"}:
+            raise CommunitySentHistoryTransportError("invalid_transport_subtype")
+        self.subtype = subtype
+        super().__init__(subtype)
 
 
 class CommunitySentHistoryDisposition(str, Enum):
@@ -68,7 +81,7 @@ class CommunitySentHistoryRequestPlan:
 
 @dataclass(frozen=True, slots=True)
 class CommunitySentHistoryHttpResponse:
-    """Minimal response view supplied by a future separately reviewed adapter."""
+    """Minimal response view supplied by the concrete bounded adapter."""
 
     status_code: int
     content_type: str
@@ -91,6 +104,7 @@ class CommunitySentHistorySanitizedOutcome:
     unique_count: int
     request_count: int
     identity_surface_proven: bool
+    transport_subtype: str = "none"
 
     def __post_init__(self) -> None:
         if type(self.disposition) is not CommunitySentHistoryDisposition:
@@ -107,9 +121,17 @@ class CommunitySentHistorySanitizedOutcome:
             raise CommunitySentHistoryTransportError("request_count_exceeds_budget")
         if type(self.identity_surface_proven) is not bool:
             raise CommunitySentHistoryTransportError("invalid_identity_surface_proven")
+        if self.transport_subtype not in {"none", "tls", "timeout", "other"}:
+            raise CommunitySentHistoryTransportError("invalid_transport_subtype")
+
         expected = self.disposition is CommunitySentHistoryDisposition.IDENTITY_SURFACE_PROVEN
         if self.identity_surface_proven is not expected:
             raise CommunitySentHistoryTransportError("identity_surface_disposition_mismatch")
+        if self.disposition is CommunitySentHistoryDisposition.TRANSPORT_ERROR:
+            if self.transport_subtype == "none":
+                raise CommunitySentHistoryTransportError("transport_error_requires_subtype")
+        elif self.transport_subtype != "none":
+            raise CommunitySentHistoryTransportError("non_transport_outcome_has_subtype")
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +195,7 @@ def _outcome(
     status_class: str,
     count: int = 0,
     request_count: int = 1,
+    transport_subtype: str = "none",
 ) -> CommunitySentHistorySanitizedOutcome:
     return CommunitySentHistorySanitizedOutcome(
         disposition=disposition,
@@ -183,6 +206,7 @@ def _outcome(
         identity_surface_proven=(
             disposition is CommunitySentHistoryDisposition.IDENTITY_SURFACE_PROVEN
         ),
+        transport_subtype=transport_subtype,
     )
 
 
@@ -192,8 +216,9 @@ def read_community_sent_history_once(
 ) -> CommunitySentHistoryReadResult:
     """Invoke exactly one injected sender and classify D1 identity evidence.
 
-    Transport exceptions are intentionally collapsed to a category without
-    preserving exception text, headers, URL values, or response excerpts.
+    Network exceptions are reduced to a bounded subtype. Exception text,
+    headers, URL values, response excerpts and credential material are never
+    retained by this contract.
     """
 
     if not callable(sender):
@@ -202,12 +227,22 @@ def read_community_sent_history_once(
 
     try:
         response = sender(plan)
+    except CommunitySentHistoryNetworkError as exc:
+        return CommunitySentHistoryReadResult(
+            snapshot=None,
+            outcome=_outcome(
+                CommunitySentHistoryDisposition.TRANSPORT_ERROR,
+                status_class="none",
+                transport_subtype=exc.subtype,
+            ),
+        )
     except Exception:
         return CommunitySentHistoryReadResult(
             snapshot=None,
             outcome=_outcome(
                 CommunitySentHistoryDisposition.TRANSPORT_ERROR,
                 status_class="none",
+                transport_subtype="other",
             ),
         )
 
@@ -273,6 +308,7 @@ def read_community_sent_history_once(
 __all__ = [
     "CommunitySentHistoryDisposition",
     "CommunitySentHistoryHttpResponse",
+    "CommunitySentHistoryNetworkError",
     "CommunitySentHistoryReadResult",
     "CommunitySentHistoryRequestPlan",
     "CommunitySentHistorySanitizedOutcome",
