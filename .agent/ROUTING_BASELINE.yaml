@@ -1,0 +1,70 @@
+schema_version: "0.4"
+
+# 项目初始化时，从中央 Calibration Snapshot 生成本地 executor/reasoning 路由基线。
+# Project-local calibration 是同项目 durable outcomes 的派生 prior，不是 Task/Result/Acceptance authority。
+# Dispatch route 由 Runtime Capability Probe + Execution Economy + DISPATCH_POLICY 动态决定。
+
+governance_source:
+  calibration_snapshot_version: null
+  generated_at: null
+
+project_calibration:
+  status: cold_start
+  enabled: true
+  calibration_window_tasks: 10
+  state_transport: github_issue
+  state_title: "[PROJECT-LOCAL-CALIBRATION] Derived model routing prior"
+  state_marker: "[PROJECT-LOCAL-CALIBRATION-STATE-v1]"
+  exactly_one_state_issue_required: true
+  state_is_derived_cache_only: true
+  state_may_be_deleted_and_rebuilt: true
+  required_for_task_authority: false
+  usable_only_when_scan_complete: true
+  missing_or_unusable_state_action: fallback_to_governance_prior
+  normalized_outcome_marker: "[PROJECT-CALIBRATION-OUTCOME-v1]"
+  local_extractor_path: .agent/tools/project-calibration.py
+  local_workflow_path: .github/workflows/project-calibration.yml
+  recent_comparable_evidence_weighted_more: true
+  model_semantic_revision_creates_new_key: true
+  reasoning_semantic_revision_creates_new_key: true
+  worker_validator_metrics_separate: true
+  single_global_model_score: false
+
+executor_routing:
+  bounded_worker:
+    global_prior: []
+    local_override: []
+
+  validator:
+    global_prior: []
+    local_override: []
+
+reasoning:
+  use_global_adapters_as_prior: true
+  allow_local_adapter_override: true
+  local_calibration_may_inform_reasoning_choice: true
+
+selection_policy:
+  priority:
+    - task_override
+    - project_local_calibration
+    - governance_global_prior
+  require_lead_controller_choice: true
+  project_local_calibration_may_auto_qualify_unqualified_model: false
+  project_local_calibration_may_rank_qualified_candidates: true
+
+# Web/Codex/native/external are not model-routing truth.
+dispatch:
+  policy: config/DISPATCH_POLICY.yaml
+  runtime_route_is_session_derived: true
+  dispatch_route_is_calibration_covariate_only: true
+  runtime_profile_is_calibration_covariate_only: true
+
+feedback:
+  local_derived_state_enabled: true
+  upstream_export_enabled: false
+  upstream_export_requires_explicit_opt_in: true
+  optional_export_template: PROJECT_ROUTING_FEEDBACK.yaml
+  required_usage_telemetry: false
+  required_cost_or_latency_telemetry: false
+

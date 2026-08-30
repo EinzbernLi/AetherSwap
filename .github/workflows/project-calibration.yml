@@ -1,0 +1,39 @@
+name: Project-local model calibration
+
+on:
+  workflow_dispatch:
+  issue_comment:
+    types: [created, edited]
+  issues:
+    types: [closed]
+  schedule:
+    - cron: "37 8 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: project-local-model-calibration
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      contains(github.event.comment.body, '[PROJECT-CALIBRATION-OUTCOME-v1]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rebuild project-local calibration state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TRIGGER_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PROJECT_CALIBRATION_POLICY_PATH: .agent/LOCAL_POLICY.yaml
+          PROJECT_CALIBRATION_HALF_LIFE_DAYS: "90"
+        run: |
+          set -euo pipefail
+          python .agent/tools/project-calibration.py
+

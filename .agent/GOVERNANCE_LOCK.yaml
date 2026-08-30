@@ -1,14 +1,14 @@
-schema_version: "1.0"
+schema_version: "0.6"
 project: AetherSwap
-adoption_issue_ref: "github:EinzbernLi/AetherSwap#145"
-adopted_from_code_ref: "integration/auto-buyer-offer@cc87881cc5ea10c7564494a8be89691249cee1fb"
+adoption_issue_ref: "github:EinzbernLi/AetherSwap#187@5466938417"
+adopted_from_code_ref: "integration/auto-buyer-offer@3f6397815f4e76d58d90915edcafa27c42ceb107"
 
 central_governance:
   repository: EinzbernLi/agent-dev-governance
-  version: "0.3.7"
-  ref: f49065796e277cb6859ebb3c92324d9b072b316d
+  version: "0.3.12"
+  ref: d3d3e943e186f3aec16e788df95454106784702d
   follow_main: false
-  note: "v0.3.7 keeps complete Task contracts in GitHub, allows role-stable Worker/Validator session reuse after durable re-anchor unless freshness/identity isolation is required, and permits bounded platform-native internal subagents under parent accountability without granting Lead authority or independent-validation credit."
+  note: "v0.3.12 preserves GitHub durable Task/Result/Validation/Acceptance authority, project-local policy layering, and bounded Worker/Validator coordination without granting a worker Lead authority."
 
 modules:
   lprl:
@@ -22,6 +22,34 @@ task_result_fact_source:
   mode: github_issue_pr
   mirror_full_task_result_bodies_into_agent_files: false
 
+update_policy:
+  mode: manual_pinned
+  owner_choice_required_at_onboarding: true
+  recommended_mode: github_native_notify
+  auto_follow_main: false
+  automatic_adoption_allowed: false
+  automatic_pin_advance_allowed: false
+  normal_takeover_queries_upstream: false
+  prefer_downstream_local_update_signal: true
+  require_compatibility_check_before_pin_change: true
+  explicit_downstream_pin_update_required: true
+  detector_template_path: templates/GOVERNANCE_UPDATE_CHECK.yml
+  installed_workflow_path: null
+  signal_type: github_issue
+  signal_marker: "[GOVERNANCE-UPDATE-SIGNAL]"
+  optional_private_source_secret: GOVERNANCE_SOURCE_TOKEN
+
+project_local_calibration:
+  enabled: true
+  state_transport: github_issue
+  state_is_derived_cache_only: true
+  state_is_task_result_validation_acceptance_authority: false
+  downstream_extractor_path: .agent/tools/project-calibration.py
+  downstream_workflow_path: .github/workflows/project-calibration.yml
+  upstream_export_default: false
+  central_telemetry_required: false
+  adopter_registration_required: false
+
 adoption_rules:
   project_specific_policy_file: .agent/LOCAL_POLICY.yaml
   current_state_file: .agent/PROJECT_STATE.md
@@ -33,3 +61,4 @@ adoption_rules:
   one_active_project_lead: true
   task_scoped_workers_do_not_claim_project_lead: true
   lead_handoff_requires_explicit_owner_intent: true
+
