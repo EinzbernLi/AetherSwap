@@ -183,3 +183,4 @@ Load only when relevant:
 - `.github/pull_request_template.md`
 
 If legacy wording conflicts with pinned v0.3.12 governance, `LOCAL_POLICY`, current #149 Lead state, or newer exact Task/Result/Acceptance facts, follow the newer authority.
+
