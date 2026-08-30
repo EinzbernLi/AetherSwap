@@ -13,8 +13,8 @@ active_development_branch: integration/auto-buyer-offer
 primary_product_task_ref: github:EinzbernLi/AetherSwap#130
 task_fact_source: github_issue_pr
 lead_claim_sink: github:EinzbernLi/AetherSwap#149
-governance_ref: EinzbernLi/agent-dev-governance@f49065796e277cb6859ebb3c92324d9b072b316d
-governance_version: v0.3.7
+governance_ref: EinzbernLi/agent-dev-governance@d3d3e943e186f3aec16e788df95454106784702d
+governance_version: v0.3.12
 lprl_ref: EinzbernLi/agent-dev-governance@5f22e63414374b64ebbf4bd91601ede2f54e6f65
 lprl_profile: v0.2.4-pilot
 ```
@@ -103,9 +103,9 @@ Canonical current control is Issue #149, not this convenience file.
 
 At this revision:
 
-- G16 claim: `5452445521`;
-- parent: G15 `5452116330`;
-- activation verify: `5452448339`;
+- G17 claim: `5461906236`;
+- parent: G16 `5452445521`;
+- activation verify: `5461907917`;
 - runtime: Web / GPT-5.6 Sol;
 - scope: `normal_project_continuation` for Aether functional development plus governance reconciliation;
 - file-management/LPRL work may run as a bounded worker/workstream but is not a sibling Aether Lead;
@@ -116,7 +116,7 @@ At this revision:
 
 Always prefer newer exact #149 evidence if the chain advances. This section is a convenience snapshot only; canonical #149 truth wins.
 
-## 4. v0.3.7 Worker/session and same-project workstreams
+## 4. v0.3.12 Worker/session and same-project workstreams
 
 One Active Lead may dispatch multiple bounded Web/Codex/Luna/Terra workers. A formal Task does not require a fresh conversation by default after durable re-anchor; role-stable Worker/Validator sessions may be reused unless the Task/evidence contract requires fresh-session or identity isolation.
 
@@ -182,4 +182,5 @@ Load only when relevant:
 - `.agent/REVIEW_CHECKLIST.md`
 - `.github/pull_request_template.md`
 
-If legacy wording conflicts with pinned v0.3.7 governance, `LOCAL_POLICY`, current #149 Lead state, or newer exact Task/Result/Acceptance facts, follow the newer authority.
+If legacy wording conflicts with pinned v0.3.12 governance, `LOCAL_POLICY`, current #149 Lead state, or newer exact Task/Result/Acceptance facts, follow the newer authority.
+

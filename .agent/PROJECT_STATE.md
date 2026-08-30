@@ -1,14 +1,14 @@
 # AetherSwap Current Project State
 
-Status: **central governance v0.3.7 adopted; PF-014 preserved; G16 Web Lead ACTIVE; TASK-050 authority unchanged; live sent-history actions remain separately gated**  
-State date: **2026-08-29**
+Status: **Phase-A candidate for central governance v0.3.12; PF-014 preserved; G17 Web Lead ACTIVE; TASK-050 authority unchanged; live sent-history actions remain separately gated**
+State date: **2026-08-30**
 
 This is a compact current-state entry point, not a transcript. Newer exact GitHub Issue/PR/Lead records always supersede stale prose here.
 
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- PF-014 adoption exact base: `3966722d23412ee1360df8123cad66e60aab1438` (tree `4fc4219a8b19681bad68d99c31edee78e91d367c`).
+- Phase-A frozen integration base: `ee50f7cdeb376fa85c662812ca03f2a3e29ff74c`; this branch does not redefine the active integration line.
 - Read GitHub for the current integration head; do not treat a recorded adoption base as permanent current-head truth.
 - `main` is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
@@ -19,8 +19,8 @@ Ordinary governance and LPRL are separately pinned.
 
 Current ordinary governance:
 
-- central governance: `EinzbernLi/agent-dev-governance@f49065796e277cb6859ebb3c92324d9b072b316d` (`v0.3.7`);
-- PF-014 durable re-anchor semantics remain adopted and unchanged by the v0.3.7 Worker/session simplification;
+- central governance candidate: `EinzbernLi/agent-dev-governance@d3d3e943e186f3aec16e788df95454106784702d` (`v0.3.12`);
+- PF-014 durable re-anchor semantics remain preserved by the accepted 0.3.12 coordination/adoption rules;
 - runtime-local planning/memory/session/IDE/checkpoint/scratch is non-authoritative execution aid and provisional until durable re-anchor;
 - durable Task contract and durable project/control facts outrank executor-local planning;
 - complete formal Task/evidence contracts remain in GitHub; activation uses short pointers;
@@ -55,10 +55,10 @@ Current exact state at this adoption:
 
 - G15 claim `5452116330` was a historical task-scoped LPRL-materialization Lead state;
 - OWNER subsequently clarified that the separate file-management/LPRL line is not intended to own the Aether project Lead while this Sol/Web session owns the Aether functional line;
-- G16 claim `5452445521`, parent G15, restores one Web Aether Lead under `normal_project_continuation`;
-- G16 activation verify `5452448339` confirms uniqueness; #149 must be reread before authority-sensitive execution/final acceptance to detect any G17/newer claim;
+- G17 claim `5461906236`, parent G16, is the current Web Aether Lead under `normal_project_continuation`;
+- G17 activation verify `5461907917` confirms uniqueness; #149 remains canonical and must be reread before authority-sensitive final acceptance to detect any newer claim;
 - runtime: Web / GPT-5.6 Sol;
-- TASK-050 offline/program development is within G16 scope;
+- TASK-050 offline/program development is within G17 scope;
 - file-management/LPRL may run as a separately bounded worker/workstream but not as a sibling Aether Lead;
 - live authenticated one-shot remains separately gated;
 - REAL-WRITE remains CLOSED;
@@ -129,7 +129,7 @@ persist OFFER_ATTEMPTED + offer_attempted_at
 -> existing confirmation / lifecycle / completed-trade receipt flow
 ```
 
-TASK-050 live/authenticated actions remain separately gated by their exact durable packets and OWNER authorization. Governance v0.3.7 adoption does not authorize, repeat, or widen any such live action.
+TASK-050 live/authenticated actions remain separately gated by their exact durable packets and OWNER authorization. Governance 0.3.12 adoption does not authorize, repeat, or widen any such live action.
 
 ## 7. Codex ↔ GitHub reconciliation
 
@@ -171,8 +171,9 @@ If `G(N+1)` is absent or unverifiable, the prior valid `G(N)` remains authoritat
 
 ## 10. Next safe actions
 
-1. Continue bounded governance or TASK-050 offline/program work under the current G16 scope after reconciling current durable facts.
+1. Continue bounded governance or TASK-050 offline/program work under the current G17 scope after reconciling current durable facts.
 2. Reuse role-stable Worker/Validator sessions where appropriate; require freshness only when the Task/evidence contract does.
 3. Treat any pre-anchor diagnostic evidence as provisional and apply the exact-input/baseline/test-contract reuse rule.
 4. Do not execute separately gated live Steam/BUFF actions without their exact OWNER authorization.
 5. Do not merge `integration/auto-buyer-offer` to `main` without separate OWNER approval.
+
