@@ -1,7 +1,7 @@
 schema_version: "0.6"
 project: AetherSwap
 adoption_issue_ref: "github:EinzbernLi/AetherSwap#187@5466938417"
-adopted_from_code_ref: "integration/auto-buyer-offer@3f6397815f4e76d58d90915edcafa27c42ceb107"
+adopted_from_code_ref: "integration/auto-buyer-offer@ee50f7cdeb376fa85c662812ca03f2a3e29ff74c"
 
 central_governance:
   repository: EinzbernLi/agent-dev-governance

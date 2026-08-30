@@ -8,7 +8,7 @@ This is a compact current-state entry point, not a transcript. Newer exact GitHu
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- Phase-A frozen integration base: `3f6397815f4e76d58d90915edcafa27c42ceb107`; this branch does not redefine the active integration line.
+- Phase-A frozen integration base: `ee50f7cdeb376fa85c662812ca03f2a3e29ff74c`; this branch does not redefine the active integration line.
 - Read GitHub for the current integration head; do not treat a recorded adoption base as permanent current-head truth.
 - `main` is not the active Auto Offer integration line.
 - `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
