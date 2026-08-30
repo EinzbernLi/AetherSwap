@@ -35,6 +35,13 @@ _MAX_RECONCILIATION_PAGES = 3
 _ORDER_CREATED_PENDING_STAGE = "order_created_pending"
 _PAYMENT_FAILED_STATE = "FAIL"
 _PAYMENT_FAILED_STATE_TEXT = "支付失败"
+_REFUNDED_STATE_TEXT = "购买失败-已退款"
+_REFUNDED_TIMEOUT_FIELDS = (
+    "pay_expire_timeout",
+    "deliver_expire_timeout",
+    "receive_expire_timeout",
+    "buyer_send_offer_timeout",
+)
 _ALLOWED_UPDATE_FIELDS = frozenset(
     {
         "stage",
@@ -447,6 +454,34 @@ def _parse_history_page(
     return total_page, items
 
 
+def _history_item_terminal_reason(item: dict) -> str | None:
+    """Return the only history terminal states safe for guard resolution."""
+
+    if (
+        item.get("state") == _PAYMENT_FAILED_STATE
+        and item.get("state_text") == _PAYMENT_FAILED_STATE_TEXT
+    ):
+        return "auto_reconciled_payment_failed"
+    if (
+        item.get("state") != _PAYMENT_FAILED_STATE
+        or item.get("state_text") != _REFUNDED_STATE_TEXT
+        or any(
+            field not in item
+            or type(item[field]) not in (int, float)
+            or isinstance(item[field], bool)
+            or not math.isfinite(item[field])
+            or item[field] != -1
+            for field in _REFUNDED_TIMEOUT_FIELDS
+        )
+        or "tradeofferid" not in item
+        or item["tradeofferid"] is not None
+        or "trade_offer_url" not in item
+        or item["trade_offer_url"] is not None
+    ):
+        return None
+    return "auto_reconciled_refunded"
+
+
 def reconcile_order_created_pending(buff_client: object) -> bool:
     """Resolve one exact unpaid checkout from bounded BUFF history evidence.
 
@@ -489,10 +524,8 @@ def reconcile_order_created_pending(buff_client: object) -> bool:
                 return False
             if len(matches) == 1:
                 item = matches[0]
-                if (
-                    item.get("state") != _PAYMENT_FAILED_STATE
-                    or item.get("state_text") != _PAYMENT_FAILED_STATE_TEXT
-                ):
+                terminal_reason = _history_item_terminal_reason(item)
+                if terminal_reason is None:
                     return False
                 current = get_unresolved_checkout()
                 if (
@@ -504,7 +537,7 @@ def reconcile_order_created_pending(buff_client: object) -> bool:
                     return False
                 try:
                     resolved = resolve_checkout(
-                        "auto_reconciled_payment_failed",
+                        terminal_reason,
                         expected_intent_id=intent_id,
                     )
                 except Exception:

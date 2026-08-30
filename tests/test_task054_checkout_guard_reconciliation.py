@@ -24,6 +24,22 @@ def _payment_failed(order_id="order-1"):
     return {"id": order_id, "state": "FAIL", "state_text": "支付失败"}
 
 
+def _refunded(order_id="order-1", **overrides):
+    row = {
+        "id": order_id,
+        "state": "FAIL",
+        "state_text": "购买失败-已退款",
+        "pay_expire_timeout": -1,
+        "deliver_expire_timeout": -1,
+        "receive_expire_timeout": -1,
+        "buyer_send_offer_timeout": -1,
+        "tradeofferid": None,
+        "trade_offer_url": None,
+    }
+    row.update(overrides)
+    return row
+
+
 def _unresolved_guard(order_id="order-1", stage="order_created_pending"):
     intent = guard.begin_checkout("single", 123)
     guard.update_checkout(
@@ -72,12 +88,49 @@ def test_exact_payment_failed_row_on_later_bounded_page_resolves():
     assert guard.get_unresolved_checkout() is None
 
 
+def test_exact_refunded_row_resolves_only_with_all_terminal_fields():
+    _unresolved_guard("order-1")
+    client = _HistoryClient({1: _history_page(items=[_refunded()])})
+
+    assert guard.reconcile_order_created_pending(client) is True
+    assert client.calls == [(1, "csgo")]
+    assert guard.get_unresolved_checkout() is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pay_expire_timeout": 0},
+        {"deliver_expire_timeout": None},
+        {"receive_expire_timeout": "-1"},
+        {"buyer_send_offer_timeout": True},
+        {"tradeofferid": "offer-1"},
+        {"trade_offer_url": "https://example.invalid/offer"},
+        {"tradeofferid": None},
+        {"trade_offer_url": None},
+    ],
+)
+def test_refunded_row_with_missing_or_non_terminal_fields_stays_unresolved(overrides):
+    _unresolved_guard("order-1")
+    row = _refunded()
+    if overrides == {"tradeofferid": None}:
+        row.pop("tradeofferid")
+    elif overrides == {"trade_offer_url": None}:
+        row.pop("trade_offer_url")
+    else:
+        row.update(overrides)
+    client = _HistoryClient({1: _history_page(items=[row])})
+
+    assert guard.reconcile_order_created_pending(client) is False
+    assert guard.get_unresolved_checkout()["unresolved"] is True
+
+
 @pytest.mark.parametrize(
     "row",
     [
         {"id": "order-1", "state": "PAYING", "state_text": "等待付款"},
         {"id": "order-1", "state": "SUCCESS", "state_text": "购买成功"},
-        {"id": "order-1", "state": "FAIL", "state_text": "购买失败-已退款"},
+        _refunded(pay_expire_timeout=0),
     ],
 )
 def test_other_exact_lifecycle_rows_remain_unresolved(row):
