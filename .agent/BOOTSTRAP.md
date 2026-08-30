@@ -13,8 +13,8 @@ active_development_branch: integration/auto-buyer-offer
 primary_product_task_ref: github:EinzbernLi/AetherSwap#130
 task_fact_source: github_issue_pr
 lead_claim_sink: github:EinzbernLi/AetherSwap#149
-  governance_ref: EinzbernLi/agent-dev-governance@d3d3e943e186f3aec16e788df95454106784702d
-  governance_version: v0.3.12
+governance_ref: EinzbernLi/agent-dev-governance@d3d3e943e186f3aec16e788df95454106784702d
+governance_version: v0.3.12
 lprl_ref: EinzbernLi/agent-dev-governance@5f22e63414374b64ebbf4bd91601ede2f54e6f65
 lprl_profile: v0.2.4-pilot
 ```
@@ -183,4 +183,3 @@ Load only when relevant:
 - `.github/pull_request_template.md`
 
 If legacy wording conflicts with pinned v0.3.12 governance, `LOCAL_POLICY`, current #149 Lead state, or newer exact Task/Result/Acceptance facts, follow the newer authority.
-
