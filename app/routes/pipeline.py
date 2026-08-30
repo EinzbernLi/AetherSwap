@@ -11,17 +11,9 @@ class ConfigBody(BaseModel):
 @router.post("/api/pipeline/start")
 def api_pipeline_start(body: ConfigBody):
     blocker = get_pipeline_start_blocker()
-    if (
-        blocker.get("code") == "BUFF_RECONCILIATION_REQUIRED"
-        and not body.acknowledge_buff_reconciliation
-    ):
-        return {
-            "ok": False,
-            "reconciliation_required": True,
-            "code": blocker["code"],
-            "error": blocker["message"],
-            "checkout": blocker.get("checkout") or {},
-        }
+    # Let start_pipeline perform its one bounded exact payment-failure
+    # reconciliation attempt.  It returns the same blocker when evidence is
+    # absent or unsafe, preserving the manual acknowledgement fallback.
     if blocker and blocker.get("code") != "BUFF_RECONCILIATION_REQUIRED":
         return {
             "ok": False,

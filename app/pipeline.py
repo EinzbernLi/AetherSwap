@@ -57,6 +57,7 @@ from app.services.buff_checkout_guard import (
     acknowledge_checkout,
     buff_activity_guard,
     get_unresolved_checkout,
+    reconcile_order_created_pending,
     update_checkout,
 )
 from app.services.steam_client import SteamClient
@@ -937,6 +938,42 @@ def get_pipeline_start_blocker() -> dict:
     return {}
 
 
+def _try_reconcile_order_created_pending(config: dict, guard: dict) -> bool:
+    """Attempt one bounded read for the one guard stage safe to auto-resolve."""
+
+    if (
+        not isinstance(config, dict)
+        or not isinstance(guard, dict)
+        or guard.get("stage") != "order_created_pending"
+        or type(guard.get("order_id")) is not str
+        or not guard["order_id"]
+        or guard["order_id"].strip() != guard["order_id"]
+    ):
+        return False
+    try:
+        credentials = get_buff_credentials() or {}
+        if (
+            not isinstance(credentials, dict)
+            or type(credentials.get("cookies")) is not str
+            or not credentials["cookies"]
+        ):
+            return False
+        client = create_buff_client_from_config(credentials, config)
+    except Exception:
+        return False
+    try:
+        return reconcile_order_created_pending(client)
+    except Exception:
+        return False
+    finally:
+        try:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+
+
 def start_pipeline(
     config: dict,
     *,
@@ -957,6 +994,9 @@ def start_pipeline(
                 if _pipeline_thread is not None and _pipeline_thread.is_alive():
                     return False
                 guard = get_unresolved_checkout()
+                if guard is not None:
+                    _try_reconcile_order_created_pending(config, guard)
+                    guard = get_unresolved_checkout()
                 if guard is not None:
                     if not acknowledge_buff_reconciliation:
                         return False

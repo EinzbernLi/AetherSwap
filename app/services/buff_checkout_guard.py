@@ -30,6 +30,11 @@ _GUARD_PATH = (
 _guard_lock = threading.RLock()
 _activity_lock = threading.RLock()
 _activity_local = threading.local()
+_HISTORY_PAGE_SIZE = 10
+_MAX_RECONCILIATION_PAGES = 3
+_ORDER_CREATED_PENDING_STAGE = "order_created_pending"
+_PAYMENT_FAILED_STATE = "FAIL"
+_PAYMENT_FAILED_STATE_TEXT = "支付失败"
 _ALLOWED_UPDATE_FIELDS = frozenset(
     {
         "stage",
@@ -406,6 +411,114 @@ def resolve_checkout(
             return copy.deepcopy(state)
 
 
+def _parse_history_page(
+    payload: Any,
+    expected_page_num: int,
+) -> tuple[int, list[dict]] | None:
+    """Parse only the bounded, identity-bearing part of one history page."""
+
+    if not isinstance(payload, dict) or payload.get("code") != "OK":
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    page_num = data.get("page_num")
+    page_size = data.get("page_size")
+    total_page = data.get("total_page")
+    items = data.get("items")
+    if (
+        type(page_num) is not int
+        or page_num != expected_page_num
+        or type(page_size) is not int
+        or page_size != _HISTORY_PAGE_SIZE
+        or type(total_page) is not int
+        or total_page < page_num
+        or not isinstance(items, list)
+        or len(items) > _HISTORY_PAGE_SIZE
+        or any(
+            not isinstance(item, dict)
+            or type(item.get("id")) is not str
+            or not item["id"]
+            or item["id"].strip() != item["id"]
+            for item in items
+        )
+    ):
+        return None
+    return total_page, items
+
+
+def reconcile_order_created_pending(buff_client: object) -> bool:
+    """Resolve one exact unpaid checkout from bounded BUFF history evidence.
+
+    This is intentionally a one-shot read helper.  It never creates a client,
+    retries a request, mutates purchases, or calls a BUFF write endpoint.
+    """
+
+    reader = getattr(buff_client, "get_buy_order_history_page", None)
+    if not callable(reader):
+        return False
+
+    with buff_activity_guard():
+        state = get_unresolved_checkout()
+        if not isinstance(state, dict):
+            return False
+        if state.get("stage") != _ORDER_CREATED_PENDING_STAGE:
+            return False
+        order_id = state.get("order_id")
+        intent_id = state.get("intent_id")
+        if (
+            type(order_id) is not str
+            or not order_id
+            or order_id.strip() != order_id
+            or type(intent_id) is not str
+            or not intent_id
+        ):
+            return False
+
+        for page_num in range(1, _MAX_RECONCILIATION_PAGES + 1):
+            try:
+                payload = reader(page_num, "csgo")
+            except Exception:
+                return False
+            parsed = _parse_history_page(payload, page_num)
+            if parsed is None:
+                return False
+            total_page, items = parsed
+            matches = [item for item in items if item["id"] == order_id]
+            if len(matches) > 1:
+                return False
+            if len(matches) == 1:
+                item = matches[0]
+                if (
+                    item.get("state") != _PAYMENT_FAILED_STATE
+                    or item.get("state_text") != _PAYMENT_FAILED_STATE_TEXT
+                ):
+                    return False
+                current = get_unresolved_checkout()
+                if (
+                    not isinstance(current, dict)
+                    or current.get("intent_id") != intent_id
+                    or current.get("stage") != _ORDER_CREATED_PENDING_STAGE
+                    or current.get("order_id") != order_id
+                ):
+                    return False
+                try:
+                    resolved = resolve_checkout(
+                        "auto_reconciled_payment_failed",
+                        expected_intent_id=intent_id,
+                    )
+                except Exception:
+                    return False
+                return bool(
+                    isinstance(resolved, dict)
+                    and resolved.get("unresolved") is False
+                    and resolved.get("stage") == "resolved"
+                )
+            if page_num >= total_page:
+                break
+        return False
+
+
 def acknowledge_checkout(
     expected_intent_id: str,
     reason: str = "user_reconciled",
@@ -443,6 +556,7 @@ __all__ = [
     "begin_checkout",
     "buff_activity_guard",
     "get_unresolved_checkout",
+    "reconcile_order_created_pending",
     "resolve_checkout",
     "update_checkout",
 ]
