@@ -38,3 +38,6 @@ venv/
 
 # Local LPRL factual state
 /.local/lprl/
+
+# Tree-local isolated canary authority
+/.aetherswap/
