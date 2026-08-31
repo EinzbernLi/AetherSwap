@@ -989,10 +989,43 @@ class CanaryAuthority:
         raise CanaryAuthorityError("canary_owner_session_required")
 
 
-_PRODUCTION_AUTHORITY = CanaryAuthority()
+_AUTHORITY_BIND_LOCK = threading.Lock()
+_PRODUCTION_AUTHORITY: CanaryAuthority | None = None
+
+
+def bind_isolated_canary_authority(project_root: str | Path) -> CanaryAuthority:
+    """Bind the process to a tree-local authority before Host startup.
+
+    The caller may identify only the project root.  Authority and Host DB
+    paths are derived from this module's own source tree, so an arbitrary
+    authority namespace or database cannot be injected through this seam.
+    Binding is intentionally lazy and side-effect free; filesystem artifacts
+    are still created only by the existing arming/guard operations.
+    """
+
+    global _PRODUCTION_AUTHORITY
+    try:
+        requested_root = Path(project_root).resolve()
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise CanaryAuthorityError("isolated_project_root_invalid") from exc
+    source_root = Path(__file__).resolve().parents[2]
+    if requested_root != source_root:
+        raise CanaryAuthorityError("isolated_project_root_mismatch")
+    with _AUTHORITY_BIND_LOCK:
+        if _PRODUCTION_AUTHORITY is not None:
+            raise CanaryAuthorityError("canary_authority_already_resolved")
+        _PRODUCTION_AUTHORITY = CanaryAuthority(
+            _root=source_root / _AUTHORITY_DIR_NAME,
+            _host_db_path=source_root / "config" / "app.db",
+        )
+        return _PRODUCTION_AUTHORITY
 
 
 def get_canary_authority() -> CanaryAuthority:
+    global _PRODUCTION_AUTHORITY
+    with _AUTHORITY_BIND_LOCK:
+        if _PRODUCTION_AUTHORITY is None:
+            _PRODUCTION_AUTHORITY = CanaryAuthority()
     return _PRODUCTION_AUTHORITY
 
 
@@ -1033,6 +1066,7 @@ __all__ = [
     "CanaryPermit",
     "CanaryWriteBlockedError",
     "CanaryWriteTarget",
+    "bind_isolated_canary_authority",
     "canary_metadata_present",
     "external_write_guard",
     "get_canary_authority",
