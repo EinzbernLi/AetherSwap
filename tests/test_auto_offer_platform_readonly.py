@@ -28,6 +28,8 @@ from app.auto_offer.platform_readonly import (
     STEAM_COMPLETED_TRADE_CAPABILITIES,
     STEAM_INVENTORY_CAPABILITIES,
     STEAM_TRADE_OFFER_CAPABILITIES,
+    BuffHistoricalOrderReadOnlyClient,
+    BuffReadOnlyClient,
     BuffReadOnlyAdapter,
     SteamInventoryReadOnlyAdapter,
     SteamCompletedTradeReadOnlyAdapter,
@@ -94,6 +96,16 @@ class BuffStub:
         if self.history_error:
             raise self.history_error
         return self.history_pages.get(page_num)
+
+
+class LegacyRealtimeOnlyBuffStub:
+    def __init__(self, payload=None):
+        self.payload = payload
+        self.calls = 0
+
+    def get_steam_trades(self):
+        self.calls += 1
+        return self.payload
 
 
 class InventoryStub:
@@ -905,6 +917,56 @@ def test_current_pending_offer_recovery_does_not_read_history():
     assert client.history_calls == []
 
 
+def test_legacy_realtime_only_client_preserves_public_protocol_and_realtime_reads():
+    client = LegacyRealtimeOnlyBuffStub([buff_record()])
+
+    assert isinstance(client, BuffReadOnlyClient)
+    result = buff_adapter(client).execute(request())
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "offer_pending"
+    assert client.calls == 1
+
+
+def test_legacy_realtime_only_client_history_is_unsupported_without_other_reads():
+    client = LegacyRealtimeOnlyBuffStub([buff_record()])
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.UNSUPPORTED
+    assert result.detail == "history_reader_not_available"
+    assert client.calls == 0
+
+
+def test_historical_reader_can_use_a_separate_optional_protocol_seam():
+    realtime_client = LegacyRealtimeOnlyBuffStub([])
+    history_client = BuffStub(
+        history_pages={
+            1: history_page(
+                items=[history_record(tradeofferid="historical-offer-42")]
+            )
+        }
+    )
+    assert isinstance(history_client, BuffHistoricalOrderReadOnlyClient)
+
+    result = BuffReadOnlyAdapter(
+        realtime_client,
+        account_id="account-1",
+        historical_client=history_client,
+    ).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == OfferStateEvidence(
+        "historical-offer-42", "76561198000000002"
+    )
+    assert realtime_client.calls == 0
+    assert history_client.history_calls == [(1, "csgo")]
+
+
 @pytest.mark.parametrize("match_page", [1, 2, 3])
 def test_historical_buyer_offer_state_reads_only_bounded_pages_and_binds_exact_offer(
     match_page,
@@ -933,6 +995,83 @@ def test_historical_buyer_offer_state_reads_only_bounded_pages_and_binds_exact_o
     assert client.history_calls == [
         (page_num, "csgo") for page_num in range(1, 4)
     ]
+
+
+@pytest.mark.parametrize(
+    ("page1_total", "page2_total"),
+    [(3, 2), (2, 3)],
+)
+def test_historical_buyer_offer_state_rejects_total_page_drift(
+    page1_total, page2_total
+):
+    client = BuffStub(
+        history_pages={
+            1: history_page(
+                page_num=1,
+                total_page=page1_total,
+                items=[history_record(tradeofferid="historical-offer-42")],
+            ),
+            2: history_page(page_num=2, total_page=page2_total),
+        }
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.history_calls == [(1, "csgo"), (2, "csgo")]
+
+
+def test_historical_total_page_drift_stops_before_hidden_later_duplicate():
+    client = BuffStub(
+        history_pages={
+            1: history_page(
+                page_num=1,
+                total_page=3,
+                items=[history_record(tradeofferid="historical-offer-42")],
+            ),
+            2: history_page(page_num=2, total_page=2),
+            3: history_page(
+                page_num=3,
+                total_page=2,
+                items=[history_record(tradeofferid="historical-offer-99")],
+            ),
+        }
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "malformed_payload"
+    assert result.evidence is None
+    assert client.history_calls == [(1, "csgo"), (2, "csgo")]
+
+
+def test_historical_total_page_one_binds_after_only_one_page():
+    client = BuffStub(
+        history_pages={
+            1: history_page(
+                page_num=1,
+                total_page=1,
+                items=[history_record(tradeofferid="historical-offer-42")],
+            )
+        }
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == OfferStateEvidence(
+        "historical-offer-42", "76561198000000002"
+    )
+    assert client.history_calls == [(1, "csgo")]
 
 
 @pytest.mark.parametrize(

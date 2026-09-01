@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, cast, runtime_checkable
 from urllib.parse import parse_qs, urlsplit
 
 from app.auto_offer.adapters import (
@@ -130,10 +130,15 @@ _REFUNDED_TIMEOUT_FIELDS: Final[tuple[str, ...]] = (
 
 @runtime_checkable
 class BuffReadOnlyClient(Protocol):
-    """Read-only methods supplied by the existing BUFF client."""
+    """Realtime read-only methods supplied by the existing BUFF client."""
 
     def get_steam_trades(self) -> object:
         ...
+
+
+@runtime_checkable
+class BuffHistoricalOrderReadOnlyClient(Protocol):
+    """Optional historical BUFF order reader used only by recovery paths."""
 
     def get_buy_order_history_page(self, page_num: int, game: str = "csgo") -> object:
         ...
@@ -590,12 +595,29 @@ def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
 class BuffReadOnlyAdapter:
     """Map one injected BUFF trade reader into the normalized result contract."""
 
-    def __init__(self, client: BuffReadOnlyClient, *, account_id: str) -> None:
+    def __init__(
+        self,
+        client: BuffReadOnlyClient,
+        *,
+        account_id: str,
+        historical_client: BuffHistoricalOrderReadOnlyClient | None = None,
+    ) -> None:
         if not callable(getattr(client, "get_steam_trades", None)):
             raise PlatformAdapterProtocolError(
                 "client must provide get_steam_trades"
             )
         self._client = client
+        if historical_client is None:
+            history_reader = getattr(client, "get_buy_order_history_page", None)
+            if callable(history_reader):
+                historical_client = cast(BuffHistoricalOrderReadOnlyClient, client)
+        elif not callable(
+            getattr(historical_client, "get_buy_order_history_page", None)
+        ):
+            raise PlatformAdapterProtocolError(
+                "historical client must provide get_buy_order_history_page"
+            )
+        self._historical_client = historical_client
         self._account_id = _require_identifier(account_id, "account_id")
 
     @property
@@ -879,7 +901,7 @@ class BuffReadOnlyAdapter:
         )
 
     def _execute_order_lifecycle(self, request: PlatformRequest) -> PlatformResult:
-        reader = getattr(self._client, "get_buy_order_history_page", None)
+        reader = self._history_reader()
         if not callable(reader):
             return _result(
                 request,
@@ -939,7 +961,7 @@ class BuffReadOnlyAdapter:
         self,
         request: PlatformRequest,
     ) -> PlatformResult:
-        reader = getattr(self._client, "get_buy_order_history_page", None)
+        reader = self._history_reader()
         if not callable(reader):
             return _result(
                 request,
@@ -948,6 +970,8 @@ class BuffReadOnlyAdapter:
             )
 
         matches: list[Mapping[str, Any]] = []
+        first_total_page: int | None = None
+        scan_target = _MAX_BUFF_LIFECYCLE_PAGES
         for page_num in range(1, _MAX_BUFF_LIFECYCLE_PAGES + 1):
             raw = _call_lifecycle_read(
                 lambda page_num=page_num: reader(page_num, "csgo")
@@ -960,6 +984,15 @@ class BuffReadOnlyAdapter:
             )
             if isinstance(parsed, _ReadFailure):
                 return _result(request, parsed.status, parsed.detail)
+            if first_total_page is None:
+                first_total_page = parsed.total_page
+                scan_target = min(first_total_page, _MAX_BUFF_LIFECYCLE_PAGES)
+            elif parsed.total_page != first_total_page:
+                return _result(
+                    request,
+                    PlatformResultStatus.MALFORMED,
+                    "malformed_payload",
+                )
 
             page_matches = [
                 item
@@ -974,7 +1007,7 @@ class BuffReadOnlyAdapter:
                     "ambiguous_order",
                 )
             matches.extend(page_matches)
-            if page_num >= parsed.total_page:
+            if page_num == scan_target:
                 break
 
         if len(matches) == 1:
@@ -984,6 +1017,12 @@ class BuffReadOnlyAdapter:
             PlatformResultStatus.RESULT_UNKNOWN,
             "order_not_proven",
         )
+
+    def _history_reader(self) -> Callable[[int, str], object] | None:
+        if self._historical_client is None:
+            return None
+        reader = getattr(self._historical_client, "get_buy_order_history_page", None)
+        return reader if callable(reader) else None
 
     def _historical_offer_evidence(
         self,
@@ -1514,6 +1553,7 @@ class SteamCompletedTradeReadOnlyAdapter:
 
 __all__ = [
     "BUFF_CAPABILITIES",
+    "BuffHistoricalOrderReadOnlyClient",
     "BuffReadOnlyAdapter",
     "BuffReadOnlyClient",
     "STEAM_INVENTORY_CAPABILITIES",
