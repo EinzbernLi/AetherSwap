@@ -62,8 +62,16 @@ def update_buff_creds(
     cookies: str,
     user_agent: str = None,
     source: str = None,
+    egress_mode: str = None,
+    egress_fingerprint: str = None,
 ) -> None:
-    update_buff_credentials(cookies, user_agent=user_agent, source=source)
+    update_buff_credentials(
+        cookies,
+        user_agent=user_agent,
+        source=source,
+        egress_mode=egress_mode,
+        egress_fingerprint=egress_fingerprint,
+    )
 def get_buff_credentials_generation() -> int:
     """Return the credential revision used by long-lived BUFF clients."""
     try:
