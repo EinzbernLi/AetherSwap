@@ -79,6 +79,7 @@ _MAX_CANARY_RECOVERY_STEPS_PER_DELIVERY = 6
 _RECOVERY_ONLY_CAPABILITIES = frozenset(
     {
         PlatformCapability.READ_OFFER_STATE,
+        PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
     }
@@ -854,6 +855,7 @@ def _build_active_host_auto_offer_bridge(
         adapters = {
             PlatformCapability.READ_DELIVERY_DIRECTION: buff_adapter,
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
+            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: buff_adapter,
             PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
@@ -1048,6 +1050,7 @@ def _build_recovery_only_host_auto_offer_bridge(
         )
         adapters = {
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
+            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
         }
@@ -1339,7 +1342,12 @@ class HostRecoveryOnlyMaintenance:
             raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
         request = platform_result.request
         expected_capability = {
-            DeliveryStatus.RESULT_UNKNOWN: PlatformCapability.READ_OFFER_STATE,
+            DeliveryStatus.RESULT_UNKNOWN: frozenset(
+                {
+                    PlatformCapability.READ_OFFER_STATE,
+                    PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
+                }
+            ),
             DeliveryStatus.OFFER_SENT: PlatformCapability.READ_STEAM_TRADE_OFFER,
             DeliveryStatus.OFFER_CONFIRMATION_REQUIRED: PlatformCapability.READ_STEAM_TRADE_OFFER,
             DeliveryStatus.OFFER_CONFIRMED: PlatformCapability.READ_STEAM_TRADE_OFFER,
@@ -1347,7 +1355,11 @@ class HostRecoveryOnlyMaintenance:
         }.get(current.snapshot.delivery_status)
         if (
             expected_capability is None
-            or request.capability is not expected_capability
+            or (
+                request.capability not in expected_capability
+                if isinstance(expected_capability, frozenset)
+                else request.capability is not expected_capability
+            )
             or request.capability not in _RECOVERY_ONLY_CAPABILITIES
             or request.purchase_id != current.snapshot.purchase_id
             or request.buff_order_id != current.snapshot.buff_order_id
@@ -1356,7 +1368,10 @@ class HostRecoveryOnlyMaintenance:
             or request.revision != current.revision
         ):
             raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
-        if request.capability is PlatformCapability.READ_OFFER_STATE:
+        if request.capability in {
+            PlatformCapability.READ_OFFER_STATE,
+            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
+        }:
             request_bound_fields_valid = (
                 request.steam_tradeoffer_id is None
                 and request.counterparty_steam_id is None

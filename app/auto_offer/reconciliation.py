@@ -566,13 +566,21 @@ def plan_read_evidence_transition(
         and snapshot.steam_tradeoffer_id is None
     ):
         if (
-            request.capability is PlatformCapability.READ_OFFER_STATE
+            request.capability
+            in {
+                PlatformCapability.READ_OFFER_STATE,
+                PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
+            }
             and type(evidence) is OfferStateEvidence
         ):
             return _plan_buyer_offer_recovery(delivery, evidence, observed_at)
         if (
             snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
-            and request.capability is PlatformCapability.READ_OFFER_STATE
+            and request.capability
+            in {
+                PlatformCapability.READ_OFFER_STATE,
+                PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
+            }
         ):
             return _decision(
                 delivery,

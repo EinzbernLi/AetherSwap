@@ -60,6 +60,7 @@ _READ_CAPABILITIES = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_OFFER_STATE,
+        PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.READ_INVENTORY_STATE,
         PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
@@ -1075,7 +1076,11 @@ class DeliveryCoordinator:
             }
             and before.snapshot.steam_tradeoffer_id is None
             and platform_result.status is PlatformResultStatus.SUCCESS
-            and platform_result.request.capability is PlatformCapability.READ_OFFER_STATE
+            and platform_result.request.capability
+            in {
+                PlatformCapability.READ_OFFER_STATE,
+                PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
+            }
             and type(platform_result.evidence) is OfferStateEvidence
         ):
             observed_at = self._now()
@@ -1231,12 +1236,26 @@ class DeliveryCoordinator:
             raise ReadOnlyCoordinatorBlockedError(
                 "result_unknown_read_recovery_not_available"
             )
-        capability = PlatformCapability.READ_OFFER_STATE
-        adapter = self._adapters.get(capability)
-        if adapter is None:
+        realtime_capability = PlatformCapability.READ_OFFER_STATE
+        realtime_adapter = self._adapters.get(realtime_capability)
+        if realtime_adapter is None:
             raise ReadOnlyCoordinatorBlockedError("read_step_not_available")
-        request = self._make_request(delivery, capability)
-        platform_result = self._execute(adapter, request)
+        request = self._make_request(delivery, realtime_capability)
+        platform_result = self._execute(realtime_adapter, request)
+        if not (
+            platform_result.status is PlatformResultStatus.RESULT_UNKNOWN
+            and platform_result.detail == "order_not_proven"
+        ):
+            decision = self._plan(delivery, platform_result)
+            return self._persist_read(delivery, decision, platform_result)
+
+        historical_capability = PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE
+        historical_adapter = self._adapters.get(historical_capability)
+        if historical_adapter is None:
+            decision = self._plan(delivery, platform_result)
+            return self._persist_read(delivery, decision, platform_result)
+        historical_request = self._make_request(delivery, historical_capability)
+        platform_result = self._execute(historical_adapter, historical_request)
         decision = self._plan(delivery, platform_result)
         return self._persist_read(delivery, decision, platform_result)
 
