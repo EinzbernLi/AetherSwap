@@ -11,6 +11,7 @@ import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
+from urllib.parse import parse_qs, urlsplit
 
 from app.auto_offer.adapters import (
     CompletedTradeItemEvidence,
@@ -51,6 +52,7 @@ BUFF_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_OFFER_STATE,
+        PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
     }
@@ -78,6 +80,9 @@ _TRADE_OFFER_FIELDS: Final[tuple[str, ...]] = (
     "tradeofferid",
     "trade_offer_id",
 )
+_HISTORICAL_TRADE_OFFER_URL_PATHS: Final[frozenset[str]] = frozenset(
+    {"trade", "tradeoffer"}
+)
 _RECIPIENT_FIELDS: Final[tuple[str, ...]] = (
     "recipient_steam_id",
     "recipient_steamid",
@@ -89,6 +94,12 @@ _RECIPIENT_FIELDS: Final[tuple[str, ...]] = (
 _SELLER_FIELDS: Final[tuple[str, ...]] = (
     "seller_steam_id",
     "seller_steamid",
+)
+_HISTORICAL_COUNTERPARTY_FIELDS: Final[tuple[str, ...]] = (
+    "seller_steam_id",
+    "seller_steamid",
+    "counterparty_steam_id",
+    "counterparty_steamid",
 )
 _DIRECTION_FIELDS: Final[tuple[str, ...]] = (
     "direction",
@@ -119,9 +130,12 @@ _REFUNDED_TIMEOUT_FIELDS: Final[tuple[str, ...]] = (
 
 @runtime_checkable
 class BuffReadOnlyClient(Protocol):
-    """The one read-only method required from the existing BUFF client."""
+    """Read-only methods supplied by the existing BUFF client."""
 
     def get_steam_trades(self) -> object:
+        ...
+
+    def get_buy_order_history_page(self, page_num: int, game: str = "csgo") -> object:
         ...
 
 
@@ -474,6 +488,86 @@ def _optional_recipient_binding_failure(
     return None
 
 
+def _historical_trade_offer_url_is_valid(
+    value: object,
+    *,
+    expected_offer_id: str,
+) -> bool:
+    """Validate an optional Steam URL without treating it as identity proof."""
+
+    if type(value) is not str or not value or value.strip() != value:
+        return False
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.casefold() != "https"
+        or hostname is None
+        or hostname.casefold() != "steamcommunity.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        return False
+    segments = tuple(segment for segment in parsed.path.split("/") if segment)
+    if not segments or segments[0].casefold() not in _HISTORICAL_TRADE_OFFER_URL_PATHS:
+        return False
+    if len(segments) > 1 and segments[1].casefold() != "new":
+        embedded = _canonical_raw_identifier(segments[1])
+        if embedded is None or embedded != expected_offer_id:
+            return False
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    for field in ("tradeofferid", "trade_offer_id"):
+        values = query.get(field, [])
+        if len(values) > 1 or (values and values[0] != expected_offer_id):
+            return False
+    if (
+        query.get("tradeofferid")
+        and query.get("trade_offer_id")
+        and query["tradeofferid"] != query["trade_offer_id"]
+    ):
+        return False
+    return True
+
+
+def _historical_trade_offer_values(
+    record: Mapping[str, Any],
+) -> tuple[str, ...] | None:
+    """Read optional historical offer aliases, treating empty values as absent."""
+
+    values: list[str] = []
+    for field in _TRADE_OFFER_FIELDS:
+        if field not in record or record[field] in (None, ""):
+            continue
+        value = _canonical_raw_identifier(record[field])
+        if value is None:
+            return None
+        values.append(value)
+    if len(set(values)) > 1:
+        return None
+    return tuple(values)
+
+
+def _historical_counterparty_values(
+    record: Mapping[str, Any],
+) -> tuple[str, ...] | None:
+    """Read optional seller/counterparty aliases in canonical Steam form."""
+
+    values: list[str] = []
+    for field in _HISTORICAL_COUNTERPARTY_FIELDS:
+        if field not in record:
+            continue
+        value = _canonical_positive_decimal_text(record[field])
+        if value is None:
+            return None
+        values.append(value)
+    if len(set(values)) > 1:
+        return None
+    return tuple(values)
+
+
 def _proves_seller_direction(record: Mapping[str, Any]) -> bool | None:
     direction_values = _identity_values(record, _DIRECTION_FIELDS)
     if direction_values is None:
@@ -519,6 +613,8 @@ class BuffReadOnlyAdapter:
 
         if request.capability is PlatformCapability.READ_BUFF_ORDER_LIFECYCLE:
             return self._execute_order_lifecycle(request)
+        if request.capability is PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE:
+            return self._execute_historical_buyer_offer_state(request)
 
         raw = _call_read(self._client.get_steam_trades)
         if isinstance(raw, _ReadFailure):
@@ -837,6 +933,115 @@ class BuffReadOnlyAdapter:
             request,
             PlatformResultStatus.RESULT_UNKNOWN,
             "order_not_proven",
+        )
+
+    def _execute_historical_buyer_offer_state(
+        self,
+        request: PlatformRequest,
+    ) -> PlatformResult:
+        reader = getattr(self._client, "get_buy_order_history_page", None)
+        if not callable(reader):
+            return _result(
+                request,
+                PlatformResultStatus.UNSUPPORTED,
+                "history_reader_not_available",
+            )
+
+        for page_num in range(1, _MAX_BUFF_LIFECYCLE_PAGES + 1):
+            raw = _call_lifecycle_read(
+                lambda page_num=page_num: reader(page_num, "csgo")
+            )
+            if isinstance(raw, _ReadFailure):
+                return _result(request, raw.status, raw.detail)
+            parsed = _parse_buff_history_page(
+                raw,
+                expected_page_num=page_num,
+            )
+            if isinstance(parsed, _ReadFailure):
+                return _result(request, parsed.status, parsed.detail)
+
+            matches = [
+                item
+                for item in parsed.items
+                if _canonical_raw_identifier(item.get("id"))
+                == request.buff_order_id
+            ]
+            if len(matches) > 1:
+                return _result(
+                    request,
+                    PlatformResultStatus.MALFORMED,
+                    "ambiguous_order",
+                )
+            if len(matches) == 1:
+                return self._historical_offer_evidence(request, matches[0])
+            if page_num >= parsed.total_page:
+                break
+
+        return _result(
+            request,
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "order_not_proven",
+        )
+
+    def _historical_offer_evidence(
+        self,
+        request: PlatformRequest,
+        record: Mapping[str, Any],
+    ) -> PlatformResult:
+        recipient_failure = _optional_recipient_binding_failure(
+            record, request.recipient_steam_id
+        )
+        if recipient_failure is not None:
+            return _result(request, *recipient_failure)
+        offer_values = _historical_trade_offer_values(record)
+        if offer_values is None:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "malformed_payload",
+            )
+        if not offer_values:
+            return _result(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "order_not_proven",
+            )
+        offer_id = offer_values[0]
+        if "trade_offer_url" in record and record["trade_offer_url"] is not None:
+            if not _historical_trade_offer_url_is_valid(
+                record["trade_offer_url"],
+                expected_offer_id=offer_id,
+            ):
+                return _result(
+                    request,
+                    PlatformResultStatus.MALFORMED,
+                    "malformed_payload",
+                )
+
+        counterparty_values = _historical_counterparty_values(record)
+        if counterparty_values is None:
+            return _result(
+                request,
+                PlatformResultStatus.MALFORMED,
+                "malformed_payload",
+            )
+        counterparty: str | None = None
+        if counterparty_values:
+            counterparty = _canonical_positive_decimal_text(counterparty_values[0])
+            if counterparty is None:
+                return _result(
+                    request,
+                    PlatformResultStatus.MALFORMED,
+                    "malformed_payload",
+                )
+            if counterparty == request.recipient_steam_id:
+                return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
+
+        return _result(
+            request,
+            PlatformResultStatus.SUCCESS,
+            "offer_bound_historical",
+            OfferStateEvidence(offer_id, counterparty),
         )
 
 

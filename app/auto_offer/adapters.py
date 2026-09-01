@@ -40,6 +40,7 @@ class PlatformCapability(str, Enum):
 
     READ_DELIVERY_DIRECTION = "read_delivery_direction"
     READ_OFFER_STATE = "read_offer_state"
+    READ_HISTORICAL_BUYER_OFFER_STATE = "read_historical_buyer_offer_state"
     READ_SELLER_OFFER_ITEM = "read_seller_offer_item"
     READ_INVENTORY_STATE = "read_inventory_state"
     READ_STEAM_TRADE_OFFER = "read_steam_trade_offer"
@@ -789,6 +790,7 @@ class PlatformResult:
         expected_evidence = {
             PlatformCapability.READ_DELIVERY_DIRECTION: DeliveryDirectionEvidence,
             PlatformCapability.READ_OFFER_STATE: OfferStateEvidence,
+            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: OfferStateEvidence,
             PlatformCapability.READ_SELLER_OFFER_ITEM: SellerOrderItemEvidence,
             PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: BuffOrderLifecycleEvidence,
             PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,

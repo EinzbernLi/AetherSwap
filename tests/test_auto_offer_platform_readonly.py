@@ -905,6 +905,158 @@ def test_current_pending_offer_recovery_does_not_read_history():
     assert client.history_calls == []
 
 
+@pytest.mark.parametrize("match_page", [1, 2, 3])
+def test_historical_buyer_offer_state_reads_only_bounded_pages_and_binds_exact_offer(
+    match_page,
+):
+    pages = {
+        page_num: history_page(page_num=page_num, total_page=3)
+        for page_num in range(1, 4)
+    }
+    pages[match_page] = history_page(
+        page_num=match_page,
+        total_page=3,
+        items=[history_record(tradeofferid="historical-offer-42")],
+    )
+    client = BuffStub(history_pages=pages)
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.detail == "offer_bound_historical"
+    assert result.evidence == OfferStateEvidence(
+        "historical-offer-42", "76561198000000002"
+    )
+    assert client.calls == 0
+    assert client.history_calls == [
+        (page_num, "csgo") for page_num in range(1, match_page + 1)
+    ]
+
+
+def test_historical_buyer_offer_state_stops_after_three_pages_without_match():
+    pages = {
+        page_num: history_page(page_num=page_num, total_page=9)
+        for page_num in range(1, 4)
+    }
+    client = BuffStub(history_pages=pages)
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert result.detail == "order_not_proven"
+    assert client.history_calls == [(1, "csgo"), (2, "csgo"), (3, "csgo")]
+
+
+@pytest.mark.parametrize(
+    ("changes", "status", "detail"),
+    [
+        (
+            {"tradeofferid": "historical-offer-42", "trade_offer_id": "other"},
+            PlatformResultStatus.MALFORMED,
+            "malformed_payload",
+        ),
+        (
+            {"tradeofferid": None},
+            PlatformResultStatus.RESULT_UNKNOWN,
+            "order_not_proven",
+        ),
+        (
+            {"buyer_steam_id": "76561198000000099"},
+            PlatformResultStatus.FAILURE,
+            "identity_mismatch",
+        ),
+        (
+            {"trade_offer_url": "https://steamcommunity.com/tradeoffer/other/"},
+            PlatformResultStatus.MALFORMED,
+            "malformed_payload",
+        ),
+    ],
+)
+def test_historical_buyer_offer_state_fails_closed_on_identity_or_offer_ambiguity(
+    changes, status, detail
+):
+    client = BuffStub(
+        history_pages={
+            1: history_page(
+                items=[history_record(**changes)]
+            )
+        }
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is status
+    assert result.detail == detail
+    assert result.evidence is None
+    assert client.history_calls == [(1, "csgo")]
+
+
+def test_historical_buyer_offer_state_accepts_valid_url_without_using_url_as_identity():
+    client = BuffStub(
+        history_pages={
+            1: history_page(
+                items=[
+                    history_record(
+                        tradeofferid="historical-offer-42",
+                        trade_offer_url=(
+                            "https://steamcommunity.com/tradeoffer/"
+                            "historical-offer-42/"
+                        ),
+                    )
+                ]
+            )
+        }
+    )
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence.steam_tradeoffer_id == "historical-offer-42"
+
+
+def test_historical_buyer_offer_state_allows_absent_counterparty_corroboration():
+    record = history_record(tradeofferid="historical-offer-42")
+    del record["seller_steam_id"]
+    client = BuffStub(history_pages={1: history_page(items=[record])})
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.SUCCESS
+    assert result.evidence == OfferStateEvidence("historical-offer-42", None)
+
+
+def test_historical_buyer_offer_state_rejects_contradictory_counterparty():
+    record = history_record(tradeofferid="historical-offer-42")
+    del record["seller_steam_id"]
+    record["buyer_steam_id"] = "76561198000000001"
+    record["counterparty_steam_id"] = "76561198000000001"
+    client = BuffStub(
+        history_pages={
+            1: history_page(items=[record])
+        }
+    )
+
+    result = buff_adapter(client).execute(
+        request(
+            capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
+            recipient_steam_id="76561198000000001",
+        )
+    )
+
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "identity_mismatch"
+
+
 @pytest.mark.parametrize(
     "record",
     [
