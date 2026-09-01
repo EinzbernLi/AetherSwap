@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional
 from urllib.parse import urlsplit
-from urllib.request import getproxies, proxy_bypass
+from urllib.request import getproxies
 
 BUFF_ORIGIN = "https://buff.163.com/"
 BUFF_HOST = "buff.163.com"
@@ -115,6 +115,23 @@ def _normalize_system_proxy_url(raw: object) -> str:
     return f"{scheme}://{normalized_host}:{int(port)}"
 
 
+def _default_proxy_bypass(host: str) -> bool:
+    """Return the ambient bypass decision without Windows DNS resolution.
+
+    CPython's Windows ``urllib.request.proxy_bypass`` registry path may resolve
+    the host name while evaluating ``ProxyOverride``.  That violates the BUFF
+    egress contract because route resolution must be local-only before the first
+    intended browser/HTTP network operation.  Requests has long provided a
+    Windows-specific override that preserves environment/Registry bypass
+    semantics without those DNS lookups, so use that reviewed compatibility
+    seam as the production default.
+    """
+
+    from requests.utils import proxy_bypass as requests_proxy_bypass
+
+    return bool(requests_proxy_bypass(host))
+
+
 def resolve_buff_egress(
     config: Optional[dict] = None,
     *,
@@ -128,7 +145,7 @@ def resolve_buff_egress(
         return direct_buff_egress_binding()
 
     resolver = proxy_resolver or getproxies
-    bypass = bypass_resolver or proxy_bypass
+    bypass = bypass_resolver or _default_proxy_bypass
     try:
         if bool(bypass(BUFF_HOST)):
             raise BuffEgressError("BUFF_EGRESS_SYSTEM_PROXY_BYPASS")
