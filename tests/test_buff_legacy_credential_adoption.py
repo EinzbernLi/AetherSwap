@@ -1,20 +1,22 @@
 import copy
 
-import pytest
-
 
 SYSTEM_PROXY_CONFIG = {"buff": {"egress_mode": "system_proxy"}}
 
 
-def _proxy_binding(adoption):
-    return adoption.resolve_buff_egress(
-        SYSTEM_PROXY_CONFIG,
-        proxy_resolver=lambda: {"https": "127.0.0.1:7890"},
+def _proxy_binding():
+    from app.services.buff_egress import BuffEgressBinding
+
+    return BuffEgressBinding(
+        mode="system_proxy",
+        fingerprint="b" * 64,
+        _proxy_server="http://127.0.0.1:7890",
     )
 
 
 def _install_state(monkeypatch, adoption, credentials):
     state = {"credentials": copy.deepcopy(credentials), "updates": []}
+    binding = _proxy_binding()
 
     def get_credentials():
         return copy.deepcopy(state["credentials"])
@@ -56,18 +58,14 @@ def _install_state(monkeypatch, adoption, credentials):
         "load_app_config_validated",
         lambda: copy.deepcopy(SYSTEM_PROXY_CONFIG),
     )
-    monkeypatch.setattr(
-        adoption,
-        "resolve_buff_egress",
-        lambda _cfg: _proxy_binding(adoption),
-    )
-    return state
+    monkeypatch.setattr(adoption, "resolve_buff_egress", lambda _cfg: binding)
+    return state, binding
 
 
 def test_legacy_unbound_valid_session_adopts_rotated_cookie_once(monkeypatch):
     from app.services import buff_credential_adoption as adoption
 
-    state = _install_state(
+    state, binding = _install_state(
         monkeypatch,
         adoption,
         {
@@ -85,7 +83,7 @@ def test_legacy_unbound_valid_session_adopts_rotated_cookie_once(monkeypatch):
             assert cookies == "session=old; csrf_token=old"
             assert kwargs["user_agent"] == "UA-old"
             assert kwargs["credential_generation"] == 7
-            assert kwargs["egress_binding"].mode == "system_proxy"
+            assert kwargs["egress_binding"] is binding
             self.callback = kwargs["credentials_update_callback"]
 
         def verify_session(self):
@@ -112,13 +110,13 @@ def test_legacy_unbound_valid_session_adopts_rotated_cookie_once(monkeypatch):
     assert update["user_agent"] == "UA-new"
     assert update["source"] is None
     assert update["egress_mode"] == "system_proxy"
-    assert len(update["egress_fingerprint"]) == 64
+    assert update["egress_fingerprint"] == binding.fingerprint
 
 
 def test_legacy_unbound_failed_validation_does_not_write(monkeypatch):
     from app.services import buff_credential_adoption as adoption
 
-    state = _install_state(
+    state, _binding = _install_state(
         monkeypatch,
         adoption,
         {"cookies": "session=old", "generation": 11},
@@ -150,7 +148,7 @@ def test_legacy_unbound_verification_exception_does_not_write(monkeypatch):
     from app.services import buff_credential_adoption as adoption
     from buff import BuffVerificationRequired
 
-    state = _install_state(
+    state, _binding = _install_state(
         monkeypatch,
         adoption,
         {"cookies": "session=old", "generation": 3},
@@ -178,8 +176,8 @@ def test_legacy_unbound_verification_exception_does_not_write(monkeypatch):
 def test_existing_exact_bound_credentials_do_not_probe_or_write(monkeypatch):
     from app.services import buff_credential_adoption as adoption
 
-    binding = _proxy_binding(adoption)
-    state = _install_state(
+    binding = _proxy_binding()
+    state, _installed_binding = _install_state(
         monkeypatch,
         adoption,
         {
@@ -207,7 +205,7 @@ def test_existing_exact_bound_credentials_do_not_probe_or_write(monkeypatch):
 def test_existing_mismatched_bound_credentials_require_reauth_without_probe(monkeypatch):
     from app.services import buff_credential_adoption as adoption
 
-    state = _install_state(
+    state, _binding = _install_state(
         monkeypatch,
         adoption,
         {
@@ -234,7 +232,7 @@ def test_existing_mismatched_bound_credentials_require_reauth_without_probe(monk
 def test_legacy_adoption_fails_if_credential_changes_during_probe(monkeypatch):
     from app.services import buff_credential_adoption as adoption
 
-    state = _install_state(
+    state, _binding = _install_state(
         monkeypatch,
         adoption,
         {"cookies": "session=old", "user_agent": "UA", "generation": 5},
@@ -264,7 +262,7 @@ def test_legacy_adoption_fails_if_credential_changes_during_probe(monkeypatch):
 def test_legacy_adoption_respects_checkout_credential_freeze(monkeypatch):
     from app.services import buff_credential_adoption as adoption
 
-    state = _install_state(
+    state, _binding = _install_state(
         monkeypatch,
         adoption,
         {"cookies": "session=old", "generation": 2},
@@ -291,7 +289,7 @@ def test_legacy_adoption_respects_checkout_credential_freeze(monkeypatch):
 def test_legacy_adoption_empty_cookie_fails_before_network(monkeypatch):
     from app.services import buff_credential_adoption as adoption
 
-    state = _install_state(
+    state, _binding = _install_state(
         monkeypatch,
         adoption,
         {"cookies": "", "generation": 1},
