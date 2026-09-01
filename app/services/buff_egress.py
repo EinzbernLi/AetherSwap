@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -115,21 +116,63 @@ def _normalize_system_proxy_url(raw: object) -> str:
     return f"{scheme}://{normalized_host}:{int(port)}"
 
 
-def _default_proxy_bypass(host: str) -> bool:
-    """Return the ambient bypass decision without Windows DNS resolution.
+def _host_matches_bypass_token(host: str, raw_token: object) -> bool:
+    """Match one no-proxy/ProxyOverride token without DNS or socket access."""
 
-    CPython's Windows ``urllib.request.proxy_bypass`` registry path may resolve
-    the host name while evaluating ``ProxyOverride``.  That violates the BUFF
-    egress contract because route resolution must be local-only before the first
-    intended browser/HTTP network operation.  Requests has long provided a
-    Windows-specific override that preserves environment/Registry bypass
-    semantics without those DNS lookups, so use that reviewed compatibility
-    seam as the production default.
-    """
+    normalized_host = str(host or "").strip().lower().rstrip(".")
+    token = str(raw_token or "").strip().lower()
+    if not normalized_host or not token:
+        return False
+    if token == "*":
+        return True
+    if token == "<local>":
+        return "." not in normalized_host
 
-    from requests.utils import proxy_bypass as requests_proxy_bypass
+    # no_proxy values sometimes include a URL form or an explicit port.  Only
+    # the host identity matters for the fixed BUFF origin used by this module.
+    if "://" in token:
+        try:
+            token = str(urlsplit(token).hostname or "").lower()
+        except Exception:
+            return False
+    else:
+        port_match = re.fullmatch(r"(.+):(\d+)", token)
+        if port_match:
+            token = port_match.group(1)
 
-    return bool(requests_proxy_bypass(host))
+    token = token.strip().rstrip(".")
+    if not token:
+        return False
+    if token == "*":
+        return True
+    if token == "<local>":
+        return "." not in normalized_host
+
+    if "*" in token or "?" in token:
+        return fnmatchcase(normalized_host, token)
+
+    token = token.lstrip(".")
+    if not token:
+        return False
+    return normalized_host == token or normalized_host.endswith(f".{token}")
+
+
+def _proxy_snapshot_bypasses_host(
+    resolved: Mapping[str, object],
+    host: str,
+) -> bool:
+    """Evaluate bypass rules from the already-resolved ambient proxy snapshot."""
+
+    raw_no_proxy = resolved.get("no")
+    if raw_no_proxy is None:
+        raw_no_proxy = resolved.get("no_proxy")
+    if raw_no_proxy is None:
+        return False
+
+    for token in re.split(r"[;,]", str(raw_no_proxy)):
+        if _host_matches_bypass_token(host, token):
+            return True
+    return False
 
 
 def resolve_buff_egress(
@@ -145,17 +188,23 @@ def resolve_buff_egress(
         return direct_buff_egress_binding()
 
     resolver = proxy_resolver or getproxies
-    bypass = bypass_resolver or _default_proxy_bypass
     try:
-        if bool(bypass(BUFF_HOST)):
-            raise BuffEgressError("BUFF_EGRESS_SYSTEM_PROXY_BYPASS")
         resolved = resolver() or {}
+        normalized = {
+            str(key).strip().lower(): value for key, value in resolved.items()
+        }
+        bypassed = (
+            bool(bypass_resolver(BUFF_HOST))
+            if bypass_resolver is not None
+            else _proxy_snapshot_bypasses_host(normalized, BUFF_HOST)
+        )
+        if bypassed:
+            raise BuffEgressError("BUFF_EGRESS_SYSTEM_PROXY_BYPASS")
     except BuffEgressError:
         raise
     except Exception:
         raise BuffEgressError("BUFF_EGRESS_SYSTEM_PROXY_RESOLUTION_FAILED") from None
 
-    normalized = {str(key).strip().lower(): value for key, value in resolved.items()}
     raw_proxy = normalized.get("https") or normalized.get("http")
     proxy_server = _normalize_system_proxy_url(raw_proxy)
     return BuffEgressBinding(
