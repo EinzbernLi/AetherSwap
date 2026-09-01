@@ -2,6 +2,7 @@ import base64
 import copy
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -11,6 +12,8 @@ _CREDENTIALS_FILE = _CONFIG_DIR / "credentials.json"
 _cache: dict = {}
 _credentials_lock = threading.RLock()
 _STEAM_IDENTITY_SECRET_BYTES = 20
+_BUFF_EGRESS_MODES = frozenset({"direct", "system_proxy"})
+_BUFF_EGRESS_FINGERPRINT_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 def _normalize_steam_identity_secret(value: object) -> str:
     if (
         type(value) is not str
@@ -30,6 +33,26 @@ def _validated_identity_secret_or_none(value: object) -> Optional[str]:
     if value is None or value == "":
         return None
     return _normalize_steam_identity_secret(value)
+def _normalize_buff_egress_metadata(
+    mode: object,
+    fingerprint: object,
+    *,
+    allow_missing: bool,
+) -> tuple[Optional[str], Optional[str]]:
+    mode_missing = mode in (None, "")
+    fingerprint_missing = fingerprint in (None, "")
+    if mode_missing and fingerprint_missing and allow_missing:
+        return None, None
+    if mode_missing != fingerprint_missing:
+        raise ValueError("buff_egress_binding_invalid")
+    normalized_mode = str(mode or "").strip().lower()
+    normalized_fingerprint = str(fingerprint or "").strip().lower()
+    if (
+        normalized_mode not in _BUFF_EGRESS_MODES
+        or not _BUFF_EGRESS_FINGERPRINT_RE.fullmatch(normalized_fingerprint)
+    ):
+        raise ValueError("buff_egress_binding_invalid")
+    return normalized_mode, normalized_fingerprint
 def _atomic_write_json(path: Path, data: dict) -> None:
     """Write JSON durably without exposing readers to a truncated file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +126,17 @@ def save_credentials(data: dict) -> None:
                 incoming_steam["identity_secret"] = secret
         incoming_buff = saved.get("buff")
         if isinstance(incoming_buff, dict):
+            mode, fingerprint = _normalize_buff_egress_metadata(
+                incoming_buff.get("egress_mode"),
+                incoming_buff.get("egress_fingerprint"),
+                allow_missing=True,
+            )
+            if mode is None:
+                incoming_buff.pop("egress_mode", None)
+                incoming_buff.pop("egress_fingerprint", None)
+            else:
+                incoming_buff["egress_mode"] = mode
+                incoming_buff["egress_fingerprint"] = fingerprint
             try:
                 current_generation = int((current.get("buff") or {}).get("generation", 0))
             except (TypeError, ValueError):
@@ -152,13 +186,20 @@ def update_buff_credentials(
     cookies: str,
     user_agent: Optional[str] = None,
     source: Optional[str] = None,
+    egress_mode: Optional[str] = None,
+    egress_fingerprint: Optional[str] = None,
 ) -> None:
     """Persist BUFF credentials and advance their observable generation.
 
-    ``user_agent`` and ``source`` are optional so older callers that only pass a
-    cookie string remain compatible.  Omitting either field preserves the last
-    known value instead of silently changing the browser identity.
+    Browser/manual authentication callers may atomically bind the refreshed
+    credential generation to an explicit egress identity. Runtime cookie
+    rotations omit both egress fields and preserve the existing binding.
     """
+    mode, fingerprint = _normalize_buff_egress_metadata(
+        egress_mode,
+        egress_fingerprint,
+        allow_missing=True,
+    )
     global _cache
     with _credentials_lock:
         data = _load().copy()
@@ -168,6 +209,9 @@ def update_buff_credentials(
             buff["user_agent"] = user_agent.strip()
         if source is not None and source.strip():
             buff["source"] = source.strip().lower()
+        if mode is not None:
+            buff["egress_mode"] = mode
+            buff["egress_fingerprint"] = fingerprint
         try:
             generation = int(buff.get("generation", 0)) + 1
         except (TypeError, ValueError):
