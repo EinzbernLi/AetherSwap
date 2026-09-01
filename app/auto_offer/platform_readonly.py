@@ -947,6 +947,7 @@ class BuffReadOnlyAdapter:
                 "history_reader_not_available",
             )
 
+        matches: list[Mapping[str, Any]] = []
         for page_num in range(1, _MAX_BUFF_LIFECYCLE_PAGES + 1):
             raw = _call_lifecycle_read(
                 lambda page_num=page_num: reader(page_num, "csgo")
@@ -960,23 +961,24 @@ class BuffReadOnlyAdapter:
             if isinstance(parsed, _ReadFailure):
                 return _result(request, parsed.status, parsed.detail)
 
-            matches = [
+            page_matches = [
                 item
                 for item in parsed.items
                 if _canonical_raw_identifier(item.get("id"))
                 == request.buff_order_id
             ]
-            if len(matches) > 1:
+            if len(matches) + len(page_matches) > 1:
                 return _result(
                     request,
                     PlatformResultStatus.MALFORMED,
                     "ambiguous_order",
                 )
-            if len(matches) == 1:
-                return self._historical_offer_evidence(request, matches[0])
+            matches.extend(page_matches)
             if page_num >= parsed.total_page:
                 break
 
+        if len(matches) == 1:
+            return self._historical_offer_evidence(request, matches[0])
         return _result(
             request,
             PlatformResultStatus.RESULT_UNKNOWN,

@@ -931,7 +931,47 @@ def test_historical_buyer_offer_state_reads_only_bounded_pages_and_binds_exact_o
     )
     assert client.calls == 0
     assert client.history_calls == [
-        (page_num, "csgo") for page_num in range(1, match_page + 1)
+        (page_num, "csgo") for page_num in range(1, 4)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("duplicate_page", "second_offer"),
+    [
+        (2, "historical-offer-42"),
+        (2, "historical-offer-99"),
+        (3, "historical-offer-42"),
+        (3, "historical-offer-99"),
+    ],
+)
+def test_historical_buyer_offer_state_rejects_cross_page_duplicate_order(
+    duplicate_page, second_offer
+):
+    pages = {
+        page_num: history_page(page_num=page_num, total_page=3)
+        for page_num in range(1, 4)
+    }
+    pages[1] = history_page(
+        page_num=1,
+        total_page=3,
+        items=[history_record(tradeofferid="historical-offer-42")],
+    )
+    pages[duplicate_page] = history_page(
+        page_num=duplicate_page,
+        total_page=3,
+        items=[history_record(tradeofferid=second_offer)],
+    )
+    client = BuffStub(history_pages=pages)
+
+    result = buff_adapter(client).execute(
+        request(capability=PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
+    )
+
+    assert result.status is PlatformResultStatus.MALFORMED
+    assert result.detail == "ambiguous_order"
+    assert result.evidence is None
+    assert client.history_calls == [
+        (page_num, "csgo") for page_num in range(1, duplicate_page + 1)
     ]
 
 
