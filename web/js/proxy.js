@@ -220,7 +220,7 @@ async function fetchWebshareProxies() {
         const d = await fetchJson(API + "/proxy/webshare", { method: "POST" });
         if (d.ok) {
             toast(`✅ 获取成功`, d.message || `已导入 ${d.count} 个代理`);
-            await loadProxyConfig();  
+            await loadProxyConfig();
         } else {
             toast("获取失败", d.message || "请检查 API Key 或账户状态");
         }
@@ -230,3 +230,63 @@ async function fetchWebshareProxies() {
         if (btn) { btn.disabled = false; btn.textContent = "☁ 获取订阅"; }
     }
 }
+
+// ---- Authenticated BUFF egress selector ---------------------------------
+// This setting is intentionally independent from the rotating ProxyManager
+// strategies above. It selects one stable browser+HTTP route identity for a
+// BUFF credential generation; changing it requires BUFF re-verification.
+function _ensureBuffEgressModeField() {
+    let select = el("cfg-buff-egress-mode");
+    if (select) return select;
+    const payMethod = el("cfg-pay_method");
+    const formGrid = payMethod?.closest(".form-grid");
+    if (!formGrid) return null;
+
+    const field = document.createElement("div");
+    field.className = "field";
+    field.innerHTML = `
+      <label for="cfg-buff-egress-mode">BUFF 网络出口</label>
+      <select id="cfg-buff-egress-mode">
+        <option value="direct">直连（默认）</option>
+        <option value="system_proxy">系统代理（固定绑定）</option>
+      </select>
+      <span class="field-hint">系统代理模式会把登录浏览器和 BUFF HTTP 固定到当前系统代理；切换模式或代理端点后必须重新完成 BUFF 验证。此设置不使用代理池轮换。</span>`;
+    formGrid.appendChild(field);
+    return el("cfg-buff-egress-mode");
+}
+
+async function _loadBuffEgressMode() {
+    const select = _ensureBuffEgressModeField();
+    if (!select) return;
+    try {
+        const d = await fetchJson(API + "/config");
+        const mode = String(d?.config?.buff?.egress_mode || "direct").toLowerCase();
+        select.value = mode === "system_proxy" ? "system_proxy" : "direct";
+    } catch (e) {
+        console.error("加载 BUFF 网络出口配置失败", e);
+        select.value = "direct";
+    }
+}
+
+if (typeof formToConfig === "function") {
+    const _task055FormToConfig = formToConfig;
+    formToConfig = function () {
+        const cfg = _task055FormToConfig();
+        const select = _ensureBuffEgressModeField();
+        cfg.buff = cfg.buff || {};
+        if (select) cfg.buff.egress_mode = select.value === "system_proxy" ? "system_proxy" : "direct";
+        return cfg;
+    };
+}
+
+if (typeof loadConfig === "function") {
+    const _task055LoadConfig = loadConfig;
+    loadConfig = async function (...args) {
+        const result = await _task055LoadConfig(...args);
+        await _loadBuffEgressMode();
+        return result;
+    };
+}
+
+_ensureBuffEgressModeField();
+_loadBuffEgressMode();

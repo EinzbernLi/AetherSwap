@@ -1,9 +1,19 @@
 import hashlib
-import threading
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import requests
+
 from app.services.buff_auth import get_buff_auth_lock
+from app.services.buff_egress import (
+    BuffEgressBinding,
+    BuffEgressReauthRequired,
+    configure_requests_session,
+    direct_buff_egress_binding,
+    resolve_buff_egress,
+    validate_buff_credential_binding,
+)
 from buff import (
     BuffBuyer,
     BuffWriteResultUnknown,
@@ -49,17 +59,8 @@ def first_order_at_price(orders: List[dict], price: float) -> Optional[dict]:
 
 
 class BuffClient:
-    """Generation-aware BUFF facade.
+    """Generation-aware BUFF facade with one immutable authenticated egress."""
 
-    One authentication lock covers each logical operation so browser login,
-    keepalive and checkout cannot mutate the same account session concurrently.
-    Non-idempotent writes intentionally have no generic retry decorator.
-    """
-
-    # BUFF's current batch checkout requires preview state, a server-issued
-    # batch_id/trace and conditional password_token.  The former implementation
-    # did not implement that contract, so production must safely use single
-    # checkout until the full flow can be verified end to end.
     supports_batch_buy = False
 
     def __init__(
@@ -72,6 +73,8 @@ class BuffClient:
         credential_generation: int = 0,
         credentials_provider: Optional[Callable[[], dict]] = None,
         credentials_update_callback: Optional[Callable[[str, str], None]] = None,
+        egress_binding: Optional[BuffEgressBinding] = None,
+        egress_binding_provider: Optional[Callable[[], BuffEgressBinding]] = None,
     ) -> None:
         self._pay_method = (pay_method or "alipay").strip().lower()
         self._pay_method_id = (
@@ -86,6 +89,8 @@ class BuffClient:
         self._steam_id = ""
         self._client_lock = threading.RLock()
         self._auth_lock = get_buff_auth_lock()
+        self._egress_binding = egress_binding or direct_buff_egress_binding()
+        self._egress_binding_provider = egress_binding_provider
         self._buyer = self._new_buyer(self._cookies, self._user_agent)
 
     @staticmethod
@@ -95,20 +100,53 @@ class BuffClient:
         except (TypeError, ValueError):
             return 0
 
+    def _current_egress_binding(self) -> BuffEgressBinding:
+        current = (
+            self._egress_binding_provider()
+            if self._egress_binding_provider is not None
+            else self._egress_binding
+        )
+        if (
+            current.mode != self._egress_binding.mode
+            or current.fingerprint != self._egress_binding.fingerprint
+        ):
+            raise BuffEgressReauthRequired("BUFF_EGRESS_REAUTH_REQUIRED")
+        return current
+
     def _new_buyer(self, cookies: str, user_agent: Optional[str]) -> BuffBuyer:
-        return BuffBuyer(
+        session = configure_requests_session(requests.Session(), self._egress_binding)
+        buyer = BuffBuyer(
             cookies,
             pay_method=self._pay_method_id,
             user_agent=user_agent,
+            session=session,
             account_id=BUFF_ACCOUNT_ID,
             request_timeout=self._timeout,
             steam_id=self._steam_id,
         )
+        setattr(buyer, "_aetherswap_egress_session", session)
+        return buyer
+
+    @staticmethod
+    def _close_buyer(buyer: BuffBuyer) -> None:
+        try:
+            close = getattr(buyer, "close", None)
+            if callable(close):
+                close()
+        finally:
+            session = getattr(buyer, "_aetherswap_egress_session", None)
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     def _ensure_current_buyer(self) -> BuffBuyer:
+        current_binding = self._current_egress_binding()
         if self._credentials_provider is None:
             return self._buyer
         credentials = self._credentials_provider() or {}
+        validate_buff_credential_binding(credentials, current_binding)
         generation = self._as_generation(credentials.get("generation"))
         cookies = str(credentials.get("cookies") or "")
         user_agent = str(credentials.get("user_agent") or "").strip() or None
@@ -124,9 +162,7 @@ class BuffClient:
         self._cookies = cookies
         self._user_agent = user_agent
         self._credential_generation = generation
-        close = getattr(old_buyer, "close", None)
-        if callable(close):
-            close()
+        self._close_buyer(old_buyer)
         return self._buyer
 
     def _persist_rotated_cookies(self, buyer: BuffBuyer) -> None:
@@ -148,8 +184,10 @@ class BuffClient:
 
         with self._auth_lock:
             with self._client_lock:
+                current_binding = self._current_egress_binding()
                 if self._credentials_provider is not None:
                     credentials = self._credentials_provider() or {}
+                    validate_buff_credential_binding(credentials, current_binding)
                     generation = self._as_generation(credentials.get("generation"))
                     cookies = str(credentials.get("cookies") or "")
                     user_agent = (
@@ -179,15 +217,11 @@ class BuffClient:
                     try:
                         self._persist_rotated_cookies(buyer)
                     except Exception as exc:
-                        # Cookie persistence is important but must never replace
-                        # a rate-limit/risk/write-unknown exception from BUFF.
                         logger.exception("持久化 BUFF 轮换 Cookie 失败: %s", exc)
 
     def close(self) -> None:
         with self._client_lock:
-            close = getattr(self._buyer, "close", None)
-            if callable(close):
-                close()
+            self._close_buyer(self._buyer)
 
     def get_sell_orders(self, goods_id: int, game: str = "csgo") -> Optional[list]:
         return self._run(lambda buyer: buyer.get_sell_orders(goods_id, game))
@@ -386,8 +420,6 @@ class BuffClient:
                             batch_id,
                         )
                     except Exception as exc:
-                        # Preserve every already-created bill for immediate
-                        # persistence by the pipeline before it halts.
                         setattr(exc, "partial_results", list(matched))
                         setattr(exc, "batch_id", str(batch_id))
                         raise
@@ -414,18 +446,12 @@ class BuffClient:
                         matched.append(match)
                         if on_match is not None:
                             try:
-                                # Persist the newly-created external id before
-                                # attempting another non-idempotent finalize.
                                 on_match(dict(match), list(matched))
                             except Exception as exc:
                                 setattr(exc, "partial_results", list(matched))
                                 setattr(exc, "batch_id", str(batch_id))
                                 raise
                     else:
-                        # A definitive non-OK response may be safe for this
-                        # sell order, but continuing through more POSTs in the
-                        # same paid batch is not.  Return the known partial set
-                        # and require reconciliation.
                         break
             return matched
 
@@ -433,14 +459,26 @@ class BuffClient:
 
 
 def create_buff_client_from_config(credentials: dict, config: dict) -> BuffClient:
-    from app.config_loader import get_buff_credentials, update_buff_creds
+    from app.config_loader import (
+        get_buff_credentials,
+        load_app_config_validated,
+        update_buff_creds,
+    )
 
     credentials = credentials or {}
     buff_cfg = config.get("buff", {})
+    binding = resolve_buff_egress(config)
+    validate_buff_credential_binding(credentials, binding)
+
+    def current_binding() -> BuffEgressBinding:
+        latest = resolve_buff_egress(load_app_config_validated())
+        if latest.mode != binding.mode or latest.fingerprint != binding.fingerprint:
+            raise BuffEgressReauthRequired("BUFF_EGRESS_REAUTH_REQUIRED")
+        return latest
 
     def persist_rotated_cookies(cookies: str, user_agent: str) -> None:
-        # Preserve the authentication source; only the server-issued CookieJar
-        # and the UA bound to it are refreshed here.
+        # Preserve egress metadata and authentication source; only server-issued
+        # CookieJar/UA rotation advances the credential generation here.
         update_buff_creds(cookies, user_agent=user_agent)
 
     return BuffClient(
@@ -451,4 +489,6 @@ def create_buff_client_from_config(credentials: dict, config: dict) -> BuffClien
         credential_generation=credentials.get("generation", 0),
         credentials_provider=get_buff_credentials,
         credentials_update_callback=persist_rotated_cookies,
+        egress_binding=binding,
+        egress_binding_provider=current_binding,
     )

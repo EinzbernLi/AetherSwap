@@ -14,8 +14,9 @@ from config import (
 _config_cache: dict = {}
 _config_cache_ts: float = 0.0
 _config_cache_revision = None
-_CONFIG_CACHE_TTL = 5.0  
+_CONFIG_CACHE_TTL = 5.0
 _CONFIG_SNAPSHOT_RETRIES = 3
+_AUTH_BUFF_SOURCES = frozenset({"playwright", "playwright_ephemeral", "manual"})
 _config_cache_lock = threading.Lock()
 _config_update_lock = threading.RLock()
 def _config_file_revision():
@@ -62,8 +63,32 @@ def update_buff_creds(
     cookies: str,
     user_agent: str = None,
     source: str = None,
+    egress_mode: str = None,
+    egress_fingerprint: str = None,
 ) -> None:
-    update_buff_credentials(cookies, user_agent=user_agent, source=source)
+    normalized_source = str(source or "").strip().lower()
+    if (
+        normalized_source in _AUTH_BUFF_SOURCES
+        and egress_mode is None
+        and egress_fingerprint is None
+    ):
+        # Browser/manual verification has already resolved the exact route used
+        # for the successful probe.  Persist that same route identity with the
+        # credential generation rather than resolving ambient proxy state again.
+        from app.services.buff_auth import get_prepared_buff_egress_binding
+
+        binding = get_prepared_buff_egress_binding()
+        if binding is None:
+            raise ValueError("buff_egress_binding_not_prepared")
+        egress_mode = binding.mode
+        egress_fingerprint = binding.fingerprint
+    update_buff_credentials(
+        cookies,
+        user_agent=user_agent,
+        source=source,
+        egress_mode=egress_mode,
+        egress_fingerprint=egress_fingerprint,
+    )
 def get_buff_credentials_generation() -> int:
     """Return the credential revision used by long-lived BUFF clients."""
     try:

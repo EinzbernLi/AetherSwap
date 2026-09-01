@@ -6,7 +6,23 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from app.config_loader import get_buff_credentials, update_buff_creds
+import requests
+
+from app.config_loader import (
+    get_buff_credentials,
+    load_app_config_validated,
+    update_buff_creds,
+)
+from app.services.buff_egress import (
+    BuffEgressBinding,
+    BuffEgressError,
+    BuffEgressReauthRequired,
+    configure_requests_session,
+    credential_binding_metadata,
+    direct_buff_egress_binding,
+    resolve_buff_egress,
+    validate_buff_credential_binding,
+)
 from app.state import (
     get_pending_payment,
     get_status,
@@ -17,15 +33,14 @@ from app.state import (
 
 
 _buff_auth_lock = threading.RLock()
+_buff_egress_lock = threading.RLock()
+_prepared_buff_egress_binding: Optional[BuffEgressBinding] = None
 _buff_auto_relogin_last_success = 0.0
 BUFF_ACCOUNT_ID = "default"
 BUFF_ORIGIN = "https://buff.163.com/"
-BUFF_BROWSER_LAUNCH_ARGS = [
-    "--disable-blink-features=AutomationControlled",
-    # The authenticated requests.Session deliberately ignores environment and
-    # OS proxies.  Force the BUFF login profile onto the same direct egress.
-    "--no-proxy-server",
-]
+# Keep this list object stable because app.routes.auth imports it by reference.
+# The preparation step mutates it in place immediately before BUFF browser use.
+BUFF_BROWSER_LAUNCH_ARGS = direct_buff_egress_binding().browser_launch_args()
 
 _CHALLENGE_MARKERS = (
     "captcha",
@@ -61,6 +76,27 @@ _CHECKOUT_CREDENTIAL_FREEZE_STEPS = frozenset(
         "BUFF_ORDER_CREATED_PENDING",
     }
 )
+
+
+def prepare_buff_egress_binding(config: Optional[dict] = None) -> BuffEgressBinding:
+    """Resolve exactly one route and make browser launch semantics match it."""
+
+    cfg = load_app_config_validated() if config is None else config
+    binding = resolve_buff_egress(cfg)
+    with _buff_egress_lock:
+        global _prepared_buff_egress_binding
+        _prepared_buff_egress_binding = binding
+        BUFF_BROWSER_LAUNCH_ARGS[:] = binding.browser_launch_args()
+    return binding
+
+
+def get_prepared_buff_egress_binding() -> Optional[BuffEgressBinding]:
+    with _buff_egress_lock:
+        return _prepared_buff_egress_binding
+
+
+def _egress_commit_kwargs(binding: BuffEgressBinding) -> dict[str, str]:
+    return credential_binding_metadata(binding)
 
 
 def get_buff_auth_lock() -> threading.RLock:
@@ -116,7 +152,12 @@ def buff_credential_replacement_block_reason() -> str:
 def browser_buff_verification_allowed(
     account_id: str = BUFF_ACCOUNT_ID,
 ) -> tuple[bool, str, str]:
-    """Allow interactive verification except during an active 429 cooldown."""
+    """Prepare egress, then allow verification except during active 429 cooldown."""
+
+    try:
+        prepare_buff_egress_binding()
+    except BuffEgressError as exc:
+        return False, "egress_unavailable", exc.code
 
     from buff import BuffRateLimited, BuffRequestBlocked, get_global_policy
     from buff.request_policy import account_fingerprint
@@ -175,9 +216,6 @@ def _evaluate_browser_verification_with_global_pacing(
         if callable(request_slot):
             with request_slot(account_key):
                 return page.evaluate(script)
-        # Compatibility with minimal policy doubles: production policies always
-        # expose a request slot, while circuit synchronization below remains
-        # independently testable with lightweight recorders.
         return page.evaluate(script)
 
     account_lock = account_lock_factory(account_key)
@@ -203,8 +241,6 @@ def _clear_account_circuit_preserving_pacing(policy: Any, account_key: str) -> N
 
     clear = getattr(policy, "clear", None)
     if callable(clear):
-        # Current BuffRequestPolicy.clear() preserves pacing and also resets a
-        # fail-closed invalid-file marker after successful browser verification.
         clear(account_key)
         return
 
@@ -217,7 +253,6 @@ def _clear_account_circuit_preserving_pacing(policy: Any, account_key: str) -> N
             save_locked()
         return
 
-    # Compatibility fallback for policy doubles and older implementations.
     last_started = getattr(policy, "_last_started", None)
     sentinel = object()
     previous = (
@@ -282,8 +317,6 @@ def clear_buff_request_policy_after_verification(
             )
             return False
         except BuffRequestBlocked:
-            # Browser/manual verification may clear verification and risk-control
-            # circuits, but never an unexpired server cooldown.
             pass
         _clear_account_circuit_preserving_pacing(policy, account_key)
         return True
@@ -339,13 +372,7 @@ def _response_has_challenge(text: str) -> bool:
 
 
 def verify_buff_browser_session(page: Any) -> tuple[bool, str, str]:
-    """Verify authentication with one small read-only request in the browser.
-
-    A ``session`` cookie alone is not proof of a usable session: stale cookies
-    and risk-control pages can retain it.  BUFF's own web client calls the user-
-    info endpoint to load the signed-in user and buy-order metadata, so a valid
-    user object proves the profile can use the account without a write operation.
-    """
+    """Verify authentication with one small read-only request in the browser."""
 
     challenge = detect_buff_challenge(page)
     if challenge:
@@ -470,12 +497,7 @@ def verify_manual_buff_credentials(
     user_agent: str = "",
     on_verified_cookies: Optional[Callable[[str], None]] = None,
 ) -> tuple[bool, str, str]:
-    """Probe manually supplied credentials exactly once on the global policy.
-
-    The route checks the circuit before calling this function, and the shared
-    policy checks it again immediately before the request.  This keeps manual
-    validation inside the same pacing and circuit state as trading traffic.
-    """
+    """Probe manually supplied credentials exactly once on the prepared egress."""
 
     from buff import (
         BuffAuthExpired,
@@ -487,9 +509,16 @@ def verify_manual_buff_credentials(
         get_global_policy,
     )
 
+    try:
+        binding = prepare_buff_egress_binding()
+    except BuffEgressError as exc:
+        return False, "egress_unavailable", exc.code
+
+    session = configure_requests_session(requests.Session(), binding)
     buyer = BuffBuyer(
         cookies,
         user_agent=(user_agent or "").strip() or None,
+        session=session,
         request_policy=get_global_policy(),
         account_id=BUFF_ACCOUNT_ID,
     )
@@ -536,6 +565,7 @@ def verify_manual_buff_credentials(
         return False, "error", f"BUFF 手工 Cookie 验证失败: {str(exc)[:120]}"
     finally:
         buyer.close()
+        session.close()
 
 
 def manual_buff_probe_allowed(
@@ -544,6 +574,7 @@ def manual_buff_probe_allowed(
 ) -> tuple[bool, str, str]:
     """Prevent manual resubmission from bypassing an existing circuit."""
 
+    del candidate_cookies, saved_cookies
     from buff import (
         BuffRateLimited,
         BuffRequestBlocked,
@@ -556,12 +587,8 @@ def manual_buff_probe_allowed(
         get_global_policy().raise_if_blocked(account_key)
         return True, "ok", ""
     except BuffRateLimited as exc:
-        # A fresh Cookie is not permission to ignore a server-issued cooldown.
         return False, "rate_limited", str(exc)
     except BuffRequestBlocked as exc:
-        # Session/device values are attacker-controlled input and cannot prove
-        # that a risk/verification circuit belongs to another account.  Only an
-        # interactive browser verification may close this circuit.
         return (
             False,
             "browser_verification_required",
@@ -582,8 +609,6 @@ def try_buff_auto_relogin() -> tuple[bool, str, str]:
     try:
         from app.services.buff_checkout_guard import buff_activity_guard
 
-        # Keep pipeline acknowledgement/start outside the complete browser
-        # verification + credential-commit operation.
         with buff_activity_guard():
             return _try_buff_auto_relogin_impl()
     finally:
@@ -614,8 +639,6 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
     if checkout_block:
         return False, "checkout_pending", checkout_block
 
-    # A manually copied cookie belongs to a different browser profile.  Opening
-    # our fixed Playwright profile must never replace it with unrelated cookies.
     if str(cred.get("source") or "").lower() != "playwright":
         log(
             "buff_relogin: 当前凭证不是由 Playwright profile 管理，已跳过自动覆盖",
@@ -623,6 +646,14 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
             category="buff",
         )
         return False, "external_credentials", "手工 Cookie 不会被自动浏览器保活覆盖"
+
+    try:
+        binding = prepare_buff_egress_binding()
+        validate_buff_credential_binding(cred, binding)
+    except BuffEgressReauthRequired as exc:
+        return False, "egress_reauth_required", exc.code
+    except BuffEgressError as exc:
+        return False, "egress_unavailable", exc.code
 
     probe_allowed, circuit_status, circuit_message = manual_buff_probe_allowed(
         str(cred.get("cookies") or ""),
@@ -647,7 +678,7 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
         with sync_playwright() as playwright:
             launch_options = {
                 "headless": True,
-                "args": BUFF_BROWSER_LAUNCH_ARGS,
+                "args": binding.browser_launch_args(),
             }
             saved_user_agent = str(cred.get("user_agent") or "").strip()
             if saved_user_agent:
@@ -670,7 +701,6 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
                 log(f"buff_relogin: {message}，保留原凭证", "warn", category="buff")
                 return False, status, message
 
-            # Read again after validation so Set-Cookie refreshes are included.
             cookies = context.cookies([BUFF_ORIGIN])
             if not any(c.get("name") == "session" and c.get("value") for c in cookies):
                 set_buff_auth_expired(True)
@@ -682,7 +712,12 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
                 return False, "checkout_pending", checkout_block
             cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
             user_agent = read_buff_browser_user_agent(page) or saved_user_agent
-            update_buff_creds(cookie_str, user_agent=user_agent or None, source="playwright")
+            update_buff_creds(
+                cookie_str,
+                user_agent=user_agent or None,
+                source="playwright",
+                **_egress_commit_kwargs(binding),
+            )
             if not clear_buff_request_policy_after_verification(BUFF_ACCOUNT_ID):
                 return False, "policy_error", "BUFF 会话已验证，但请求熔断重置失败"
             set_buff_auth_expired(False)

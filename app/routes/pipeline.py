@@ -8,8 +8,49 @@ class ConfigBody(BaseModel):
     config: dict
     acknowledge_buff_reconciliation: bool = False
     buff_reconciliation_intent_id: str = ""
+
+
+def _buff_egress_start_blocker() -> dict:
+    """Fail locally before pipeline creation when BUFF route identity is unsafe."""
+
+    from app.config_loader import get_buff_credentials, load_app_config_validated
+    from app.services.buff_egress import (
+        BuffEgressError,
+        BuffEgressReauthRequired,
+        resolve_buff_egress,
+        validate_buff_credential_binding,
+    )
+
+    try:
+        binding = resolve_buff_egress(load_app_config_validated())
+        validate_buff_credential_binding(get_buff_credentials() or {}, binding)
+        return {}
+    except BuffEgressReauthRequired as exc:
+        return {
+            "code": exc.code,
+            "message": "BUFF 网络出口与当前登录凭据不一致，请先重新完成 BUFF 登录/安全验证",
+        }
+    except BuffEgressError as exc:
+        return {
+            "code": exc.code,
+            "message": "BUFF 网络出口当前不可用，请检查直连/系统代理设置后重试",
+        }
+    except Exception:
+        return {
+            "code": "BUFF_EGRESS_UNAVAILABLE",
+            "message": "无法安全确认 BUFF 网络出口，已阻止启动流水线",
+        }
+
+
 @router.post("/api/pipeline/start")
 def api_pipeline_start(body: ConfigBody):
+    egress_blocker = _buff_egress_start_blocker()
+    if egress_blocker:
+        return {
+            "ok": False,
+            "code": egress_blocker.get("code"),
+            "error": egress_blocker.get("message"),
+        }
     blocker = get_pipeline_start_blocker()
     # Let start_pipeline perform its one bounded exact payment-failure
     # reconciliation attempt.  It returns the same blocker when evidence is
@@ -25,6 +66,13 @@ def api_pipeline_start(body: ConfigBody):
         acknowledge_buff_reconciliation=body.acknowledge_buff_reconciliation,
         buff_reconciliation_intent_id=body.buff_reconciliation_intent_id,
     ):
+        egress_blocker = _buff_egress_start_blocker()
+        if egress_blocker:
+            return {
+                "ok": False,
+                "code": egress_blocker.get("code"),
+                "error": egress_blocker.get("message"),
+            }
         blocker = get_pipeline_start_blocker()
         if blocker:
             return {

@@ -18,6 +18,9 @@ DEFAULTS = {
         "pay_method": "alipay",
         "game": "csgo",
         "price_tolerance": 0.5,
+        # Authenticated BUFF browser + HTTP traffic must share one explicit
+        # egress binding.  Direct remains the backward-compatible default.
+        "egress_mode": "direct",
         # Optional ancillary POSTs add traffic and can themselves have an
         # unknown result. Keep seller reminders manual unless explicitly opted
         # in by an advanced user.
@@ -199,6 +202,14 @@ def _validate_ranges(cfg: dict) -> dict:
         if v < 0:
             warnings.warn(f"[config] buff.price_tolerance={v} 不能为负数，已修正为0")
             buff["price_tolerance"] = 0.0
+
+    egress_mode = str(buff.get("egress_mode") or "").strip().lower()
+    if egress_mode not in {"direct", "system_proxy"}:
+        warnings.warn(
+            f"[config] buff.egress_mode={egress_mode!r} 不受支持，已修正为 direct"
+        )
+        egress_mode = "direct"
+    buff["egress_mode"] = egress_mode
 
     if isinstance(inv.get("refresh_seconds"), (int, float)):
         v = inv["refresh_seconds"]
