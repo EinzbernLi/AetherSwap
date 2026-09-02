@@ -1,11 +1,10 @@
 """Public fail-closed read-only adapter facade.
 
 Ordinary construction remains exact-single-account binding. TASK-069 permits
-additional historical local lineage only when the adapter is constructed
-inside the exact recovery-only Host builder and the lineage object exactly
-matches that builder's locally derived persisted-ID set. No bearer secret is
-used or exposed; a forged lineage object has no authority outside that call
-context.
+additional historical local lineage only when construction occurs through the
+real public recovery-maintenance builder and its real private bridge builder,
+after current local-account and Steam credential identity admission. No bearer
+secret is used or exposed; a forged lineage object has no authority by itself.
 
 All parsing/evidence logic lives in ``_platform_readonly_core`` and remains
 unchanged from the pre-TASK-069 implementation.
@@ -40,11 +39,59 @@ class _RecoveryAccountLineage:
         )
 
 
+def _recovery_builder_context_matches(private_frame, current_account_id: str) -> bool:
+    if private_frame is None:
+        return False
+    public_frame = private_frame.f_back
+    if public_frame is None:
+        return False
+
+    from app.auto_offer import host_integration as host_integration
+
+    private_builder = getattr(
+        host_integration,
+        "_build_recovery_only_host_auto_offer_bridge",
+        None,
+    )
+    public_builder = getattr(
+        host_integration,
+        "build_host_recovery_only_maintenance",
+        None,
+    )
+    module_globals = vars(host_integration)
+    if private_builder is None or public_builder is None:
+        return False
+    if (
+        private_frame.f_code is not private_builder.__code__
+        or private_frame.f_globals is not module_globals
+        or private_frame.f_globals.get("_build_recovery_only_host_auto_offer_bridge")
+        is not private_builder
+        or public_frame.f_code is not public_builder.__code__
+        or public_frame.f_globals is not module_globals
+        or public_frame.f_globals.get("build_host_recovery_only_maintenance")
+        is not public_builder
+    ):
+        return False
+
+    private_locals = private_frame.f_locals
+    public_locals = public_frame.f_locals
+    return (
+        private_locals.get("account_id") == current_account_id
+        and public_locals.get("account_id") == current_account_id
+        and private_locals.get("account_steam_id")
+        == public_locals.get("account_steam_id")
+        and private_locals.get("steam_cookie_string")
+        == public_locals.get("cookie_string")
+        and private_locals.get("buff_client") is public_locals.get("buff_client")
+        and private_locals.get("store_path") == public_locals.get("store_path")
+    )
+
+
 def _make_recovery_account_lineage(
     current_account_id: str,
     persisted_account_ids: frozenset[str],
 ) -> _RecoveryAccountLineage:
-    """Create immutable lineage data only for the exact recovery Host builder."""
+    """Create lineage data only after the exact public recovery admission chain."""
 
     current = _require_identifier(current_account_id, "account_id")
     if type(persisted_account_ids) is not frozenset:
@@ -57,24 +104,11 @@ def _make_recovery_account_lineage(
     frame = inspect.currentframe()
     caller = None if frame is None else frame.f_back
     try:
-        from app.auto_offer import host_integration as host_integration
-
-        builder = getattr(
-            host_integration,
-            "_build_recovery_only_host_auto_offer_bridge",
-            None,
-        )
         caller_ids = None if caller is None else caller.f_locals.get(
             "persisted_account_ids"
         )
         if (
-            caller is None
-            or builder is None
-            or caller.f_code is not builder.__code__
-            or caller.f_globals is not vars(host_integration)
-            or caller.f_globals.get("_build_recovery_only_host_auto_offer_bridge")
-            is not builder
-            or caller.f_locals.get("account_id") != current
+            not _recovery_builder_context_matches(caller, current)
             or type(caller_ids) is not set
             or frozenset(caller_ids) != persisted_account_ids
         ):
@@ -113,13 +147,6 @@ def _accepted_account_ids_for(
     adapter_frame = None if frame is None else frame.f_back
     builder_frame = None if adapter_frame is None else adapter_frame.f_back
     try:
-        from app.auto_offer import host_integration as host_integration
-
-        builder = getattr(
-            host_integration,
-            "_build_recovery_only_host_auto_offer_bridge",
-            None,
-        )
         persisted_ids = None if builder_frame is None else builder_frame.f_locals.get(
             "persisted_account_ids"
         )
@@ -132,15 +159,7 @@ def _accepted_account_ids_for(
             else frozenset({current, *persisted_ids})
         )
         if (
-            builder_frame is None
-            or builder is None
-            or builder_frame.f_code is not builder.__code__
-            or builder_frame.f_globals is not vars(host_integration)
-            or builder_frame.f_globals.get(
-                "_build_recovery_only_host_auto_offer_bridge"
-            )
-            is not builder
-            or builder_frame.f_locals.get("account_id") != current
+            not _recovery_builder_context_matches(builder_frame, current)
             or builder_lineage is not recovery_lineage
             or expected != recovery_lineage.accepted_account_ids
         ):
