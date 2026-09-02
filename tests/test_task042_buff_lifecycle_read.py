@@ -154,6 +154,8 @@ def test_page_one_paying_is_success_and_reads_exactly_once():
     result = adapter(stub).execute(request())
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "paying"
+    assert type(result.evidence) is BuffOrderLifecycleEvidence
+    assert not isinstance(result.evidence, OfferStateEvidence)
     assert result.evidence.lifecycle is BuffOrderLifecycle.PAYING
     assert stub.history_calls == [(1, "csgo")]
     assert stub.steam_calls == 0
@@ -181,6 +183,8 @@ def test_page_one_refunded_is_terminal_success():
     result = adapter(stub).execute(request())
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "refunded"
+    assert type(result.evidence) is BuffOrderLifecycleEvidence
+    assert not isinstance(result.evidence, OfferStateEvidence)
     assert result.evidence.lifecycle is BuffOrderLifecycle.REFUNDED
     assert result.evidence.lifecycle.is_terminal is True
     assert stub.history_calls == [(1, "csgo")]

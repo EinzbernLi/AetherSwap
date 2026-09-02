@@ -795,7 +795,6 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
         PlatformCapability.READ_OFFER_STATE,
-        PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,

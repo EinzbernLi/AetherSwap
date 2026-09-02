@@ -407,43 +407,6 @@ def test_coordinator_result_unknown_never_uses_history_for_offer_identity():
     assert store.advance_calls == []
 
 
-def test_coordinator_result_unknown_uses_history_only_after_narrow_realtime_miss():
-    before = make_delivery(
-        DeliveryStatus.RESULT_UNKNOWN,
-        delivery_error="write_result_unknown",
-    )
-    store = SpyStore(before)
-    client = HistoryClient(
-        history_pages={1: history_page(items=[history_record(tradeofferid="9103")])},
-    )
-    read_adapter = BuffReadOnlyAdapter(
-        client,
-        account_id=IDENTITY["account_id"],
-    )
-    send_adapter = NeverSendAdapter()
-    coordinator = DeliveryCoordinator(
-        store,
-        {
-            PlatformCapability.READ_OFFER_STATE: read_adapter,
-            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: read_adapter,
-            PlatformCapability.SEND_OFFER: send_adapter,
-        },
-        timeout_seconds=5.0,
-        allow_writes=True,
-        clock=lambda: 14.0,
-    )
-
-    result = coordinator.recover_result_unknown_readonly(before)
-
-    assert result.persisted is True
-    assert result.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
-    assert result.after.snapshot.steam_tradeoffer_id == "9103"
-    assert result.after.snapshot.counterparty_steam_id == "76561198000000002"
-    assert client.steam_calls == 1
-    assert client.history_calls == [(1, "csgo")]
-    assert send_adapter.calls == []
-
-
 def test_coordinator_result_unknown_does_not_use_history_after_realtime_failure():
     before = make_delivery(
         DeliveryStatus.RESULT_UNKNOWN,
@@ -457,7 +420,6 @@ def test_coordinator_result_unknown_does_not_use_history_after_realtime_failure(
         store,
         {
             PlatformCapability.READ_OFFER_STATE: read_adapter,
-            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: read_adapter,
         },
         timeout_seconds=5.0,
         clock=lambda: (_ for _ in ()).throw(
@@ -470,48 +432,6 @@ def test_coordinator_result_unknown_does_not_use_history_after_realtime_failure(
     assert result.persisted is False
     assert result.decision.result is AutoOfferResult.BLOCKED
     assert client.history_calls == []
-
-
-def test_repeated_historical_misses_are_bounded_reads_and_never_send():
-    before = make_delivery(
-        DeliveryStatus.RESULT_UNKNOWN,
-        delivery_error="write_result_unknown",
-    )
-    pages = {
-        page_num: history_page(page_num=page_num, total_page=9)
-        for page_num in range(1, 4)
-    }
-    store = SpyStore(before)
-    client = HistoryClient(history_pages=pages)
-    read_adapter = BuffReadOnlyAdapter(client, account_id=IDENTITY["account_id"])
-    send_adapter = NeverSendAdapter()
-    coordinator = DeliveryCoordinator(
-        store,
-        {
-            PlatformCapability.READ_OFFER_STATE: read_adapter,
-            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: read_adapter,
-            PlatformCapability.SEND_OFFER: send_adapter,
-        },
-        timeout_seconds=5.0,
-        allow_writes=True,
-        clock=lambda: (_ for _ in ()).throw(
-            AssertionError("unresolved recovery must not read the clock")
-        ),
-    )
-
-    first = coordinator.recover_result_unknown_readonly(before)
-    second = coordinator.recover_result_unknown_readonly(before)
-
-    assert first.persisted is False
-    assert second.persisted is False
-    assert first.after == before
-    assert second.after == before
-    assert client.steam_calls == 2
-    assert client.history_calls == [
-        (page_num, "csgo") for _ in range(2) for page_num in range(1, 4)
-    ]
-    assert send_adapter.calls == []
-    assert store.advance_calls == []
 
 
 def test_coordinator_history_recovery_is_not_used_for_seller_awaiting_offer():

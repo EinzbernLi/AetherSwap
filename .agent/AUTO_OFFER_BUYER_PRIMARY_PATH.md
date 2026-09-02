@@ -31,6 +31,7 @@ The following are not production architecture and must not be reintroduced witho
 The historical TASK040 row remains audit evidence only. It is not a reason to add a second buyer recovery subsystem.
 
 BUFF historical reads remain valid only for independent order lifecycle/refund evidence where still used.
+The historical buyer-offer capability is physically absent from the current source.
 
 ## Complexity budget
 

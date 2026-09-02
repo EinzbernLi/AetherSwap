@@ -60,7 +60,6 @@ _READ_CAPABILITIES = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
         PlatformCapability.READ_OFFER_STATE,
-        PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.READ_INVENTORY_STATE,
         PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
@@ -1077,10 +1076,7 @@ class DeliveryCoordinator:
             and before.snapshot.steam_tradeoffer_id is None
             and platform_result.status is PlatformResultStatus.SUCCESS
             and platform_result.request.capability
-            in {
-                PlatformCapability.READ_OFFER_STATE,
-                PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
-            }
+            is PlatformCapability.READ_OFFER_STATE
             and type(platform_result.evidence) is OfferStateEvidence
         ):
             observed_at = self._now()
@@ -1249,13 +1245,6 @@ class DeliveryCoordinator:
             decision = self._plan(delivery, platform_result)
             return self._persist_read(delivery, decision, platform_result)
 
-        historical_capability = PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE
-        historical_adapter = self._adapters.get(historical_capability)
-        if historical_adapter is None:
-            decision = self._plan(delivery, platform_result)
-            return self._persist_read(delivery, decision, platform_result)
-        historical_request = self._make_request(delivery, historical_capability)
-        platform_result = self._execute(historical_adapter, historical_request)
         decision = self._plan(delivery, platform_result)
         return self._persist_read(delivery, decision, platform_result)
 
