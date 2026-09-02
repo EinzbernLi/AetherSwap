@@ -793,6 +793,7 @@ def test_active_builder_wires_exact_confirmation_stack_without_platform_io(
     kwargs = coordinator_calls[0][3]
     assert set(registry) == {
         PlatformCapability.READ_DELIVERY_DIRECTION,
+        PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
         PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,

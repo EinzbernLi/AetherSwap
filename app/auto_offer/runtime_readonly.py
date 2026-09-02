@@ -32,6 +32,7 @@ from app.auto_offer.steam_readonly_transport import (
 READONLY_RUNTIME_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
+        PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
@@ -157,6 +158,7 @@ def build_readonly_auto_offer_runtime(
 
         adapters = {
             PlatformCapability.READ_DELIVERY_DIRECTION: buff_adapter,
+            PlatformCapability.READ_BUYER_SEND_ELIGIBILITY: buff_adapter,
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,

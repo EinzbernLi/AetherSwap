@@ -182,17 +182,29 @@ class FreshUnknownBridge:
             )
             return SimpleNamespace(after=self.current)
         if status is DeliveryStatus.AWAITING_OFFER:
-            self.events.append("send")
-            self.current = StoredDelivery(
-                replace(
-                    delivery.snapshot,
-                    delivery_status=DeliveryStatus.RESULT_UNKNOWN,
-                    offer_attempted_at=1.0,
-                    delivery_error="write_result_unknown",
-                ),
-                delivery.revision + 1,
+            raise AssertionError("fresh buyer SEND must use explicit authority")
+        if status is DeliveryStatus.OFFER_ATTEMPTED:
+            self.events.append("realtime")
+            request = PlatformRequest(
+                purchase_id=PURCHASE_ID,
+                buff_order_id=ORDER_ID,
+                account_id=ACCOUNT_ID,
+                recipient_steam_id=RECIPIENT_STEAM_ID,
+                revision=delivery.revision,
+                capability=PlatformCapability.READ_OFFER_STATE,
+                timeout_seconds=1.0,
             )
-            return SimpleNamespace(after=self.current)
+            return SimpleNamespace(
+                before=delivery,
+                after=delivery,
+                persisted=False,
+                decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+                platform_result=PlatformResult(
+                    request,
+                    PlatformResultStatus.RESULT_UNKNOWN,
+                    "order_not_proven",
+                ),
+            )
         if status is DeliveryStatus.RESULT_UNKNOWN:
             self.events.append("recovery")
             self.current = StoredDelivery(
@@ -211,6 +223,42 @@ class FreshUnknownBridge:
                 decision=SimpleNamespace(result=AutoOfferResult.WAITING),
             )
         raise AssertionError(f"unexpected step from {status}")
+
+    def read_send_authority(self, delivery):
+        assert delivery.snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
+        return object()
+
+    def send_offer_with_authority(self, delivery, proof):
+        assert proof is not None
+        self.events.append("send")
+        self.current = StoredDelivery(
+            replace(
+                delivery.snapshot,
+                delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+                offer_attempted_at=1.0,
+                delivery_error=None,
+            ),
+            delivery.revision + 1,
+        )
+        request = PlatformRequest(
+            purchase_id=PURCHASE_ID,
+            buff_order_id=ORDER_ID,
+            account_id=ACCOUNT_ID,
+            recipient_steam_id=RECIPIENT_STEAM_ID,
+            revision=self.current.revision,
+            capability=PlatformCapability.SEND_OFFER,
+            timeout_seconds=1.0,
+        )
+        return SimpleNamespace(
+            before=delivery,
+            attempted=self.current,
+            after=self.current,
+            platform_result=PlatformResult(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "offer_created_unproven",
+            ),
+        )
 
     def recover_result_unknown_readonly(self, delivery):
         self.events.append("recovery_read")
@@ -341,14 +389,14 @@ def test_canary_send_result_unknown_stops_without_active_recovery(monkeypatch, t
         monkeypatch, tmp_path, bridge, permit
     )
 
-    assert integration.next_purchase_result([_host_row()]) is AutoOfferResult.RESULT_UNKNOWN
-    assert bridge.current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
+    assert integration.next_purchase_result([_host_row()]) is AutoOfferResult.WAITING
+    assert bridge.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
     assert bridge.events == ["direction", "send"]
     assert receipt_calls == []
 
-    assert integration.next_purchase_result([_host_row()]) is AutoOfferResult.RESULT_UNKNOWN
-    assert bridge.current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN
-    assert bridge.events == ["direction", "send"]
+    assert integration.next_purchase_result([_host_row()]) is AutoOfferResult.WAITING
+    assert bridge.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
+    assert bridge.events == ["direction", "send", "realtime"]
     assert receipt_calls == []
     owner_session.release_keep_fence()
 

@@ -288,6 +288,7 @@ def test_enabled_construction_is_zero_io_and_capabilities_are_exact():
     assert runtime.capabilities == frozenset(
         {
             PlatformCapability.READ_DELIVERY_DIRECTION,
+            PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
             PlatformCapability.READ_OFFER_STATE,
             PlatformCapability.READ_STEAM_TRADE_OFFER,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE,

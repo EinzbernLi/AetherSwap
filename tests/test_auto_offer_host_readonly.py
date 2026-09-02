@@ -307,6 +307,7 @@ def test_valid_construction_initializes_store_and_performs_no_io(monkeypatch, tm
         assert bridge.capabilities == frozenset(
             {
                 PlatformCapability.READ_DELIVERY_DIRECTION,
+                PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
                 PlatformCapability.READ_OFFER_STATE,
                 PlatformCapability.READ_STEAM_TRADE_OFFER,
                 PlatformCapability.READ_STEAM_COMPLETED_TRADE,
@@ -384,7 +385,7 @@ def test_repr_is_secret_safe_and_close_is_idempotent(monkeypatch, tmp_path):
     bridge = _build(monkeypatch, tmp_path)
     session = FakeSession.instances[0]
     text = repr(bridge)
-    assert ACCOUNT_ID in text and STEAM_ID in text and "capabilities=4" in text
+    assert ACCOUNT_ID in text and STEAM_ID in text and "capabilities=5" in text
     assert TOKEN not in text and COOKIE not in text and "fake-session" not in text
     bridge.close()
     bridge.close()

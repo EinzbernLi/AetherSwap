@@ -344,6 +344,7 @@ def test_fake_bare_success_fails_closed_for_the_same_exact_request():
     ("capability", "evidence"),
     [
         (PlatformCapability.READ_DELIVERY_DIRECTION, DeliveryDirectionEvidence()),
+        (PlatformCapability.READ_BUYER_SEND_ELIGIBILITY, DeliveryDirectionEvidence("buyer_sends_offer")),
         (PlatformCapability.READ_OFFER_STATE, OfferStateEvidence("offer-1", "76561198000000002")),
         (
             PlatformCapability.READ_INVENTORY_STATE,

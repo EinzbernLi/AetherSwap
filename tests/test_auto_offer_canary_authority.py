@@ -22,6 +22,12 @@ from app.auto_offer.canary_authority import (
     CanaryWriteBlockedError,
     CanaryWriteTarget,
 )
+from app.auto_offer.adapters import (
+    DeliveryDirectionEvidence,
+    PlatformCapability,
+    PlatformResult,
+    PlatformResultStatus,
+)
 from app.auto_offer.contracts import DeliveryMode, DeliverySnapshot, DeliveryStatus
 from app.auto_offer.store import StoredDelivery
 
@@ -878,15 +884,32 @@ def test_coordinator_persists_send_attempt_before_fenced_adapter_call():
             self.calls.append(request)
             raise AssertionError("adapter must not run")
 
+    class EligibilityAdapter:
+        capabilities = frozenset({PlatformCapability.READ_BUYER_SEND_ELIGIBILITY})
+
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, request):
+            self.calls.append(request)
+            return PlatformResult(
+                request,
+                PlatformResultStatus.SUCCESS,
+                evidence=DeliveryDirectionEvidence("buyer_sends_offer"),
+            )
+
     @contextmanager
     def blocked(_request):
         raise CanaryWriteBlockedError("blocked")
         yield
 
-    store, adapter = Store(), Adapter()
+    store, adapter, eligibility = Store(), Adapter(), EligibilityAdapter()
     coordinator = DeliveryCoordinator(
         store,
-        {PlatformCapability.SEND_OFFER: adapter},
+        {
+            PlatformCapability.READ_BUYER_SEND_ELIGIBILITY: eligibility,
+            PlatformCapability.SEND_OFFER: adapter,
+        },
         timeout_seconds=1.0,
         allow_writes=True,
         write_guard=blocked,
@@ -895,8 +918,10 @@ def test_coordinator_persists_send_attempt_before_fenced_adapter_call():
         expected_trade_offer_is_our_offer=True,
     )
     with pytest.raises(ReadOnlyCoordinatorBlockedError, match="canary_write_blocked"):
-        coordinator.step(item)
+        proof = coordinator.read_send_authority(item)
+        coordinator.send_offer_with_authority(item, proof)
     assert adapter.calls == []
+    assert len(eligibility.calls) == 1
     assert store.current.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
 
 

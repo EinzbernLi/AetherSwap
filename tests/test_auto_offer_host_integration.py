@@ -340,10 +340,9 @@ class NormalSendBridge(FakeBridge):
         after = StoredDelivery(
             replace(
                 attempted.snapshot,
-                delivery_status=DeliveryStatus.RESULT_UNKNOWN,
-                delivery_error="write_result_unknown",
+                delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
             ),
-            attempted.revision + 1,
+            attempted.revision,
         )
         self.current[delivery.snapshot.buff_order_id] = after
         self.send_events.append(("send", attempted.revision))
@@ -352,6 +351,122 @@ class NormalSendBridge(FakeBridge):
             attempted=attempted,
             platform_result=platform_result,
             after=after,
+        )
+
+
+class AttemptedSendBridge(FakeBridge):
+    def __init__(
+        self,
+        deliveries,
+        *,
+        realtime_status=PlatformResultStatus.RESULT_UNKNOWN,
+        realtime_detail="order_not_proven",
+        exact_offer=False,
+        eligible=True,
+    ):
+        super().__init__(deliveries)
+        self.realtime_status = realtime_status
+        self.realtime_detail = realtime_detail
+        self.exact_offer = exact_offer
+        self.eligible = eligible
+        self.realtime_calls = []
+        self.authority_calls = []
+        self.send_calls = []
+        self.cas_count = 0
+        self.proof = object()
+
+    def get_by_purchase_id(self, purchase_id):
+        return super().get_by_purchase_id(purchase_id)
+
+    def step(self, delivery):
+        if delivery.snapshot.delivery_status is not DeliveryStatus.OFFER_ATTEMPTED:
+            return super().step(delivery)
+        self.realtime_calls.append(delivery.snapshot.buff_order_id)
+        request = PlatformRequest(
+            purchase_id=delivery.snapshot.purchase_id,
+            buff_order_id=delivery.snapshot.buff_order_id,
+            account_id=delivery.snapshot.account_id,
+            recipient_steam_id=delivery.snapshot.recipient_steam_id,
+            revision=delivery.revision,
+            capability=PlatformCapability.READ_OFFER_STATE,
+            timeout_seconds=5.0,
+        )
+        if self.exact_offer:
+            after = StoredDelivery(
+                replace(
+                    delivery.snapshot,
+                    delivery_status=DeliveryStatus.OFFER_SENT,
+                    steam_tradeoffer_id="offer-exact",
+                    counterparty_steam_id="76561198000000002",
+                    offer_sent_at=12.0,
+                    delivery_error=None,
+                ),
+                delivery.revision + 1,
+            )
+            self.current[delivery.snapshot.buff_order_id] = after
+            return SimpleNamespace(
+                before=delivery,
+                after=after,
+                persisted=True,
+                decision=SimpleNamespace(result=AutoOfferResult.WAITING),
+                platform_result=PlatformResult(
+                    request,
+                    PlatformResultStatus.SUCCESS,
+                    evidence=OfferStateEvidence(
+                        "offer-exact", "76561198000000002"
+                    ),
+                ),
+            )
+        decision = (
+            AutoOfferResult.WAITING
+            if self.realtime_status
+            in {
+                PlatformResultStatus.RESULT_UNKNOWN,
+                PlatformResultStatus.TIMEOUT,
+                PlatformResultStatus.UNSUPPORTED,
+            }
+            else AutoOfferResult.BLOCKED
+        )
+        return SimpleNamespace(
+            before=delivery,
+            after=delivery,
+            persisted=False,
+            decision=SimpleNamespace(result=decision),
+            platform_result=PlatformResult(
+                request,
+                self.realtime_status,
+                self.realtime_detail,
+            ),
+        )
+
+    def read_send_authority(self, delivery):
+        self.authority_calls.append(delivery.snapshot.buff_order_id)
+        return self.proof if self.eligible else None
+
+    def send_offer_with_authority(self, delivery, proof):
+        assert proof is self.proof
+        self.send_calls.append(delivery.snapshot.buff_order_id)
+        self.proof = None
+        self.current[delivery.snapshot.buff_order_id] = delivery
+        request = PlatformRequest(
+            purchase_id=delivery.snapshot.purchase_id,
+            buff_order_id=delivery.snapshot.buff_order_id,
+            account_id=delivery.snapshot.account_id,
+            recipient_steam_id=delivery.snapshot.recipient_steam_id,
+            revision=delivery.revision,
+            capability=PlatformCapability.SEND_OFFER,
+            timeout_seconds=5.0,
+        )
+        self.current[delivery.snapshot.buff_order_id] = delivery
+        return SimpleNamespace(
+            before=delivery,
+            attempted=delivery,
+            platform_result=PlatformResult(
+                request,
+                PlatformResultStatus.RESULT_UNKNOWN,
+                "offer_created_unproven",
+            ),
+            after=delivery,
         )
 
 
@@ -1446,7 +1561,7 @@ def test_normal_accept_holds_goods_barrier_and_attempts_before_exactly_one_call(
     assert after.delivery_error == "write_result_unknown"
 
 
-def test_normal_send_is_one_host_barrier_action_and_stops_at_result_unknown(
+def test_normal_send_is_one_host_barrier_action_and_stops_at_offer_attempted(
     monkeypatch,
     tmp_path,
 ):
@@ -1479,21 +1594,180 @@ def test_normal_send_is_one_host_barrier_action_and_stops_at_result_unknown(
         [_host_row("order-1", db_id=41), _host_row("order-2", db_id=42)]
     )
 
-    assert outcome.result is AutoOfferResult.RESULT_UNKNOWN
+    assert outcome.result is AutoOfferResult.WAITING
     assert outcome.visited_order_ids == ("order-1",)
     assert bridge.send_events == [
         ("get", "buff:order-1", 5),
         ("read_send_authority", 5),
         ("send", 6),
+        ("get", "buff:order-1", 6),
     ]
     assert bridge.steps == []
     assert bridge.proof is None
     after = bridge.current["order-1"].snapshot
-    assert after.delivery_status is DeliveryStatus.RESULT_UNKNOWN
-    assert after.delivery_error == "write_result_unknown"
+    assert after.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
+    assert after.delivery_error is None
     assert after.steam_tradeoffer_id is None
     assert after.counterparty_steam_id is None
     assert receipt_writes == []
+
+
+def _attempted_send_integration(monkeypatch, tmp_path, bridge):
+    _patch_identity(monkeypatch)
+    db_path = _local_host_db(
+        tmp_path / "host.db",
+        ((41, "order-1", 1, None), (42, "order-2", 1, None)),
+    )
+    authority = host_integration.CanaryAuthority(
+        _root=tmp_path / "authority",
+        _host_db_path=db_path,
+    )
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    return host_integration.HostAutoOfferIntegration(bridge)
+
+
+def test_attempted_exact_realtime_offer_transitions_without_send(monkeypatch, tmp_path):
+    attempted = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_ATTEMPTED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = AttemptedSendBridge((attempted,), exact_offer=True)
+    integration = _attempted_send_integration(monkeypatch, tmp_path, bridge)
+
+    outcome = integration.run_delivery_tick([_host_row("order-1", db_id=41)])
+
+    assert outcome.result is AutoOfferResult.WAITING
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.realtime_calls == ["order-1"]
+    assert bridge.authority_calls == []
+    assert bridge.send_calls == []
+    after = bridge.current["order-1"]
+    assert after.revision == 6
+    assert after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT
+    assert after.snapshot.steam_tradeoffer_id == "offer-exact"
+
+
+def test_attempted_realtime_miss_then_eligibility_sends_once_without_cas(
+    monkeypatch, tmp_path
+):
+    attempted = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_ATTEMPTED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = AttemptedSendBridge(
+        (attempted, _stored("order-2")),
+        eligible=True,
+    )
+    integration = _attempted_send_integration(monkeypatch, tmp_path, bridge)
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=41), _host_row("order-2", db_id=42)]
+    )
+
+    assert outcome.result is AutoOfferResult.WAITING
+    assert outcome.visited_order_ids == ("order-1", "order-2")
+    assert bridge.realtime_calls == ["order-1"]
+    assert bridge.authority_calls == ["order-1"]
+    assert bridge.send_calls == ["order-1"]
+    assert bridge.cas_count == 0
+    assert bridge.current["order-1"] == attempted
+
+
+def test_attempted_missing_realtime_and_eligibility_is_safe_wait_for_unrelated_orders(
+    monkeypatch, tmp_path
+):
+    attempted = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_ATTEMPTED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = AttemptedSendBridge(
+        (attempted, _stored("order-2")),
+        eligible=False,
+    )
+    integration = _attempted_send_integration(monkeypatch, tmp_path, bridge)
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=41), _host_row("order-2", db_id=42)]
+    )
+
+    assert outcome.result is AutoOfferResult.WAITING
+    assert outcome.visited_order_ids == ("order-1", "order-2")
+    assert bridge.realtime_calls == ["order-1"]
+    assert bridge.authority_calls == ["order-1"]
+    assert bridge.send_calls == []
+    assert bridge.cas_count == 0
+    assert bridge.current["order-1"] == attempted
+
+
+@pytest.mark.parametrize(
+    "realtime_status",
+    [PlatformResultStatus.TIMEOUT, PlatformResultStatus.UNSUPPORTED],
+)
+def test_attempted_realtime_timeout_or_unsupported_is_safe_wait(
+    monkeypatch, tmp_path, realtime_status
+):
+    attempted = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_ATTEMPTED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = AttemptedSendBridge(
+        (attempted, _stored("order-2")),
+        realtime_status=realtime_status,
+        eligible=True,
+    )
+    integration = _attempted_send_integration(monkeypatch, tmp_path, bridge)
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=41), _host_row("order-2", db_id=42)]
+    )
+
+    assert outcome.result is AutoOfferResult.WAITING
+    assert outcome.visited_order_ids == ("order-1", "order-2")
+    assert bridge.authority_calls == []
+    assert bridge.send_calls == []
+    assert bridge.current["order-1"] == attempted
+
+
+@pytest.mark.parametrize(
+    "realtime_status",
+    [PlatformResultStatus.MALFORMED, PlatformResultStatus.FAILURE],
+)
+def test_attempted_realtime_malformed_or_identity_failure_blocks_without_send(
+    monkeypatch, tmp_path, realtime_status
+):
+    attempted = _stored(
+        "order-1",
+        status=DeliveryStatus.OFFER_ATTEMPTED,
+        mode=DeliveryMode.BUYER_SENDS_OFFER,
+        revision=5,
+    )
+    bridge = AttemptedSendBridge(
+        (attempted, _stored("order-2")),
+        realtime_status=realtime_status,
+        realtime_detail="identity_mismatch"
+        if realtime_status is PlatformResultStatus.FAILURE
+        else "malformed_payload",
+        eligible=True,
+    )
+    integration = _attempted_send_integration(monkeypatch, tmp_path, bridge)
+
+    outcome = integration.run_delivery_tick(
+        [_host_row("order-1", db_id=41), _host_row("order-2", db_id=42)]
+    )
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert outcome.visited_order_ids == ("order-1",)
+    assert bridge.authority_calls == []
+    assert bridge.send_calls == []
+    assert bridge.current["order-1"] == attempted
 
 
 def test_exact_result_unknown_recovery_ends_tick_before_normal_progression(

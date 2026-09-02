@@ -53,6 +53,13 @@ def request(**changes):
 
 def wait_send_request():
     return request(
+        capability=PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
+        recipient_steam_id=WAITING_BUYER_STEAM_ID,
+    )
+
+
+def direction_request():
+    return request(
         capability=PlatformCapability.READ_DELIVERY_DIRECTION,
         recipient_steam_id=WAITING_BUYER_STEAM_ID,
     )
@@ -506,9 +513,7 @@ def test_buff_multiple_exact_matches_are_malformed():
 def test_conflicting_order_aliases_are_malformed_without_buyer_fallback(payload):
     client = BuffStub([payload], wait_payload=[wait_send_record()])
 
-    result = buff_adapter(client).execute(
-        wait_send_request()
-    )
+    result = buff_adapter(client).execute(direction_request())
 
     assert result.status is PlatformResultStatus.MALFORMED
     assert result.detail == "malformed_payload"
@@ -706,7 +711,7 @@ def test_seller_direction_success_is_authoritative_and_skips_buyer_fallback():
     assert client.wait_calls == []
 
 
-def test_buyer_fallback_uses_exact_wait_send_id_identity_and_state():
+def test_buyer_send_eligibility_uses_exact_wait_send_id_identity_and_state():
     client = BuffStub(
         payload=[],
         wait_payload=[wait_send_record()],
@@ -716,6 +721,7 @@ def test_buyer_fallback_uses_exact_wait_send_id_identity_and_state():
     assert result.detail == "buyer_sends_offer"
     assert result.evidence == DeliveryDirectionEvidence("buyer_sends_offer")
     assert client.wait_calls == [("csgo", 730)]
+    assert client.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -732,7 +738,7 @@ def test_buyer_fallback_uses_exact_wait_send_id_identity_and_state():
         ],
     ],
 )
-def test_buyer_fallback_only_follows_unknown_seller_result(seller_payload):
+def test_buyer_send_eligibility_reads_only_wait_send(seller_payload):
     client = BuffStub(seller_payload, wait_payload=[wait_send_record()])
     result = buff_adapter(client).execute(
         wait_send_request()
@@ -740,6 +746,7 @@ def test_buyer_fallback_only_follows_unknown_seller_result(seller_payload):
     assert result.status is PlatformResultStatus.SUCCESS
     assert result.detail == "buyer_sends_offer"
     assert client.wait_calls == [("csgo", 730)]
+    assert client.calls == 0
 
 
 @pytest.mark.parametrize("error", [TimeoutError("slow"), RuntimeError("failed")])

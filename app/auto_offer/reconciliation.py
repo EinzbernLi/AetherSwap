@@ -642,6 +642,20 @@ def plan_read_evidence_transition(
 
     if snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER:
         if snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER:
+            if (
+                request.capability
+                is PlatformCapability.READ_BUYER_SEND_ELIGIBILITY
+                and type(evidence) is DeliveryDirectionEvidence
+                and evidence.direction == "buyer_sends_offer"
+                and evidence.counterparty_steam_id is None
+            ):
+                return _decision(
+                    delivery,
+                    None,
+                    AutoOfferResult.WAITING,
+                    True,
+                    "buyer_send_eligibility_proven",
+                )
             return _blocked(delivery, "write_capability_required")
         if (
             snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER

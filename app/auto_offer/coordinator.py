@@ -27,7 +27,6 @@ from .adapters import (
     PlatformRequest,
     PlatformResult,
     PlatformResultStatus,
-    SendOfferEvidence,
     SellerOrderItemEvidence,
     SteamTradeOfferEvidence,
     SteamTradeOfferLifecycle,
@@ -63,6 +62,7 @@ _READ_CAPABILITIES = frozenset(
         PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.READ_INVENTORY_STATE,
         PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
+        PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
     }
@@ -334,7 +334,7 @@ def _required_read_capability(delivery: StoredDelivery) -> PlatformCapability:
         return PlatformCapability.READ_DELIVERY_DIRECTION
     if status is DeliveryStatus.AWAITING_OFFER:
         if mode is DeliveryMode.BUYER_SENDS_OFFER:
-            raise ReadOnlyCoordinatorBlockedError("write_capability_required")
+            return PlatformCapability.READ_BUYER_SEND_ELIGIBILITY
         if mode is DeliveryMode.SELLER_SENDS_OFFER:
             return PlatformCapability.READ_OFFER_STATE
     if status is DeliveryStatus.OFFER_ATTEMPTED:
@@ -605,10 +605,21 @@ class SendOfferStepResult:
             raise ReadOnlyCoordinatorError("invalid_send_step_result") from exc
         if (
             self.before.snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
-            or self.before.snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
+            or self.before.snapshot.delivery_status
+            not in {
+                DeliveryStatus.AWAITING_OFFER,
+                DeliveryStatus.OFFER_ATTEMPTED,
+            }
             or self.attempted.snapshot.delivery_status
             is not DeliveryStatus.OFFER_ATTEMPTED
-            or self.attempted.revision != self.before.revision + 1
+            or self.attempted.revision
+            != self.before.revision
+            + (
+                1
+                if self.before.snapshot.delivery_status
+                is DeliveryStatus.AWAITING_OFFER
+                else 0
+            )
             or not _same_delivery_identity(self.before, self.attempted)
             or not _same_delivery_identity(self.attempted, self.after)
             or not _request_matches_delivery(
@@ -616,21 +627,13 @@ class SendOfferStepResult:
             )
             or self.platform_result.request.capability
             is not PlatformCapability.SEND_OFFER
-            or self.after.revision != self.attempted.revision + 1
+            or self.after != self.attempted
         ):
             raise ReadOnlyCoordinatorError("invalid_send_step_result")
-        if self.after.snapshot.delivery_status is DeliveryStatus.OFFER_SENT:
-            if (
-                self.platform_result.status is not PlatformResultStatus.SUCCESS
-                or type(self.platform_result.evidence) is not SendOfferEvidence
-                or self.after.snapshot.steam_tradeoffer_id
-                != self.platform_result.evidence.steam_tradeoffer_id
-            ):
-                raise ReadOnlyCoordinatorError("invalid_send_step_result")
-        elif self.after.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
-            if self.after.snapshot.delivery_error != "write_result_unknown":
-                raise ReadOnlyCoordinatorError("invalid_send_step_result")
-        else:
+        if (
+            self.after.snapshot.steam_tradeoffer_id is not None
+            or self.after.snapshot.counterparty_steam_id is not None
+        ):
             raise ReadOnlyCoordinatorError("invalid_send_step_result")
 
 
@@ -1170,8 +1173,11 @@ class DeliveryCoordinator:
         decision = self._plan(delivery, platform_result)
         return self._persist_read(delivery, decision, platform_result)
 
-    def read_send_authority(self, delivery: StoredDelivery) -> _NormalSendProof:
-        """Mint one process-local proof from one exact fresh BUFF waiting read."""
+    def read_send_authority(
+        self,
+        delivery: StoredDelivery,
+    ) -> _NormalSendProof | None:
+        """Read exact BUFF buyer-send eligibility and mint an optional proof."""
 
         self._normal_send_proof = None
         self._normal_confirmation_proof = None
@@ -1183,19 +1189,30 @@ class DeliveryCoordinator:
         snapshot = delivery.snapshot
         if (
             snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
-            or snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
+            or snapshot.delivery_status
+            not in {
+                DeliveryStatus.AWAITING_OFFER,
+                DeliveryStatus.OFFER_ATTEMPTED,
+            }
             or snapshot.steam_tradeoffer_id is not None
             or snapshot.counterparty_steam_id is not None
         ):
             raise ReadOnlyCoordinatorBlockedError("send_authority_not_available")
-        adapter = self._adapters.get(PlatformCapability.READ_DELIVERY_DIRECTION)
+        capability = PlatformCapability.READ_BUYER_SEND_ELIGIBILITY
+        adapter = self._adapters.get(capability)
         if adapter is None:
             raise ReadOnlyCoordinatorBlockedError("send_authority_adapter_required")
         request = self._make_request(
             delivery,
-            PlatformCapability.READ_DELIVERY_DIRECTION,
+            capability,
         )
         platform_result = self._execute(adapter, request)
+        if platform_result.status in {
+            PlatformResultStatus.RESULT_UNKNOWN,
+            PlatformResultStatus.TIMEOUT,
+            PlatformResultStatus.UNSUPPORTED,
+        }:
+            return None
         evidence = platform_result.evidence
         if (
             platform_result.status is not PlatformResultStatus.SUCCESS
@@ -1626,8 +1643,6 @@ class DeliveryCoordinator:
     def _step_send_offer(
         self,
         delivery: StoredDelivery,
-        *,
-        allow_success_binding: bool,
     ) -> SendOfferStepResult:
         if not self._allow_writes:
             raise ReadOnlyCoordinatorBlockedError("write_capability_required")
@@ -1635,48 +1650,22 @@ class DeliveryCoordinator:
         if adapter is None:
             raise ReadOnlyCoordinatorBlockedError("send_offer_adapter_required")
 
-        attempted_at = self._now()
-        attempted_target = replace(
-            delivery.snapshot,
-            delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
-            offer_attempted_at=attempted_at,
-        )
-        attempted = self._advance(delivery, attempted_target)
+        if delivery.snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER:
+            attempted_at = self._now()
+            attempted_target = replace(
+                delivery.snapshot,
+                delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+                offer_attempted_at=attempted_at,
+            )
+            attempted = self._advance(delivery, attempted_target)
+        elif delivery.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED:
+            attempted = delivery
+        else:
+            raise ReadOnlyCoordinatorBlockedError("send_authority_not_available")
 
         request = self._make_request(attempted, PlatformCapability.SEND_OFFER)
         platform_result = self._execute(adapter, request)
-        if (
-            allow_success_binding
-            and platform_result.status is PlatformResultStatus.SUCCESS
-            and type(platform_result.evidence) is SendOfferEvidence
-        ):
-            try:
-                sent_at = self._now()
-            except ReadOnlyCoordinatorError:
-                after = self._persist_result_unknown(attempted)
-                return SendOfferStepResult(
-                    before=delivery,
-                    attempted=attempted,
-                    platform_result=platform_result,
-                    after=after,
-                )
-            if sent_at < attempted_at:
-                after = self._persist_result_unknown(attempted)
-                return SendOfferStepResult(
-                    before=delivery,
-                    attempted=attempted,
-                    platform_result=platform_result,
-                    after=after,
-                )
-            sent_target = replace(
-                attempted.snapshot,
-                delivery_status=DeliveryStatus.OFFER_SENT,
-                steam_tradeoffer_id=platform_result.evidence.steam_tradeoffer_id,
-                offer_sent_at=sent_at,
-            )
-            after = self._advance(attempted, sent_target)
-        else:
-            after = self._persist_result_unknown(attempted)
+        after = attempted
         return SendOfferStepResult(
             before=delivery,
             attempted=attempted,
@@ -1689,7 +1678,7 @@ class DeliveryCoordinator:
         delivery: StoredDelivery,
         proof: object,
     ) -> SendOfferStepResult:
-        """Consume one exact normal proof and perform one unknown-result SEND."""
+        """Consume one exact normal proof and perform one bounded SEND."""
 
         current_proof = self._normal_send_proof
         self._normal_send_proof = None
@@ -1715,12 +1704,16 @@ class DeliveryCoordinator:
         snapshot = delivery.snapshot
         if (
             snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
-            or snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
+            or snapshot.delivery_status
+            not in {
+                DeliveryStatus.AWAITING_OFFER,
+                DeliveryStatus.OFFER_ATTEMPTED,
+            }
             or snapshot.steam_tradeoffer_id is not None
             or snapshot.counterparty_steam_id is not None
         ):
             raise ReadOnlyCoordinatorBlockedError("send_authority_not_available")
-        return self._step_send_offer(delivery, allow_success_binding=False)
+        return self._step_send_offer(delivery)
 
     def confirm_offer_with_authority(
         self,
@@ -1819,19 +1812,6 @@ class DeliveryCoordinator:
         self._seller_accept_proof_binding = None
         _validate_delivery(delivery)
         self._read_current(delivery)
-        if (
-            delivery.snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
-            and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
-        ):
-            self._confirmation_identity_proof = None
-            if (
-                self._expected_trade_offer_counterparty_steam_id is None
-                or self._expected_trade_offer_is_our_offer is None
-            ):
-                raise ReadOnlyCoordinatorBlockedError(
-                    "normal_send_authority_required"
-                )
-            return self._step_send_offer(delivery, allow_success_binding=True)
         if (
             self._allow_confirmation_writes
             and delivery.snapshot.delivery_status

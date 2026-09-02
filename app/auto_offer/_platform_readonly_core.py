@@ -53,6 +53,7 @@ BUFF_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_SELLER_OFFER_ITEM,
         PlatformCapability.READ_BUFF_ORDER_LIFECYCLE,
+        PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
     }
 )
 STEAM_INVENTORY_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
@@ -544,6 +545,8 @@ class BuffReadOnlyAdapter:
 
         if request.capability is PlatformCapability.READ_BUFF_ORDER_LIFECYCLE:
             return self._execute_order_lifecycle(request)
+        if request.capability is PlatformCapability.READ_BUYER_SEND_ELIGIBILITY:
+            return self._execute_buyer_wait_send(request)
 
         raw = _call_read(self._client.get_steam_trades)
         if isinstance(raw, _ReadFailure):
