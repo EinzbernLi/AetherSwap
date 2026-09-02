@@ -1,4 +1,4 @@
-schema_version: "1.1"
+schema_version: "0.4"
 project: AetherSwap
 
 branches:
@@ -135,3 +135,17 @@ lprl_boundary:
   no_local_materialization_without_separate_authorization: true
   no_snapshot_gate_retirement_migration_or_reclamation_without_separate_authorization: true
 
+local_resource_policy:
+  mode: planning_only
+  project_root:
+    source: owner_supplied
+    absolute_path_in_git: false
+    confirmed_for_current_local_runtime: false
+  require_local_filesystem_capability_for_inspection: true
+  require_local_filesystem_capability_for_write: true
+  allow_agent_to_choose_or_relocate_project_root: false
+  allow_write_outside_owner_supplied_project_root: false
+  planning_only_authorizes_local_inspection: false
+  planning_only_authorizes_local_write: false
+  tracking_authorizes_migration_or_cleanup: false
+  first_local_write_requires_explicit_owner_authorization: true

@@ -1,26 +1,30 @@
 schema_version: "0.6"
-project: AetherSwap
-adoption_issue_ref: "github:EinzbernLi/AetherSwap#187@5466938417"
-adopted_from_code_ref: "integration/auto-buyer-offer@ee50f7cdeb376fa85c662812ca03f2a3e29ff74c"
 
-central_governance:
+governance:
   repository: EinzbernLi/agent-dev-governance
-  version: "0.3.12"
-  ref: d3d3e943e186f3aec16e788df95454106784702d
-  follow_main: false
-  note: "v0.3.12 preserves GitHub durable Task/Result/Validation/Acceptance authority, project-local policy layering, and bounded Worker/Validator coordination without granting a worker Lead authority."
+  protocol_version: "0.3.18"
+  pinned_ref: aff6ff205eca64c594cc10b67a3454a765076bb0
+  release_version_path: VERSION
+  release_compatibility_path: GOVERNANCE_RELEASE.yaml
+
+project_policy:
+  local_policy_path: .agent/LOCAL_POLICY.yaml
+  remains_downstream_local: true
+  may_add_or_tighten_constraints: true
+  may_weaken_central_invariants: false
+
+policy_refs:
+  takeover_reconciliation: docs/context-continuity/TAKEOVER_RECONCILIATION_GATE.md
+  governance_currency: docs/project-adoption/GOVERNANCE_CURRENCY_PROTOCOL.md
 
 modules:
   lprl:
+    enabled: true
     repository: EinzbernLi/agent-dev-governance
     version: "v0.2.4-pilot"
-    ref: 5f22e63414374b64ebbf4bd91601ede2f54e6f65
-    pin_separately: true
-    note: "This pin adds deterministic lprl-cjson-v1 structured digests; it does not itself authorize local Facts mutation, Snapshot/Gate, retirement, migration, cleanup, reclamation, or REAL-WRITE."
-
-task_result_fact_source:
-  mode: github_issue_pr
-  mirror_full_task_result_bodies_into_agent_files: false
+    pinned_ref: 5f22e63414374b64ebbf4bd91601ede2f54e6f65
+    root_path: docs/local-resource-lifecycle
+    version_path: docs/local-resource-lifecycle/LPRL_SPEC.md
 
 update_policy:
   mode: manual_pinned
@@ -39,26 +43,8 @@ update_policy:
   signal_marker: "[GOVERNANCE-UPDATE-SIGNAL]"
   optional_private_source_secret: GOVERNANCE_SOURCE_TOKEN
 
-project_local_calibration:
-  enabled: true
-  state_transport: github_issue
-  state_is_derived_cache_only: true
-  state_is_task_result_validation_acceptance_authority: false
-  downstream_extractor_path: .agent/tools/project-calibration.py
-  downstream_workflow_path: .github/workflows/project-calibration.yml
-  upstream_export_default: false
-  central_telemetry_required: false
-  adopter_registration_required: false
-
-adoption_rules:
-  project_specific_policy_file: .agent/LOCAL_POLICY.yaml
-  current_state_file: .agent/PROJECT_STATE.md
-  bootstrap_file: .agent/BOOTSTRAP.md
-  lead_claim_sink: "github:EinzbernLi/AetherSwap#149"
-  legacy_project_governance_is_compatibility_evidence: true
-  ordinary_runtime_capabilities_are_session_state: true
-  governance_upgrade_requires_explicit_review: true
-  one_active_project_lead: true
-  task_scoped_workers_do_not_claim_project_lead: true
-  lead_handoff_requires_explicit_owner_intent: true
-
+privacy:
+  register_project_with_upstream: false
+  send_project_specific_facts_to_upstream: false
+  send_usage_telemetry_to_upstream: false
+  private_source_secret_remains_downstream_local: true

@@ -1,179 +1,48 @@
 # AetherSwap Current Project State
 
-Status: **Phase-A candidate for central governance v0.3.12; PF-014 preserved; G17 Web Lead ACTIVE; TASK-050 authority unchanged; live sent-history actions remain separately gated**
-State date: **2026-08-30**
+Status: **ordinary governance 0.3.18 adoption candidate; G20 remains canonical Project Lead; TASK-083/TASK-084 complete; TASK-082 implementation complete on its isolated branch and not merged; REAL-WRITE CLOSED**
+State date: **2026-09-03**
 
-This is a compact current-state entry point, not a transcript. Newer exact GitHub Issue/PR/Lead records always supersede stale prose here.
+This file is a compact recovery entrypoint. Newer exact GitHub Task/Result/Review/Acceptance, branch, CI, and Lead-sink facts supersede this convenience summary.
 
 ## 1. Current code line
 
 - Active development branch: `integration/auto-buyer-offer`.
-- Phase-A frozen integration base: `ee50f7cdeb376fa85c662812ca03f2a3e29ff74c`; this branch does not redefine the active integration line.
-- Read GitHub for the current integration head; do not treat a recorded adoption base as permanent current-head truth.
-- `main` is not the active Auto Offer integration line.
-- `integration/auto-buyer-offer -> main` requires explicit OWNER approval.
+- TASK-085 frozen base: commit `1e5005e8688a5ef67cd992e1123cd0e12cd40947`, tree `37a966a53e2b9256c33fcc07bdc11f8a948c45de`.
+- The current integration head must always be re-read before authority-bearing work; a later material head does not silently re-anchor a running Task.
+- `integration/auto-buyer-offer -> main` remains explicitly OWNER-gated.
 
-## 2. Governance baseline
+## 2. Governance and local policy
 
-Ordinary governance and LPRL are separately pinned.
+- Ordinary governance candidate pin: `EinzbernLi/agent-dev-governance` `0.3.18@aff6ff205eca64c594cc10b67a3454a765076bb0`.
+- Update mode remains `manual_pinned`: no proactive update workflow, no follow-main, no automatic adoption or pin advance.
+- `.agent/LOCAL_POLICY.yaml` remains the project-specific stricter layer for Owner gates, REAL-WRITE, product safety, concurrency, verification, calibration, and local-resource boundaries.
+- Project-local calibration remains enabled as a downstream-local derived routing cache only; it is not Task/Result/Acceptance authority and is not exported upstream.
+- LPRL remains independently pinned exactly to `v0.2.4-pilot@5f22e63414374b64ebbf4bd91601ede2f54e6f65`; ordinary-governance adoption does not repin or reinterpret it.
+- No accepted LPRL Control Snapshot/Gate/Retirement/Migration authority exists for this phase, and no local-resource mutation is authorized by governance adoption.
 
-Current ordinary governance:
+## 3. Project Lead continuity
 
-- central governance candidate: `EinzbernLi/agent-dev-governance@d3d3e943e186f3aec16e788df95454106784702d` (`v0.3.12`);
-- PF-014 durable re-anchor semantics remain preserved by the accepted 0.3.12 coordination/adoption rules;
-- runtime-local planning/memory/session/IDE/checkpoint/scratch is non-authoritative execution aid and provisional until durable re-anchor;
-- durable Task contract and durable project/control facts outrank executor-local planning;
-- complete formal Task/evidence contracts remain in GitHub; activation uses short pointers;
-- after durable re-anchor, role-stable Worker/Validator sessions may be reused by default; a fresh conversation is mandatory only when the Task/evidence contract requires freshness or identity isolation;
-- bounded Worker/Validator sessions may use platform-native internal subagents under parent accountability, but children remain below the governance role layer and do not inherit Lead authority or widen scope/permissions/result sink;
-- executor self-check and same-parent child review are execution evidence, not governance-level independent validation; formal independent validation requires substantive independence but not a brand-new conversation unless the contract requires freshness;
-- durable completion requires the required Result to exist in the canonical sink and be read back before acceptance;
-- Source identity, physical Location, controlled Workspace, and runtime Deployment remain distinct;
-- stale candidate currency is separate from reusable evidence: stale source cannot be accepted as current merely because evidence may be reusable;
-- safe pre-anchor bounded diagnostics may run only when known no-write or isolated, offline/no network-platform-business effect, and they remain provisional;
-- pre-anchor evidence may be reused only after exact input/baseline plus unchanged evidence/test contract are reconciled/revalidated; otherwise rerun;
-- authority-bearing/formal Task execution, dispatch, mutation, network/platform/business action, protected-runtime mutation, and durable PASS/Acceptance require applicable durable re-anchor and Lead activation;
-- if expected `G(N+1)` is missing/unverifiable, takeover did not complete: prior valid `G(N)` remains authoritative until a successful retry completes claim write, reread/uniqueness, and fresh capability probe;
-- one Active project Lead + bounded same-project Web/Codex/Luna/Terra workers remains the project model;
-- `parallel workers != parallel Leads`; Lead owns integration and final acceptance;
-- actual project Lead handoff still requires explicit OWNER intent.
+- Canonical Lead sink: `github:EinzbernLi/AetherSwap#149`.
+- Current durable control is G20: claim `#149@5502768640`, activation verification `#149@5502770266`.
+- #149 is authoritative over this convenience prose. A bounded Worker/Validator Task does not transfer Project Lead authority.
 
-LPRL remains separately pinned:
+## 4. Current work
 
-- `EinzbernLi/agent-dev-governance@5f22e63414374b64ebbf4bd91601ede2f54e6f65` (`v0.2.4-pilot`), with canonical digest profile `lprl-cjson-v1` now available.
-- The accepted #156 16-file factual payload remains carry-forward/reusable; this repin does not rematerialize or reinterpret it.
-- Facts canonical digest preparation remains a later separate Task.
-- `control_snapshot_created: false`; Gate/Retirement authority is absent; `proven_retirable_set: []`; safe reclaimable bytes remain not evaluated.
+- TASK-083/#234 + PR #235: completed slimming pass.
+- TASK-084/#236 + PR #238: completed second slimming pass.
+- TASK-082/#233 exact implementation revision `#233@5510226684` has been executed by a separate bounded implementation worker on `task/082-steamauto-parity`; its implementation result is `#233@5511772049`. It is not merged into `integration/auto-buyer-offer` at this state.
+- TASK-085/#240 remains governance/control-plane adoption only. This Worker does not modify, rebase, dispatch, merge, or otherwise absorb TASK-082 product work.
 
-The ordinary governance repin does not grant local-resource lifecycle authority and does not change REAL-WRITE.
+## 5. Safety and authorization
 
-## 3. Current Lead / control state
+- `REAL-WRITE: CLOSED`.
+- Real Steam/BUFF writes, payments, SEND/ACCEPT/CONFIRM, authenticated probes when separately gated, protected local-resource lifecycle actions, and integration->main all retain their exact OWNER authorization gates.
+- Generic wording such as “继续/开始/可以” does not widen those gates.
+- Protected historical checkouts/runtimes must not be reset, cleaned, repurposed, migrated, retired, or reclaimed by this governance task.
 
-Canonical sink: Issue #149.
+## 6. Immediate continuation
 
-Current exact state at this adoption:
-
-- G15 claim `5452116330` was a historical task-scoped LPRL-materialization Lead state;
-- OWNER subsequently clarified that the separate file-management/LPRL line is not intended to own the Aether project Lead while this Sol/Web session owns the Aether functional line;
-- G17 claim `5461906236`, parent G16, is the current Web Aether Lead under `normal_project_continuation`;
-- G17 activation verify `5461907917` confirms uniqueness; #149 remains canonical and must be reread before authority-sensitive final acceptance to detect any newer claim;
-- runtime: Web / GPT-5.6 Sol;
-- TASK-050 offline/program development is within G17 scope;
-- file-management/LPRL may run as a separately bounded worker/workstream but not as a sibling Aether Lead;
-- live authenticated one-shot remains separately gated;
-- REAL-WRITE remains CLOSED;
-- integration -> main remains OWNER-gated.
-
-This section is a convenience snapshot only. Always reread #149 before takeover, authority-sensitive execution, and final governance acceptance; newer canonical evidence wins.
-
-## 4. Lead vs Worker launch semantics
-
-Formal project takeover examples:
-
-```text
-接管 Aether 的开发，我们继续。
-把 Aether 项目 Lead 移交给 Codex。
-```
-
-These enter the durable re-anchor / Lead Activation transaction.
-
-Canonical bounded Task activation:
-
-```text
-执行 <task_ref>；先读取 Issue/指定 comment；作为该 Task 的执行者，不接管项目 Lead。
-```
-
-A formal Task does not require a fresh conversation by default after durable re-anchor. Lead guidance stays short: `reuse_existing`, `recommend_new`, or `must_be_fresh`; only a Task/evidence contract requiring freshness or identity isolation makes a new conversation mandatory.
-
-A bounded Worker/Validator may use platform-native internal subagents under the parent session's accountability. Internal children do not inherit Lead authority, widen Task scope/permissions/result sink, or earn governance-level independent-validation credit merely by being different children. A child becomes a formal Worker/Validator only with a distinct durable role/Result contract.
-
-An actual project Lead handoff requires explicit OWNER intent to move the **project Lead**. `接管 TASK` / `执行 TASK` / `continue TASK` does not itself transfer Lead. Formal independent validation requires substantive independence, but a new conversation is not required unless the Task/evidence contract says so. Active Aether Lead retains final acceptance.
-
-## 5. Parallel workstreams
-
-Same-project workers may run concurrently only after the Active Lead marks each Task `parallel_safe` and verifies:
-
-- exact frozen baseline;
-- declared dependencies and no unmet ordering dependency;
-- pairwise disjoint substantive write scopes;
-- isolated write surface for implementation work;
-- no same-file/shared-mutable-state multiwriter.
-
-Read overlap and unambiguous append-only Result comments are allowed. Merge conflict is not a coordination mechanism. Lead owns rebase/replan/serialisation, integration order and acceptance.
-
-## 6. TASK-050 current state
-
-Issue #130 has been reconciled to the Steam sent-history architecture.
-
-Merged:
-
-- Slice A / PR #155 -> merge `1a62c7b40c784543b398217df4bb17e365ac19c0`, exact-head CI `2180/2180` PASS.
-  - BUFF buy-order history retired as Trade Offer identity source.
-  - lifecycle/refund history preserved.
-- Slice B / PR #158 -> merge `f3ba4dd8746d299e87d01f5e06d01eca5a2dbd93`, exact-head CI `2215/2215` PASS.
-  - normalized sent-offer discovery/binding contract exists.
-  - 0 candidate -> no binding / caller may WAIT.
-  - exactly 1 candidate -> eligible for exact `GetTradeOffer` closure.
-  - 2+ -> ambiguity / fail closed.
-
-Current target flow:
-
-```text
-persist OFFER_ATTEMPTED + offer_attempted_at
--> exactly one buyer SEND
--> RESULT_UNKNOWN when immutable offer identity is not durably proven
--> bounded Steam sent-history discovery
--> 0 / 1 / 2+
--> unique candidate exact GetTradeOffer closure
--> one Store CAS bind
--> existing confirmation / lifecycle / completed-trade receipt flow
-```
-
-TASK-050 live/authenticated actions remain separately gated by their exact durable packets and OWNER authorization. Governance 0.3.12 adoption does not authorize, repeat, or widen any such live action.
-
-## 7. Codex ↔ GitHub reconciliation
-
-Cross-runtime audit is recorded in #130 comment `5452399614`.
-
-- TASK-042 and TASK-047 production work are represented in GitHub history and current integration descendants.
-- prior TASK-050 production-simulation branch/commit is not repository-resolvable and must not be reconstructed from prose.
-- exact local evidence must be reconciled to current source/baseline and its evidence/test contract before reuse; local planning or checkpoint state alone is never authority.
-
-## 8. Safety state
-
-`REAL-WRITE GATE: CLOSED`
-
-Still requires exact separate OWNER authority where applicable:
-
-- live authenticated Steam/BUFF schema/probe requests marked separately gated by Task;
-- Steam/BUFF SEND/ACCEPT/CONFIRM/payment/purchase/platform mutation;
-- destructive local-resource migration/retirement/cleanup/reclamation;
-- integration -> main;
-- actual project Lead handoff.
-
-No generic “continue” instruction opens these gates.
-
-## 9. Cold-start / durable re-anchor rule
-
-Runtime-local continuity context may restore first, but it is non-authoritative. Before authority-bearing work, a project Lead takeover/resume follows:
-
-```text
-runtime-local context (provisional)
--> durable project/control facts
--> latest valid G(N)
--> exactly one parent-bound G(N+1)
--> canonical reread + uniqueness
--> fresh Runtime Capability Probe
--> ACTIVE
-```
-
-If `G(N+1)` is absent or unverifiable, the prior valid `G(N)` remains authoritative. Worker/Validator sessions do not create the next Lead generation merely because they execute a bounded Task.
-
-## 10. Next safe actions
-
-1. Continue bounded governance or TASK-050 offline/program work under the current G17 scope after reconciling current durable facts.
-2. Reuse role-stable Worker/Validator sessions where appropriate; require freshness only when the Task/evidence contract does.
-3. Treat any pre-anchor diagnostic evidence as provisional and apply the exact-input/baseline/test-contract reuse rule.
-4. Do not execute separately gated live Steam/BUFF actions without their exact OWNER authorization.
-5. Do not merge `integration/auto-buyer-offer` to `main` without separate OWNER approval.
-
+1. Finish TASK-085 Worker validation, PR, exact-head CI, and terminal Result against its exact frozen base.
+2. Independent governance-level validation and G20 Lead Acceptance remain separate.
+3. TASK-082 review/integration remains a separate product-work decision; it must not be folded into TASK-085 or used to alter this governance candidate's frozen baseline.
