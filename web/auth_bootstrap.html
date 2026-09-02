@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AetherSwap Steam Auth</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 820px; margin: 32px auto; padding: 0 20px; }
+    section { border: 1px solid #8885; border-radius: 12px; padding: 16px; margin: 14px 0; }
+    button, input { padding: 8px 10px; margin: 4px; }
+    input { min-width: 280px; }
+    .ok { font-weight: 700; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    small { opacity: .75; }
+  </style>
+</head>
+<body>
+  <h1>AetherSwap Steam Auth-only</h1>
+  <p>仅用于新部署/重启后的 Steam 登录与本地凭据准备。此模式不会启动购买、收货、上架、Auto Offer 或其它业务 worker。</p>
+
+  <section>
+    <h2>1. 本地账号</h2>
+    <div id="accounts">读取中…</div>
+    <input id="accountLabel" placeholder="新部署可填写本地标签（可留空）">
+    <button onclick="createAccount()">创建首个本地账号</button>
+    <div><input id="slot" type="number" min="0" placeholder="已有账号 slot"><button onclick="selectAccount()">选择账号</button></div>
+  </section>
+
+  <section>
+    <h2>2. Steam 浏览器登录</h2>
+    <button onclick="startLogin()">打开原版 Steam 登录窗口</button>
+    <button onclick="finishLogin(true)">我已登录完成</button>
+    <button onclick="finishLogin(false)">取消登录</button>
+    <p><small>这里直接调用 AetherSwap 现有 relogin 实现，不包含第二套登录逻辑。</small></p>
+  </section>
+
+  <section>
+    <h2>3. 手动 Cookie 备用</h2>
+    <input id="cookies" type="password" autocomplete="off" placeholder="Steam Cookie">
+    <input id="sessionId" type="password" autocomplete="off" placeholder="sessionid（Cookie 中已有可留空）">
+    <input id="steamId" type="password" autocomplete="off" placeholder="SteamID（Cookie 可推导时可留空）">
+    <button onclick="manualCookie()">提交到原版 Steam manual-cookie 流程</button>
+  </section>
+
+  <section>
+    <h2>4. Steam Guard / Confirmation</h2>
+    <input id="sharedSecret" type="password" autocomplete="off" placeholder="shared_secret">
+    <input id="identitySecret" type="password" autocomplete="off" placeholder="identity_secret">
+    <input id="deviceId" autocomplete="off" placeholder="device_id">
+    <label><input id="confirmEnabled" type="checkbox">启用 mobile confirmation 配置要求</label>
+    <button onclick="saveConfig()">保存相关 Steam 配置</button>
+    <p><small>状态接口只显示“是否存在/是否匹配”，不会回显这些值。</small></p>
+  </section>
+
+  <section>
+    <h2>5. Sanitized readiness</h2>
+    <button onclick="refreshAll()">刷新状态</button>
+    <div id="ready" class="grid"></div>
+    <pre id="message"></pre>
+  </section>
+
+<script>
+async function request(path, options={}) {
+  const response = await fetch(path, {headers:{'Content-Type':'application/json'}, ...options});
+  return await response.json();
+}
+function msg(value) { document.getElementById('message').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
+async function refreshAll() {
+  const [accounts, readiness] = await Promise.all([
+    request('/api/auth-bootstrap/accounts'),
+    request('/api/auth-bootstrap/readiness')
+  ]);
+  document.getElementById('accounts').textContent = `账号数: ${accounts.account_count}; 当前 slot: ${accounts.current_slot ?? '无'}`;
+  const ready = document.getElementById('ready'); ready.innerHTML = '';
+  Object.entries(readiness).filter(([k]) => k !== 'ok').forEach(([k,v]) => {
+    const key=document.createElement('div'); key.textContent=k;
+    const val=document.createElement('div'); val.textContent=String(v); if(k==='ready') val.className='ok';
+    ready.append(key,val);
+  });
+}
+async function createAccount(){ msg(await request('/api/auth-bootstrap/accounts/create',{method:'POST',body:JSON.stringify({label:document.getElementById('accountLabel').value})})); await refreshAll(); }
+async function selectAccount(){ msg(await request('/api/auth-bootstrap/accounts/select',{method:'POST',body:JSON.stringify({slot:Number(document.getElementById('slot').value)})})); await refreshAll(); }
+async function startLogin(){ msg(await request('/api/auth/steam/relogin_start',{method:'POST',body:'{}'})); }
+async function finishLogin(success){ msg(await request('/api/auth/steam/relogin_finish',{method:'POST',body:JSON.stringify({success})})); await refreshAll(); }
+async function manualCookie(){
+  msg(await request('/api/auth/steam/manual_cookie',{method:'POST',body:JSON.stringify({cookies:document.getElementById('cookies').value,session_id:document.getElementById('sessionId').value,steam_id:document.getElementById('steamId').value})}));
+  document.getElementById('cookies').value=''; document.getElementById('sessionId').value=''; document.getElementById('steamId').value=''; await refreshAll();
+}
+async function saveConfig(){
+  const payload={}; const map=[['shared_secret','sharedSecret'],['identity_secret','identitySecret'],['device_id','deviceId']];
+  map.forEach(([key,id])=>{const value=document.getElementById(id).value.trim(); if(value) payload[key]=value;});
+  payload.confirmation_enabled=document.getElementById('confirmEnabled').checked;
+  msg(await request('/api/auth-bootstrap/steam/config',{method:'POST',body:JSON.stringify(payload)}));
+  map.forEach(([,id])=>document.getElementById(id).value=''); await refreshAll();
+}
+refreshAll().catch(e => msg(String(e)));
+</script>
+</body>
+</html>
