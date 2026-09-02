@@ -1,11 +1,11 @@
 """Public fail-closed read-only adapter facade.
 
-The ordinary adapter contract remains exact-single-account binding. TASK-069
-needs a narrowly scoped recovery bridge to preserve an existing persisted row's
-local account lineage after deployment-local account re-keying. That extra
-lineage authority is represented by a sealed grant that can only be minted by
-the exact recovery-only Host builder call site; normal callers cannot create
-or inject arbitrary account aliases.
+Ordinary construction remains exact-single-account binding. TASK-069 permits
+additional historical local lineage only when the adapter is constructed
+inside the exact recovery-only Host builder and the lineage object exactly
+matches that builder's locally derived persisted-ID set. No bearer secret is
+used or exposed; a forged lineage object has no authority outside that call
+context.
 
 All parsing/evidence logic lives in ``_platform_readonly_core`` and remains
 unchanged from the pre-TASK-069 implementation.
@@ -27,122 +27,153 @@ def _require_identifier(value: object, field: str) -> str:
     return value
 
 
-def _build_sealed_recovery_lineage_surface():
-    seal = object()
+@dataclass(frozen=True, init=False)
+class _RecoveryAccountLineage:
+    """Immutable recovery lineage data; authority comes from builder provenance."""
 
-    @dataclass(frozen=True, init=False)
-    class RecoveryAccountLineage:
-        """Sealed immutable grant produced only by the recovery Host builder."""
+    current_account_id: str
+    accepted_account_ids: frozenset[str]
 
-        current_account_id: str
-        accepted_account_ids: frozenset[str]
-        _proof: object
+    def __new__(cls, *args, **kwargs):
+        raise PlatformAdapterProtocolError(
+            "recovery account lineage cannot be constructed directly"
+        )
 
-        def __init__(
-            self,
-            current_account_id: str,
-            accepted_account_ids: frozenset[str],
-            *,
-            _seal: object | None = None,
-        ) -> None:
-            if _seal is not seal:
-                raise PlatformAdapterProtocolError(
-                    "recovery account lineage cannot be constructed directly"
-                )
-            current = _require_identifier(current_account_id, "account_id")
-            if type(accepted_account_ids) is not frozenset or not accepted_account_ids:
-                raise PlatformAdapterProtocolError(
-                    "recovery account lineage must be a non-empty immutable set"
-                )
-            for account_id in accepted_account_ids:
-                _require_identifier(account_id, "account_id")
-            if current not in accepted_account_ids:
-                raise PlatformAdapterProtocolError(
-                    "recovery account lineage must include current account"
-                )
-            object.__setattr__(self, "current_account_id", current)
-            object.__setattr__(self, "accepted_account_ids", accepted_account_ids)
-            object.__setattr__(self, "_proof", seal)
 
-    def make_recovery_account_lineage(
-        current_account_id: str,
-        persisted_account_ids: frozenset[str],
-    ) -> RecoveryAccountLineage:
-        """Mint one persisted-evidence lineage grant only from the exact Host builder."""
+def _recovery_builder_frame(expected_current: str):
+    frame = inspect.currentframe()
+    caller = None if frame is None else frame.f_back
+    builder_frame = None if caller is None else caller.f_back
+    try:
+        from app.auto_offer import host_integration as host_integration
 
-        current = _require_identifier(current_account_id, "account_id")
-        if type(persisted_account_ids) is not frozenset:
-            raise PlatformAdapterProtocolError(
-                "persisted account lineage must be immutable"
-            )
-        for account_id in persisted_account_ids:
-            _require_identifier(account_id, "account_id")
-
-        frame = inspect.currentframe()
-        caller = None if frame is None else frame.f_back
-        try:
-            from app.auto_offer import host_integration as host_integration
-
-            builder = getattr(
-                host_integration,
-                "_build_recovery_only_host_auto_offer_bridge",
-                None,
-            )
-            caller_ids = None if caller is None else caller.f_locals.get(
-                "persisted_account_ids"
-            )
-            if (
-                caller is None
-                or builder is None
-                or caller.f_code is not builder.__code__
-                or caller.f_locals.get("account_id") != current
-                or type(caller_ids) is not set
-                or frozenset(caller_ids) != persisted_account_ids
-            ):
-                raise PlatformAdapterProtocolError(
-                    "recovery account lineage factory is recovery-only"
-                )
-        finally:
-            del frame
-            del caller
-
-        accepted = frozenset({current, *persisted_account_ids})
-        return RecoveryAccountLineage(current, accepted, _seal=seal)
-
-    def accepted_account_ids_for(
-        account_id: str,
-        recovery_lineage: RecoveryAccountLineage | None,
-    ) -> frozenset[str]:
-        current = _require_identifier(account_id, "account_id")
-        if recovery_lineage is None:
-            return frozenset({current})
+        builder = getattr(
+            host_integration,
+            "_build_recovery_only_host_auto_offer_bridge",
+            None,
+        )
         if (
-            type(recovery_lineage) is not RecoveryAccountLineage
-            or getattr(recovery_lineage, "_proof", None) is not seal
-            or recovery_lineage.current_account_id != current
+            builder_frame is None
+            or builder is None
+            or builder_frame.f_code is not builder.__code__
+            or builder_frame.f_locals.get("account_id") != expected_current
+        ):
+            return None
+        return builder_frame
+    finally:
+        del frame
+        del caller
+
+
+def _make_recovery_account_lineage(
+    current_account_id: str,
+    persisted_account_ids: frozenset[str],
+) -> _RecoveryAccountLineage:
+    """Create immutable lineage data only for the exact recovery Host builder."""
+
+    current = _require_identifier(current_account_id, "account_id")
+    if type(persisted_account_ids) is not frozenset:
+        raise PlatformAdapterProtocolError(
+            "persisted account lineage must be immutable"
+        )
+    for account_id in persisted_account_ids:
+        _require_identifier(account_id, "account_id")
+
+    frame = inspect.currentframe()
+    caller = None if frame is None else frame.f_back
+    try:
+        from app.auto_offer import host_integration as host_integration
+
+        builder = getattr(
+            host_integration,
+            "_build_recovery_only_host_auto_offer_bridge",
+            None,
+        )
+        caller_ids = None if caller is None else caller.f_locals.get(
+            "persisted_account_ids"
+        )
+        if (
+            caller is None
+            or builder is None
+            or caller.f_code is not builder.__code__
+            or caller.f_locals.get("account_id") != current
+            or type(caller_ids) is not set
+            or frozenset(caller_ids) != persisted_account_ids
         ):
             raise PlatformAdapterProtocolError(
-                "recovery account lineage grant is invalid"
+                "recovery account lineage factory is recovery-only"
             )
-        return recovery_lineage.accepted_account_ids
+    finally:
+        del frame
+        del caller
 
-    return (
-        RecoveryAccountLineage,
-        make_recovery_account_lineage,
-        accepted_account_ids_for,
-    )
+    accepted = frozenset({current, *persisted_account_ids})
+    lineage = object.__new__(_RecoveryAccountLineage)
+    object.__setattr__(lineage, "current_account_id", current)
+    object.__setattr__(lineage, "accepted_account_ids", accepted)
+    return lineage
 
 
-(
-    _RecoveryAccountLineage,
-    _make_recovery_account_lineage,
-    _accepted_account_ids_for,
-) = _build_sealed_recovery_lineage_surface()
-del _build_sealed_recovery_lineage_surface
+def _accepted_account_ids_for(
+    account_id: str,
+    recovery_lineage: _RecoveryAccountLineage | None,
+) -> frozenset[str]:
+    current = _require_identifier(account_id, "account_id")
+    if recovery_lineage is None:
+        return frozenset({current})
+    if (
+        type(recovery_lineage) is not _RecoveryAccountLineage
+        or recovery_lineage.current_account_id != current
+        or type(recovery_lineage.accepted_account_ids) is not frozenset
+        or current not in recovery_lineage.accepted_account_ids
+    ):
+        raise PlatformAdapterProtocolError(
+            "recovery account lineage data is invalid"
+        )
+
+    frame = inspect.currentframe()
+    adapter_frame = None if frame is None else frame.f_back
+    builder_frame = None if adapter_frame is None else adapter_frame.f_back
+    try:
+        from app.auto_offer import host_integration as host_integration
+
+        builder = getattr(
+            host_integration,
+            "_build_recovery_only_host_auto_offer_bridge",
+            None,
+        )
+        persisted_ids = None if builder_frame is None else builder_frame.f_locals.get(
+            "persisted_account_ids"
+        )
+        builder_lineage = None if builder_frame is None else builder_frame.f_locals.get(
+            "recovery_lineage"
+        )
+        expected = (
+            None
+            if type(persisted_ids) is not set
+            else frozenset({current, *persisted_ids})
+        )
+        if (
+            builder_frame is None
+            or builder is None
+            or builder_frame.f_code is not builder.__code__
+            or builder_frame.f_locals.get("account_id") != current
+            or builder_lineage is not recovery_lineage
+            or expected != recovery_lineage.accepted_account_ids
+        ):
+            raise PlatformAdapterProtocolError(
+                "recovery account lineage is recovery-builder-only"
+            )
+    finally:
+        del frame
+        del adapter_frame
+        del builder_frame
+
+    return recovery_lineage.accepted_account_ids
 
 
 class BuffReadOnlyAdapter(_core.BuffReadOnlyAdapter):
-    """Exact-binding BUFF adapter with sealed recovery-only delegation."""
+    """Exact-binding BUFF adapter with recovery-builder-only delegation."""
 
     def __init__(
         self,
@@ -178,7 +209,7 @@ class BuffReadOnlyAdapter(_core.BuffReadOnlyAdapter):
 
 
 class SteamTradeOfferReadOnlyAdapter(_core.SteamTradeOfferReadOnlyAdapter):
-    """Exact Steam offer reader with sealed recovery-only local-lineage routing."""
+    """Exact Steam offer reader with recovery-builder-only lineage routing."""
 
     def __init__(
         self,
@@ -215,7 +246,7 @@ class SteamTradeOfferReadOnlyAdapter(_core.SteamTradeOfferReadOnlyAdapter):
 
 
 class SteamCompletedTradeReadOnlyAdapter(_core.SteamCompletedTradeReadOnlyAdapter):
-    """Exact completed-trade reader with sealed recovery-only lineage routing."""
+    """Exact completed-trade reader with recovery-builder-only lineage routing."""
 
     def __init__(
         self,
@@ -251,8 +282,6 @@ class SteamCompletedTradeReadOnlyAdapter(_core.SteamCompletedTradeReadOnlyAdapte
         return super().execute(request)
 
 
-# Recovery-only maintenance never needs inventory aliases. Keep that adapter
-# exactly on the original singleton account contract.
 SteamInventoryReadOnlyAdapter = _core.SteamInventoryReadOnlyAdapter
 
 
