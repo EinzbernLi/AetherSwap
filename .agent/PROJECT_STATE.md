@@ -1,7 +1,7 @@
 # AetherSwap Current Project State
 
-Status: **ordinary governance 0.3.18 adoption candidate; G20 remains canonical Project Lead; TASK-083/TASK-084 complete; TASK-082 frozen next and not dispatched; REAL-WRITE CLOSED**
-State date: **2026-09-02**
+Status: **ordinary governance 0.3.18 adoption candidate; G20 remains canonical Project Lead; TASK-083/TASK-084 complete; TASK-082 implementation complete on its isolated branch and not merged; REAL-WRITE CLOSED**
+State date: **2026-09-03**
 
 This file is a compact recovery entrypoint. Newer exact GitHub Task/Result/Review/Acceptance, branch, CI, and Lead-sink facts supersede this convenience summary.
 
@@ -31,8 +31,8 @@ This file is a compact recovery entrypoint. Newer exact GitHub Task/Result/Revie
 
 - TASK-083/#234 + PR #235: completed slimming pass.
 - TASK-084/#236 + PR #238: completed second slimming pass.
-- TASK-082/#233 exact implementation revision `#233@5510226684` is the next product task, but is **NOT_DISPATCHED** during TASK-085. Its branch `task/082-steamauto-parity` must remain untouched by governance adoption.
-- TASK-085/#240 is governance/control-plane adoption only and must not change Auto Offer product behavior.
+- TASK-082/#233 exact implementation revision `#233@5510226684` has been executed by a separate bounded implementation worker on `task/082-steamauto-parity`; its implementation result is `#233@5511772049`. It is not merged into `integration/auto-buyer-offer` at this state.
+- TASK-085/#240 remains governance/control-plane adoption only. This Worker does not modify, rebase, dispatch, merge, or otherwise absorb TASK-082 product work.
 
 ## 5. Safety and authorization
 
@@ -43,6 +43,6 @@ This file is a compact recovery entrypoint. Newer exact GitHub Task/Result/Revie
 
 ## 6. Immediate continuation
 
-1. Finish TASK-085 Worker validation, PR, exact-head CI, and terminal Result.
+1. Finish TASK-085 Worker validation, PR, exact-head CI, and terminal Result against its exact frozen base.
 2. Independent governance-level validation and G20 Lead Acceptance remain separate.
-3. Only after TASK-085 is accepted may the active Lead dispatch TASK-082 under its exact frozen Task revision and existing safety gates.
+3. TASK-082 review/integration remains a separate product-work decision; it must not be folded into TASK-085 or used to alter this governance candidate's frozen baseline.
