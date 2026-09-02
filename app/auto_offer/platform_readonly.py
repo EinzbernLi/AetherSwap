@@ -1,11 +1,12 @@
 """Public fail-closed read-only adapter facade.
 
 Ordinary construction remains exact-single-account binding. TASK-069 adds only
-one recovery-specific choice: when the recovery Host builder proves a single
-persisted historical lineage for the current Steam identity, the adapter binds
-to that one persisted ``account_id`` instead of the current deployment-local
-registry key. It does not accept multiple account aliases and it does not rely
-on bearer tokens, closure secrets, frame provenance, or caller identity.
+one recovery-specific choice: if the recovery Host builder finds one persisted
+historical local lineage for the current Steam identity, the adapter binds to
+that one persisted ``account_id`` instead of the current deployment-local key.
+With no persisted target it remains bound to the current key; more than one
+distinct persisted lineage fails closed. There is no multi-account dispatch,
+bearer token, closure secret, frame provenance, or caller-identity boundary.
 
 All parsing/evidence logic lives in ``_platform_readonly_core`` and remains
 byte-identical to the pre-TASK-069 implementation.
@@ -28,7 +29,7 @@ def _require_identifier(value: object, field: str) -> str:
 
 @dataclass(frozen=True)
 class _RecoveryAccountLineage:
-    """One exact persisted local lineage selected for recovery-only reads."""
+    """The one exact local account binding selected for recovery-only reads."""
 
     current_account_id: str
     target_account_id: str
@@ -42,13 +43,12 @@ def _make_recovery_account_lineage(
     current_account_id: str,
     persisted_account_ids: frozenset[str],
 ) -> _RecoveryAccountLineage:
-    """Select exactly one persisted recovery lineage or fail closed.
+    """Choose current-or-one-persisted local binding; ambiguity fails closed.
 
     ``account_id`` is a local request/row lineage token, not an authentication
-    credential. The current Steam identity and credential identity are proven
-    by the Host recovery builder before this helper is called. This helper does
-    not create authority; it only chooses which one exact local lineage the
-    already read-only adapter instance will bind to.
+    credential. The Host builder separately proves the current registry Steam
+    identity equals the current credential Steam identity. This helper only
+    chooses the single local account ID that the read adapter binds to.
     """
 
     current = _require_identifier(current_account_id, "account_id")
@@ -58,11 +58,11 @@ def _make_recovery_account_lineage(
         )
     for account_id in persisted_account_ids:
         _require_identifier(account_id, "account_id")
-    if len(persisted_account_ids) != 1:
+    if len(persisted_account_ids) > 1:
         raise PlatformAdapterProtocolError(
-            "recovery persisted account lineage must be unique"
+            "recovery persisted account lineage is ambiguous"
         )
-    target = next(iter(persisted_account_ids))
+    target = current if not persisted_account_ids else next(iter(persisted_account_ids))
     return _RecoveryAccountLineage(current, target)
 
 
@@ -82,7 +82,7 @@ def _bound_account_id_for(
 
 
 class BuffReadOnlyAdapter(_core.BuffReadOnlyAdapter):
-    """Exact-binding BUFF adapter; recovery may select one persisted lineage."""
+    """Exact-binding BUFF adapter with one recovery-selected local account."""
 
     def __init__(
         self,
@@ -101,7 +101,7 @@ class BuffReadOnlyAdapter(_core.BuffReadOnlyAdapter):
 
 
 class SteamTradeOfferReadOnlyAdapter(_core.SteamTradeOfferReadOnlyAdapter):
-    """Exact Steam offer reader with one recovery-local lineage binding."""
+    """Exact Steam offer reader with one recovery-selected local account."""
 
     def __init__(
         self,
@@ -121,7 +121,7 @@ class SteamTradeOfferReadOnlyAdapter(_core.SteamTradeOfferReadOnlyAdapter):
 
 
 class SteamCompletedTradeReadOnlyAdapter(_core.SteamCompletedTradeReadOnlyAdapter):
-    """Exact completed-trade reader with one recovery-local lineage binding."""
+    """Exact completed-trade reader with one recovery-selected local account."""
 
     def __init__(
         self,
