@@ -80,7 +80,6 @@ _MAX_CANARY_RECOVERY_STEPS_PER_DELIVERY = 6
 _RECOVERY_ONLY_CAPABILITIES = frozenset(
     {
         PlatformCapability.READ_OFFER_STATE,
-        PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
         PlatformCapability.READ_STEAM_TRADE_OFFER,
         PlatformCapability.READ_STEAM_COMPLETED_TRADE,
     }
@@ -856,7 +855,6 @@ def _build_active_host_auto_offer_bridge(
         adapters = {
             PlatformCapability.READ_DELIVERY_DIRECTION: buff_adapter,
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
-            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: buff_adapter,
             PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
@@ -1091,7 +1089,6 @@ def _build_recovery_only_host_auto_offer_bridge(
         )
         adapters = {
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
-            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
             PlatformCapability.READ_STEAM_COMPLETED_TRADE: completed_trade_adapter,
         }
@@ -1422,7 +1419,6 @@ class HostRecoveryOnlyMaintenance:
             DeliveryStatus.RESULT_UNKNOWN: frozenset(
                 {
                     PlatformCapability.READ_OFFER_STATE,
-                    PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
                 }
             ),
             DeliveryStatus.OFFER_SENT: PlatformCapability.READ_STEAM_TRADE_OFFER,
@@ -1447,7 +1443,6 @@ class HostRecoveryOnlyMaintenance:
             raise HostAutoOfferIntegrationError("maintenance_read_result_invalid")
         if request.capability in {
             PlatformCapability.READ_OFFER_STATE,
-            PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE,
         }:
             request_bound_fields_valid = (
                 request.steam_tradeoffer_id is None
