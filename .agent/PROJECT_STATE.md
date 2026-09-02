@@ -1,6 +1,6 @@
 # AetherSwap Current Project State
 
-Status: **ordinary governance 0.3.18 adoption candidate; G20 remains canonical Project Lead; TASK-083/TASK-084 complete; TASK-082 frozen next and not dispatched; REAL-WRITE CLOSED**  
+Status: **ordinary governance 0.3.18 adoption candidate; G20 remains canonical Project Lead; TASK-083/TASK-084 complete; TASK-082 frozen next and not dispatched; REAL-WRITE CLOSED**
 State date: **2026-09-02**
 
 This file is a compact recovery entrypoint. Newer exact GitHub Task/Result/Review/Acceptance, branch, CI, and Lead-sink facts supersede this convenience summary.
