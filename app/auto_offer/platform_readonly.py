@@ -236,6 +236,62 @@ def _require_identifier(value: object, field: str) -> str:
     return value
 
 
+@dataclass(frozen=True)
+class _RecoveryAccountLineage:
+    """Immutable account IDs admitted only by an explicit recovery surface."""
+
+    current_account_id: str
+    accepted_account_ids: frozenset[str]
+
+    def __post_init__(self) -> None:
+        current = _require_identifier(self.current_account_id, "account_id")
+        if type(self.accepted_account_ids) is not frozenset:
+            raise PlatformAdapterProtocolError(
+                "recovery account lineage must be immutable"
+            )
+        if not self.accepted_account_ids:
+            raise PlatformAdapterProtocolError(
+                "recovery account lineage must not be empty"
+            )
+        for account_id in self.accepted_account_ids:
+            _require_identifier(account_id, "account_id")
+        if current not in self.accepted_account_ids:
+            raise PlatformAdapterProtocolError(
+                "recovery account lineage must include current account"
+            )
+
+
+def _make_recovery_account_lineage(
+    current_account_id: str,
+    persisted_account_ids: frozenset[str],
+) -> _RecoveryAccountLineage:
+    """Create the narrow immutable allowlist used by recovery-only wiring."""
+
+    current = _require_identifier(current_account_id, "account_id")
+    if type(persisted_account_ids) is not frozenset:
+        raise PlatformAdapterProtocolError(
+            "persisted account lineage must be immutable"
+        )
+    accepted = frozenset({current, *persisted_account_ids})
+    return _RecoveryAccountLineage(current, accepted)
+
+
+def _accepted_account_ids_for(
+    account_id: str,
+    recovery_lineage: _RecoveryAccountLineage | None,
+) -> frozenset[str]:
+    if recovery_lineage is None:
+        return frozenset({account_id})
+    if (
+        type(recovery_lineage) is not _RecoveryAccountLineage
+        or recovery_lineage.current_account_id != account_id
+    ):
+        raise PlatformAdapterProtocolError(
+            "recovery account lineage does not match current account"
+        )
+    return recovery_lineage.accepted_account_ids
+
+
 def _is_auth_error(error: BaseException) -> bool:
     name = type(error).__name__.lower()
     return any(token in name for token in ("auth", "unauthor", "forbidden"))
@@ -601,6 +657,7 @@ class BuffReadOnlyAdapter:
         *,
         account_id: str,
         historical_client: BuffHistoricalOrderReadOnlyClient | None = None,
+        recovery_lineage: _RecoveryAccountLineage | None = None,
     ) -> None:
         if not callable(getattr(client, "get_steam_trades", None)):
             raise PlatformAdapterProtocolError(
@@ -619,6 +676,10 @@ class BuffReadOnlyAdapter:
             )
         self._historical_client = historical_client
         self._account_id = _require_identifier(account_id, "account_id")
+        self._accepted_account_ids = _accepted_account_ids_for(
+            self._account_id,
+            recovery_lineage,
+        )
 
     @property
     def capabilities(self) -> frozenset[PlatformCapability]:
@@ -630,7 +691,7 @@ class BuffReadOnlyAdapter:
             return _result(
                 request, PlatformResultStatus.UNSUPPORTED, "unsupported_capability"
             )
-        if request.account_id != self._account_id:
+        if request.account_id not in self._accepted_account_ids:
             return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
 
         if request.capability is PlatformCapability.READ_BUFF_ORDER_LIFECYCLE:
@@ -1130,6 +1191,7 @@ class SteamInventoryReadOnlyAdapter:
         *,
         account_id: str,
         recipient_steam_id: str,
+        recovery_lineage: _RecoveryAccountLineage | None = None,
     ) -> None:
         if not callable(reader):
             raise PlatformAdapterProtocolError("reader must be callable")
@@ -1137,6 +1199,10 @@ class SteamInventoryReadOnlyAdapter:
         self._account_id = _require_identifier(account_id, "account_id")
         self._recipient_steam_id = _require_identifier(
             recipient_steam_id, "recipient_steam_id"
+        )
+        self._accepted_account_ids = _accepted_account_ids_for(
+            self._account_id,
+            recovery_lineage,
         )
 
     @property
@@ -1150,7 +1216,7 @@ class SteamInventoryReadOnlyAdapter:
                 request, PlatformResultStatus.UNSUPPORTED, "unsupported_capability"
             )
         if (
-            request.account_id != self._account_id
+            request.account_id not in self._accepted_account_ids
             or request.recipient_steam_id != self._recipient_steam_id
         ):
             return _result(
@@ -1325,6 +1391,7 @@ class SteamTradeOfferReadOnlyAdapter:
         *,
         account_id: str,
         recipient_steam_id: str,
+        recovery_lineage: _RecoveryAccountLineage | None = None,
     ) -> None:
         if not callable(reader):
             raise PlatformAdapterProtocolError("reader must be callable")
@@ -1332,6 +1399,10 @@ class SteamTradeOfferReadOnlyAdapter:
         self._account_id = _require_identifier(account_id, "account_id")
         self._recipient_steam_id = _require_identifier(
             recipient_steam_id, "recipient_steam_id"
+        )
+        self._accepted_account_ids = _accepted_account_ids_for(
+            self._account_id,
+            recovery_lineage,
         )
 
     @property
@@ -1344,7 +1415,7 @@ class SteamTradeOfferReadOnlyAdapter:
             return _result(
                 request, PlatformResultStatus.UNSUPPORTED, "unsupported_capability"
             )
-        if request.account_id != self._account_id:
+        if request.account_id not in self._accepted_account_ids:
             return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
         if request.recipient_steam_id != self._recipient_steam_id:
             return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
@@ -1507,6 +1578,7 @@ class SteamCompletedTradeReadOnlyAdapter:
         *,
         account_id: str,
         recipient_steam_id: str,
+        recovery_lineage: _RecoveryAccountLineage | None = None,
     ) -> None:
         if not callable(reader):
             raise PlatformAdapterProtocolError("reader must be callable")
@@ -1514,6 +1586,10 @@ class SteamCompletedTradeReadOnlyAdapter:
         self._account_id = _require_identifier(account_id, "account_id")
         self._recipient_steam_id = _require_identifier(
             recipient_steam_id, "recipient_steam_id"
+        )
+        self._accepted_account_ids = _accepted_account_ids_for(
+            self._account_id,
+            recovery_lineage,
         )
 
     @property
@@ -1526,7 +1602,7 @@ class SteamCompletedTradeReadOnlyAdapter:
             return _result(
                 request, PlatformResultStatus.UNSUPPORTED, "unsupported_capability"
             )
-        if request.account_id != self._account_id:
+        if request.account_id not in self._accepted_account_ids:
             return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
         if request.recipient_steam_id != self._recipient_steam_id:
             return _result(request, PlatformResultStatus.FAILURE, "identity_mismatch")
