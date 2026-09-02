@@ -1,8 +1,8 @@
 """Public fail-closed read-only adapter facade.
 
-The ordinary adapter contract remains exact-single-account binding.  TASK-069
+The ordinary adapter contract remains exact-single-account binding. TASK-069
 needs a narrowly scoped recovery bridge to preserve an existing persisted row's
-local account lineage after deployment-local account re-keying.  That extra
+local account lineage after deployment-local account re-keying. That extra
 lineage authority is represented by a sealed grant that can only be minted by
 the exact recovery-only Host builder call site; normal callers cannot create
 or inject arbitrary account aliases.
@@ -36,6 +36,7 @@ def _build_sealed_recovery_lineage_surface():
 
         current_account_id: str
         accepted_account_ids: frozenset[str]
+        _proof: object
 
         def __init__(
             self,
@@ -61,6 +62,7 @@ def _build_sealed_recovery_lineage_surface():
                 )
             object.__setattr__(self, "current_account_id", current)
             object.__setattr__(self, "accepted_account_ids", accepted_account_ids)
+            object.__setattr__(self, "_proof", seal)
 
     def make_recovery_account_lineage(
         current_account_id: str,
@@ -107,30 +109,36 @@ def _build_sealed_recovery_lineage_surface():
         accepted = frozenset({current, *persisted_account_ids})
         return RecoveryAccountLineage(current, accepted, _seal=seal)
 
-    return RecoveryAccountLineage, make_recovery_account_lineage
+    def accepted_account_ids_for(
+        account_id: str,
+        recovery_lineage: RecoveryAccountLineage | None,
+    ) -> frozenset[str]:
+        current = _require_identifier(account_id, "account_id")
+        if recovery_lineage is None:
+            return frozenset({current})
+        if (
+            type(recovery_lineage) is not RecoveryAccountLineage
+            or getattr(recovery_lineage, "_proof", None) is not seal
+            or recovery_lineage.current_account_id != current
+        ):
+            raise PlatformAdapterProtocolError(
+                "recovery account lineage grant is invalid"
+            )
+        return recovery_lineage.accepted_account_ids
+
+    return (
+        RecoveryAccountLineage,
+        make_recovery_account_lineage,
+        accepted_account_ids_for,
+    )
 
 
-_RecoveryAccountLineage, _make_recovery_account_lineage = (
-    _build_sealed_recovery_lineage_surface()
-)
+(
+    _RecoveryAccountLineage,
+    _make_recovery_account_lineage,
+    _accepted_account_ids_for,
+) = _build_sealed_recovery_lineage_surface()
 del _build_sealed_recovery_lineage_surface
-
-
-def _accepted_account_ids_for(
-    account_id: str,
-    recovery_lineage: _RecoveryAccountLineage | None,
-) -> frozenset[str]:
-    current = _require_identifier(account_id, "account_id")
-    if recovery_lineage is None:
-        return frozenset({current})
-    if (
-        type(recovery_lineage) is not _RecoveryAccountLineage
-        or recovery_lineage.current_account_id != current
-    ):
-        raise PlatformAdapterProtocolError(
-            "recovery account lineage does not match current account"
-        )
-    return recovery_lineage.accepted_account_ids
 
 
 class BuffReadOnlyAdapter(_core.BuffReadOnlyAdapter):
