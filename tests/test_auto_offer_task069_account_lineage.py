@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 
 import app.auto_offer.host_integration as host_integration
+import app.auto_offer.platform_readonly as platform_readonly
 from app.auto_offer.adapters import (
-    OfferStateEvidence,
+    PlatformAdapterProtocolError,
     PlatformCapability,
     PlatformRequest,
     PlatformResult,
@@ -20,13 +21,13 @@ from app.auto_offer.coordinator import DeliveryCoordinator
 from app.auto_offer.platform_readonly import (
     BuffReadOnlyAdapter,
     SteamTradeOfferReadOnlyAdapter,
-    _make_recovery_account_lineage,
 )
 from app.auto_offer.store import StoredDelivery
 
 
 CURRENT_ACCOUNT = "registry-current"
 HISTORICAL_ACCOUNT = "deployment-local-old"
+SECOND_HISTORICAL_ACCOUNT = "deployment-local-second"
 UNRELATED_ACCOUNT = "unrelated-local"
 STEAM_ID = "76561198000000001"
 OTHER_STEAM_ID = "76561198000000002"
@@ -114,110 +115,68 @@ class _TradeReader:
         return self.payload
 
 
-def test_recovery_lineage_keeps_persisted_account_id_for_realtime_and_history_reads():
-    lineage = _make_recovery_account_lineage(
-        CURRENT_ACCOUNT,
-        frozenset({HISTORICAL_ACCOUNT}),
-    )
-    client = _BuffReader(
-        {
-            1: {
-                "code": "OK",
-                "data": {
-                    "page_num": 1,
-                    "page_size": 10,
-                    "total_page": 1,
-                    "items": [],
-                },
+def _trade_payload():
+    return {
+        "steam_tradeoffer_id": "offer-1",
+        "account_steam_id": STEAM_ID,
+        "counterparty_steam_id": OTHER_STEAM_ID,
+        "is_our_offer": True,
+        "lifecycle": "active",
+        "items_to_give": [],
+        "items_to_receive": [
+            {
+                "appid": 730,
+                "contextid": "2",
+                "assetid": "asset-1",
+                "amount": 1,
             }
-        }
-    )
-    adapter = BuffReadOnlyAdapter(
-        client,
-        account_id=CURRENT_ACCOUNT,
-        recovery_lineage=lineage,
-    )
-
-    realtime = _request(PlatformCapability.READ_OFFER_STATE)
-    realtime_result = adapter.execute(realtime)
-    historical = _request(PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE)
-    historical_result = adapter.execute(historical)
-
-    assert realtime_result.request is realtime
-    assert realtime_result.request.account_id == HISTORICAL_ACCOUNT
-    assert historical_result.request is historical
-    assert historical_result.request.account_id == HISTORICAL_ACCOUNT
-    assert realtime_result.status is PlatformResultStatus.RESULT_UNKNOWN
-    assert historical_result.status is PlatformResultStatus.RESULT_UNKNOWN
-    assert client.realtime_calls == 1
-    assert client.history_calls == [(1, "csgo")]
+        ],
+    }
 
 
-def test_recovery_lineage_exact_steam_trade_preserves_persisted_account_and_recipient():
-    lineage = _make_recovery_account_lineage(
-        CURRENT_ACCOUNT,
-        frozenset({HISTORICAL_ACCOUNT}),
-    )
-    reader = _TradeReader(
-        {
-            "steam_tradeoffer_id": "offer-1",
-            "account_steam_id": STEAM_ID,
-            "counterparty_steam_id": OTHER_STEAM_ID,
-            "is_our_offer": True,
-            "lifecycle": "active",
-            "items_to_give": [],
-            "items_to_receive": [
-                {
-                    "appid": 730,
-                    "contextid": "2",
-                    "assetid": "asset-1",
-                    "amount": 1,
-                }
-            ],
-        }
-    )
+def test_recovery_lineage_grant_cannot_be_minted_or_constructed_by_normal_caller():
+    with pytest.raises(PlatformAdapterProtocolError, match="recovery-only"):
+        platform_readonly._make_recovery_account_lineage(
+            CURRENT_ACCOUNT,
+            frozenset({HISTORICAL_ACCOUNT}),
+        )
+
+    with pytest.raises(PlatformAdapterProtocolError, match="cannot be constructed"):
+        platform_readonly._RecoveryAccountLineage(
+            CURRENT_ACCOUNT,
+            frozenset({CURRENT_ACCOUNT, HISTORICAL_ACCOUNT}),
+        )
+
+
+def test_non_recovery_buff_adapter_rejects_historical_account_before_reader():
+    client = _BuffReader()
+    adapter = BuffReadOnlyAdapter(client, account_id=CURRENT_ACCOUNT)
+
+    result = adapter.execute(_request(PlatformCapability.READ_OFFER_STATE))
+
+    assert result.status is PlatformResultStatus.FAILURE
+    assert result.detail == "identity_mismatch"
+    assert client.realtime_calls == 0
+
+
+def test_non_recovery_steam_adapter_rejects_historical_account_before_reader():
+    reader = _TradeReader(_trade_payload())
     adapter = SteamTradeOfferReadOnlyAdapter(
         reader,
         account_id=CURRENT_ACCOUNT,
         recipient_steam_id=STEAM_ID,
-        recovery_lineage=lineage,
-    )
-    request = _request(
-        PlatformCapability.READ_STEAM_TRADE_OFFER,
-        tradeoffer_id="offer-1",
-    )
-
-    result = adapter.execute(request)
-
-    assert result.status is PlatformResultStatus.SUCCESS
-    assert result.request is request
-    assert result.request.account_id == HISTORICAL_ACCOUNT
-    assert result.request.recipient_steam_id == STEAM_ID
-    assert reader.calls == ["offer-1"]
-
-
-def test_unapproved_recovery_account_fails_before_buff_reader():
-    lineage = _make_recovery_account_lineage(
-        CURRENT_ACCOUNT,
-        frozenset({HISTORICAL_ACCOUNT}),
-    )
-    client = _BuffReader()
-    adapter = BuffReadOnlyAdapter(
-        client,
-        account_id=CURRENT_ACCOUNT,
-        recovery_lineage=lineage,
     )
 
     result = adapter.execute(
         _request(
-            PlatformCapability.READ_OFFER_STATE,
-            account_id=UNRELATED_ACCOUNT,
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            tradeoffer_id="offer-1",
         )
     )
 
     assert result.status is PlatformResultStatus.FAILURE
     assert result.detail == "identity_mismatch"
-    assert client.realtime_calls == 0
+    assert reader.calls == []
 
 
 class _CoordinatorAdapter:
@@ -238,10 +197,10 @@ class _CoordinatorAdapter:
 class _CoordinatorBridge:
     capabilities = host_integration._RECOVERY_ONLY_CAPABILITIES
 
-    def __init__(self, stored):
+    def __init__(self, stored, *, accepted_account_ids=None):
         self.account_id = CURRENT_ACCOUNT
         self.recipient_steam_id = STEAM_ID
-        self.accepted_account_ids = frozenset(
+        self.accepted_account_ids = accepted_account_ids or frozenset(
             {CURRENT_ACCOUNT, HISTORICAL_ACCOUNT}
         )
         self.current = stored
@@ -295,8 +254,25 @@ def test_host_optional_account_id_must_match_persisted_store_lineage():
     bridge = _CoordinatorBridge(stored)
     maintenance = host_integration.HostRecoveryOnlyMaintenance(bridge)
 
+    outcome = maintenance.run_recovery_tick([_host_row(account_id=CURRENT_ACCOUNT)])
+
+    assert outcome.result is AutoOfferResult.BLOCKED
+    assert bridge.adapter.calls == []
+    assert bridge.advance_calls == []
+
+
+def test_same_steam_second_accepted_lineage_cannot_be_borrowed_for_target_row():
+    stored = _stored()
+    bridge = _CoordinatorBridge(
+        stored,
+        accepted_account_ids=frozenset(
+            {CURRENT_ACCOUNT, HISTORICAL_ACCOUNT, SECOND_HISTORICAL_ACCOUNT}
+        ),
+    )
+    maintenance = host_integration.HostRecoveryOnlyMaintenance(bridge)
+
     outcome = maintenance.run_recovery_tick(
-        [_host_row(account_id=CURRENT_ACCOUNT)]
+        [_host_row(account_id=SECOND_HISTORICAL_ACCOUNT)]
     )
 
     assert outcome.result is AutoOfferResult.BLOCKED
@@ -322,7 +298,7 @@ def test_host_unrelated_recipient_row_is_not_admitted_by_account_alias():
     assert bridge.advance_calls == []
 
 
-def test_public_recovery_builder_derives_lineage_only_from_same_steam_rows(
+def test_public_recovery_builder_mints_store_derived_grant_and_dispatches_persisted_lineage(
     monkeypatch,
 ):
     same_steam = _stored(account_id=HISTORICAL_ACCOUNT)
@@ -352,17 +328,45 @@ def test_public_recovery_builder_derives_lineage_only_from_same_steam_rows(
         def close(self):
             self.closed = True
 
-    class FakeReader:
+    class FakeTradeHttpReader:
+        instance = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.bound_account_steam_id = STEAM_ID
+            self.calls = []
+            type(self).instance = self
+
+        def __call__(self, tradeoffer_id):
+            self.calls.append(tradeoffer_id)
+            return _trade_payload()
+
+    class FakeCompletedHttpReader:
         def __init__(self, *_args, **_kwargs):
             self.bound_account_steam_id = STEAM_ID
 
-    class FakeBuff:
-        def get_steam_trades(self):
-            raise AssertionError("builder performed BUFF I/O")
+        def __call__(self, *_args):
+            raise AssertionError("completed trade reader should not be called")
 
-    class FakeReadAdapter:
-        def __init__(self, *_args, **kwargs):
-            self.kwargs = kwargs
+    class FakeBuff:
+        def __init__(self):
+            self.realtime_calls = 0
+            self.history_calls = []
+
+        def get_steam_trades(self):
+            self.realtime_calls += 1
+            return []
+
+        def get_buy_order_history_page(self, page_num, game="csgo"):
+            self.history_calls.append((page_num, game))
+            return {
+                "code": "OK",
+                "data": {
+                    "page_num": page_num,
+                    "page_size": 10,
+                    "total_page": 1,
+                    "items": [],
+                },
+            }
 
     class FakeCoordinator:
         def __init__(self, _store, adapters, **kwargs):
@@ -382,23 +386,21 @@ def test_public_recovery_builder_derives_lineage_only_from_same_steam_rows(
     )
     monkeypatch.setattr(host_integration, "SteamHostEgressSession", FakeSession)
     monkeypatch.setattr(host_integration, "AutoOfferStore", FakeStore)
-    monkeypatch.setattr(host_integration, "SteamTradeOfferHttpReader", FakeReader)
-    monkeypatch.setattr(host_integration, "SteamCompletedTradeHttpReader", FakeReader)
-    monkeypatch.setattr(host_integration, "BuffReadOnlyAdapter", FakeReadAdapter)
     monkeypatch.setattr(
         host_integration,
-        "SteamTradeOfferReadOnlyAdapter",
-        FakeReadAdapter,
+        "SteamTradeOfferHttpReader",
+        FakeTradeHttpReader,
     )
     monkeypatch.setattr(
         host_integration,
-        "SteamCompletedTradeReadOnlyAdapter",
-        FakeReadAdapter,
+        "SteamCompletedTradeHttpReader",
+        FakeCompletedHttpReader,
     )
     monkeypatch.setattr(host_integration, "DeliveryCoordinator", FakeCoordinator)
 
+    buff = FakeBuff()
     maintenance = host_integration.build_host_recovery_only_maintenance(
-        buff_client=FakeBuff(),
+        buff_client=buff,
         store_path="unused.db",
     )
 
@@ -407,11 +409,76 @@ def test_public_recovery_builder_derives_lineage_only_from_same_steam_rows(
     )
     assert UNRELATED_ACCOUNT not in maintenance._bridge.accepted_account_ids
     assert captured["kwargs"]["allow_writes"] is False
+    assert captured["kwargs"]["allow_confirmation_writes"] is False
+    assert captured["kwargs"]["allow_accept_writes"] is False
     assert set(captured["adapters"]) == host_integration._RECOVERY_ONLY_CAPABILITIES
-    assert (
-        captured["adapters"][PlatformCapability.READ_OFFER_STATE].kwargs[
-            "recovery_lineage"
-        ].accepted_account_ids
-        == frozenset({CURRENT_ACCOUNT, HISTORICAL_ACCOUNT})
+
+    realtime = captured["adapters"][PlatformCapability.READ_OFFER_STATE].execute(
+        _request(PlatformCapability.READ_OFFER_STATE)
     )
+    assert realtime.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert realtime.request.account_id == HISTORICAL_ACCOUNT
+    assert buff.realtime_calls == 1
+
+    historical = captured["adapters"][
+        PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE
+    ].execute(_request(PlatformCapability.READ_HISTORICAL_BUYER_OFFER_STATE))
+    assert historical.status is PlatformResultStatus.RESULT_UNKNOWN
+    assert historical.request.account_id == HISTORICAL_ACCOUNT
+    assert buff.history_calls == [(1, "csgo")]
+
+    calls_before = buff.realtime_calls
+    rejected = captured["adapters"][PlatformCapability.READ_OFFER_STATE].execute(
+        _request(
+            PlatformCapability.READ_OFFER_STATE,
+            account_id=UNRELATED_ACCOUNT,
+        )
+    )
+    assert rejected.status is PlatformResultStatus.FAILURE
+    assert rejected.detail == "identity_mismatch"
+    assert buff.realtime_calls == calls_before
+
+    trade = captured["adapters"][PlatformCapability.READ_STEAM_TRADE_OFFER].execute(
+        _request(
+            PlatformCapability.READ_STEAM_TRADE_OFFER,
+            tradeoffer_id="offer-1",
+        )
+    )
+    assert trade.status is PlatformResultStatus.SUCCESS
+    assert trade.request.account_id == HISTORICAL_ACCOUNT
+    assert trade.request.recipient_steam_id == STEAM_ID
+    assert FakeTradeHttpReader.instance.calls == ["offer-1"]
+
     maintenance.close()
+
+
+def test_public_recovery_builder_credential_steam_mismatch_fails_before_session(
+    monkeypatch,
+):
+    monkeypatch.setattr(host_integration, "get_current_id", lambda: CURRENT_ACCOUNT)
+    monkeypatch.setattr(
+        host_integration,
+        "get_account",
+        lambda requested: {"id": requested, "steam_id": STEAM_ID},
+    )
+    monkeypatch.setattr(
+        host_integration,
+        "get_steam_credentials",
+        lambda: {"steam_id": OTHER_STEAM_ID, "cookies": "fake-cookie"},
+    )
+
+    class MustNotBuildSession:
+        def __init__(self):
+            raise AssertionError("session built before Steam identity proof")
+
+    monkeypatch.setattr(
+        host_integration,
+        "SteamHostEgressSession",
+        MustNotBuildSession,
+    )
+
+    with pytest.raises(host_integration.HostAutoOfferIntegrationError, match="steam_identity_mismatch"):
+        host_integration.build_host_recovery_only_maintenance(
+            buff_client=_BuffReader(),
+            store_path="unused.db",
+        )
