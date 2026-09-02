@@ -1,7 +1,7 @@
 """Public fail-closed read-only adapter facade.
 
 The ordinary adapter contract remains exact-single-account binding.  TASK-069
-needs a narrowly scoped recovery bridge to preserve an existing Store row's
+needs a narrowly scoped recovery bridge to preserve an existing persisted row's
 local account lineage after deployment-local account re-keying.  That extra
 lineage authority is represented by a sealed grant that can only be minted by
 the exact recovery-only Host builder call site; normal callers cannot create
@@ -66,7 +66,7 @@ def _build_sealed_recovery_lineage_surface():
         current_account_id: str,
         persisted_account_ids: frozenset[str],
     ) -> RecoveryAccountLineage:
-        """Mint one Store-derived lineage grant only from the exact Host builder."""
+        """Mint one persisted-evidence lineage grant only from the exact Host builder."""
 
         current = _require_identifier(current_account_id, "account_id")
         if type(persisted_account_ids) is not frozenset:
@@ -243,8 +243,8 @@ class SteamCompletedTradeReadOnlyAdapter(_core.SteamCompletedTradeReadOnlyAdapte
         return super().execute(request)
 
 
-# Recovery-only maintenance never needs inventory aliases.  Keep the inventory
-# adapter exactly on the original singleton account contract.
+# Recovery-only maintenance never needs inventory aliases. Keep that adapter
+# exactly on the original singleton account contract.
 SteamInventoryReadOnlyAdapter = _core.SteamInventoryReadOnlyAdapter
 
 
