@@ -40,31 +40,6 @@ class _RecoveryAccountLineage:
         )
 
 
-def _recovery_builder_frame(expected_current: str):
-    frame = inspect.currentframe()
-    caller = None if frame is None else frame.f_back
-    builder_frame = None if caller is None else caller.f_back
-    try:
-        from app.auto_offer import host_integration as host_integration
-
-        builder = getattr(
-            host_integration,
-            "_build_recovery_only_host_auto_offer_bridge",
-            None,
-        )
-        if (
-            builder_frame is None
-            or builder is None
-            or builder_frame.f_code is not builder.__code__
-            or builder_frame.f_locals.get("account_id") != expected_current
-        ):
-            return None
-        return builder_frame
-    finally:
-        del frame
-        del caller
-
-
 def _make_recovery_account_lineage(
     current_account_id: str,
     persisted_account_ids: frozenset[str],
@@ -96,6 +71,9 @@ def _make_recovery_account_lineage(
             caller is None
             or builder is None
             or caller.f_code is not builder.__code__
+            or caller.f_globals is not vars(host_integration)
+            or caller.f_globals.get("_build_recovery_only_host_auto_offer_bridge")
+            is not builder
             or caller.f_locals.get("account_id") != current
             or type(caller_ids) is not set
             or frozenset(caller_ids) != persisted_account_ids
@@ -157,6 +135,11 @@ def _accepted_account_ids_for(
             builder_frame is None
             or builder is None
             or builder_frame.f_code is not builder.__code__
+            or builder_frame.f_globals is not vars(host_integration)
+            or builder_frame.f_globals.get(
+                "_build_recovery_only_host_auto_offer_bridge"
+            )
+            is not builder
             or builder_frame.f_locals.get("account_id") != current
             or builder_lineage is not recovery_lineage
             or expected != recovery_lineage.accepted_account_ids
