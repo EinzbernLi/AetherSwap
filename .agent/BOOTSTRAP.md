@@ -18,7 +18,8 @@ ordinary_governance:
 lprl:
   version: "v0.2.4-pilot"
   ref: 5f22e63414374b64ebbf4bd91601ede2f54e6f65
-primary_next_product_task: github:EinzbernLi/AetherSwap#233@5510226684
+current_product_task: github:EinzbernLi/AetherSwap#233@5510226684
+product_task_state: implementation_complete_unmerged
 real_write: CLOSED
 ```
 
@@ -40,8 +41,8 @@ Running execution is bound to the exact activated Task revision. Later comments 
 
 - Current authoritative Lead: G20 claim `#149@5502768640`, activation `#149@5502770266`; always re-read #149 before a terminal Result or other authority-bearing transition.
 - TASK-083/#234 and TASK-084/#236 are completed slimming work already integrated.
-- TASK-082/#233 is frozen at `#233@5510226684` as the next product implementation, but remains not dispatched while governance adoption TASK-085 is pending acceptance.
-- TASK-085/#240 is governance/control-plane only; it cannot modify TASK-082 product code/branch or open any real-write boundary.
+- TASK-082/#233 remains bound to its exact implementation revision `#233@5510226684`; a separate bounded implementation worker completed repository implementation at `#233@5511772049` on `task/082-steamauto-parity`, but that work is not merged into the active integration branch at this state.
+- TASK-085/#240 is governance/control-plane only; it cannot modify, absorb, merge, or reinterpret TASK-082 product code/branch or open any real-write boundary.
 
 ## Governance layering
 
