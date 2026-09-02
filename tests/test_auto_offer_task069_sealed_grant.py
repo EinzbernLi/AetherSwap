@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import pytest
 
+import app.auto_offer.host_integration as host_integration
 import app.auto_offer.platform_readonly as platform_readonly
 from app.auto_offer.adapters import PlatformAdapterProtocolError
 
 
 CURRENT_ACCOUNT = "registry-current"
 HISTORICAL_ACCOUNT = "deployment-local-old"
+STEAM_ID = "76561198000000001"
 
 
 class _BuffReader:
@@ -59,3 +61,45 @@ def test_direct_factory_call_remains_recovery_only():
             CURRENT_ACCOUNT,
             frozenset({HISTORICAL_ACCOUNT}),
         )
+
+
+def test_direct_private_recovery_bridge_call_cannot_bypass_public_identity_admission(
+    monkeypatch,
+):
+    calls = {"store_closed": 0, "session_closed": 0}
+
+    class FakeSession:
+        verify = True
+
+        def close(self):
+            calls["session_closed"] += 1
+
+    class FakeStore:
+        def __init__(self, _path):
+            pass
+
+        def initialize_existing(self):
+            pass
+
+        def list_recoverable(self):
+            return []
+
+        def close(self):
+            calls["store_closed"] += 1
+
+    monkeypatch.setattr(host_integration, "SteamHostEgressSession", FakeSession)
+    monkeypatch.setattr(host_integration, "AutoOfferStore", FakeStore)
+
+    with pytest.raises(
+        host_integration.HostAutoOfferIntegrationError,
+        match="recovery_only_bridge_build_failed",
+    ):
+        host_integration._build_recovery_only_host_auto_offer_bridge(
+            buff_client=_BuffReader(),
+            account_id=CURRENT_ACCOUNT,
+            account_steam_id=STEAM_ID,
+            steam_cookie_string="steamLoginSecure=fake",
+            store_path="unused.db",
+        )
+
+    assert calls == {"store_closed": 1, "session_closed": 1}
