@@ -54,6 +54,7 @@ from app.auto_offer.platform_readonly import (
     BuffReadOnlyAdapter,
     SteamCompletedTradeReadOnlyAdapter,
     SteamTradeOfferReadOnlyAdapter,
+    _make_recovery_account_lineage,
 )
 from app.auto_offer.platform_write import BuffBuyerSendOfferAdapter
 from app.auto_offer.steam_confirmation_transport import (
@@ -919,6 +920,7 @@ class _RecoveryOnlyHostAutoOfferBridge:
         "_session",
         "_account_id",
         "_recipient_steam_id",
+        "_accepted_account_ids",
         "_closed",
     )
 
@@ -930,12 +932,28 @@ class _RecoveryOnlyHostAutoOfferBridge:
         session: object,
         account_id: str,
         recipient_steam_id: str,
+        accepted_account_ids: frozenset[str],
     ) -> None:
+        if (
+            type(accepted_account_ids) is not frozenset
+            or not accepted_account_ids
+            or account_id not in accepted_account_ids
+            or any(
+                type(value) is not str
+                or not value
+                or value.strip() != value
+                for value in accepted_account_ids
+            )
+        ):
+            raise HostAutoOfferIntegrationError(
+                "recovery_account_lineage_invalid"
+            )
         self._store = store
         self._coordinator = coordinator
         self._session = session
         self._account_id = account_id
         self._recipient_steam_id = recipient_steam_id
+        self._accepted_account_ids = accepted_account_ids
         self._closed = False
 
     @property
@@ -945,6 +963,10 @@ class _RecoveryOnlyHostAutoOfferBridge:
     @property
     def recipient_steam_id(self) -> str:
         return self._recipient_steam_id
+
+    @property
+    def accepted_account_ids(self) -> frozenset[str]:
+        return self._accepted_account_ids
 
     @property
     def capabilities(self):
@@ -1019,6 +1041,19 @@ def _build_recovery_only_host_auto_offer_bridge(
 
         store = AutoOfferStore(store_path)
         store.initialize_existing()
+        persisted_account_ids = {
+            item.snapshot.account_id
+            for item in store.list_recoverable()
+            if type(item) is StoredDelivery
+            and item.snapshot.recipient_steam_id == recipient
+            and type(item.snapshot.account_id) is str
+            and item.snapshot.account_id
+            and item.snapshot.account_id.strip() == item.snapshot.account_id
+        }
+        recovery_lineage = _make_recovery_account_lineage(
+            account_id,
+            frozenset(persisted_account_ids),
+        )
 
         timeout = (_TIMEOUT_SECONDS, _TIMEOUT_SECONDS)
         trade_offer_reader = SteamTradeOfferHttpReader(
@@ -1037,16 +1072,22 @@ def _build_recovery_only_host_auto_offer_bridge(
         ):
             raise HostAutoOfferIntegrationError("steam_identity_mismatch")
 
-        buff_adapter = BuffReadOnlyAdapter(buff_client, account_id=account_id)
+        buff_adapter = BuffReadOnlyAdapter(
+            buff_client,
+            account_id=account_id,
+            recovery_lineage=recovery_lineage,
+        )
         trade_offer_adapter = SteamTradeOfferReadOnlyAdapter(
             trade_offer_reader,
             account_id=account_id,
             recipient_steam_id=recipient,
+            recovery_lineage=recovery_lineage,
         )
         completed_trade_adapter = SteamCompletedTradeReadOnlyAdapter(
             completed_trade_reader,
             account_id=account_id,
             recipient_steam_id=recipient,
+            recovery_lineage=recovery_lineage,
         )
         adapters = {
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
@@ -1082,6 +1123,7 @@ def _build_recovery_only_host_auto_offer_bridge(
         session=session,
         account_id=account_id,
         recipient_steam_id=recipient,
+        accepted_account_ids=recovery_lineage.accepted_account_ids,
     )
 
 
@@ -1091,6 +1133,7 @@ class HostRecoveryOnlyMaintenance:
     __slots__ = (
         "_bridge",
         "_complete_purchase_receipt_by_id",
+        "_accepted_account_ids",
         "_target_order_id",
         "_target_host_db_id",
         "_receipt_completed",
@@ -1107,6 +1150,11 @@ class HostRecoveryOnlyMaintenance:
             account_id = bridge.account_id
             recipient_steam_id = bridge.recipient_steam_id
             capabilities = bridge.capabilities
+            accepted_account_ids = getattr(
+                bridge,
+                "accepted_account_ids",
+                frozenset({account_id}),
+            )
         except Exception as exc:
             raise HostAutoOfferIntegrationError(
                 "recovery_bridge_invalid"
@@ -1117,11 +1165,21 @@ class HostRecoveryOnlyMaintenance:
             or account_id.strip() != account_id
             or type(recipient_steam_id) is not str
             or not recipient_steam_id
+            or type(accepted_account_ids) is not frozenset
+            or not accepted_account_ids
+            or account_id not in accepted_account_ids
+            or any(
+                type(value) is not str
+                or not value
+                or value.strip() != value
+                for value in accepted_account_ids
+            )
             or frozenset(capabilities) != _RECOVERY_ONLY_CAPABILITIES
         ):
             raise HostAutoOfferIntegrationError("recovery_bridge_invalid")
         self._bridge = bridge
         self._complete_purchase_receipt_by_id = complete_purchase_receipt_by_id
+        self._accepted_account_ids = accepted_account_ids
         self._target_order_id: str | None = None
         self._target_host_db_id: int | None = None
         self._receipt_completed = False
@@ -1164,9 +1222,21 @@ class HostRecoveryOnlyMaintenance:
     def _validate_optional_host_identity(
         self,
         purchase: Mapping[str, object],
+        *,
+        expected_account_id: str | None = None,
     ) -> None:
+        if "account_id" in purchase:
+            actual_account_id = purchase.get("account_id")
+            if expected_account_id is None:
+                account_valid = (
+                    type(actual_account_id) is str
+                    and actual_account_id in self._accepted_account_ids
+                )
+            else:
+                account_valid = actual_account_id == expected_account_id
+            if not account_valid:
+                raise HostAutoOfferIntegrationError("host_store_identity_mismatch")
         for field, expected in (
-            ("account_id", self.account_id),
             ("recipient_steam_id", self.recipient_steam_id),
             ("steam_id", self.recipient_steam_id),
             ("buyer_steamid", self.recipient_steam_id),
@@ -1225,7 +1295,10 @@ class HostRecoveryOnlyMaintenance:
         if (
             snapshot.purchase_id != f"buff:{order_id}"
             or snapshot.buff_order_id != order_id
-            or snapshot.account_id != self.account_id
+            or type(snapshot.account_id) is not str
+            or not snapshot.account_id
+            or snapshot.account_id.strip() != snapshot.account_id
+            or snapshot.account_id not in self._accepted_account_ids
             or snapshot.recipient_steam_id != self.recipient_steam_id
             or type(stored.revision) is not int
             or stored.revision < 1
@@ -1314,6 +1387,10 @@ class HostRecoveryOnlyMaintenance:
         ):
             raise HostAutoOfferIntegrationError("maintenance_target_changed")
         stored = self._store_target(order_id)
+        self._validate_optional_host_identity(
+            purchase,
+            expected_account_id=stored.snapshot.account_id,
+        )
         if self._target_order_id is None:
             self._validate_initial_target(stored)
             self._target_order_id = order_id
@@ -1503,6 +1580,10 @@ class HostRecoveryOnlyMaintenance:
         try:
             order_id, purchase = self._receipt_host_target(host_purchases)
             stored = self._store_target(order_id)
+            self._validate_optional_host_identity(
+                purchase,
+                expected_account_id=stored.snapshot.account_id,
+            )
             snapshot = stored.snapshot
             if (
                 snapshot.delivery_status is not DeliveryStatus.RECEIVED
