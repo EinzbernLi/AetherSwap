@@ -4,26 +4,30 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 import app.auth_bootstrap as bootstrap
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_auth_bootstrap_import_does_not_import_normal_runtime():
+def test_auth_bootstrap_import_does_not_start_normal_runtime_or_initialize_db():
     code = r'''
 import sys
+import app.database as database
+
+def forbidden(*_args, **_kwargs):
+    raise AssertionError("normal Host DB initialization invoked")
+
+database.init_db = forbidden
+database.migrate_from_json = forbidden
 import app.auth_bootstrap
-for forbidden in (
+for forbidden_module in (
     "app.api",
-    "app.database",
     "app.services.workers",
     "app.pipeline",
     "app.auto_offer.host_integration",
 ):
-    assert forbidden not in sys.modules, forbidden
+    assert forbidden_module not in sys.modules, forbidden_module
 print("AUTH_BOOTSTRAP_IMPORT_FENCE_OK")
 '''
     result = subprocess.run(
@@ -145,7 +149,6 @@ def test_readiness_is_local_and_never_returns_sensitive_values(monkeypatch):
         },
     )
 
-    # Any accidental HTTP call from readiness is a test failure.
     import requests
 
     monkeypatch.setattr(
