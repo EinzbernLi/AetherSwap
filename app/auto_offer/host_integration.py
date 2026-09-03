@@ -854,6 +854,7 @@ def _build_active_host_auto_offer_bridge(
         )
         adapters = {
             PlatformCapability.READ_DELIVERY_DIRECTION: buff_adapter,
+            PlatformCapability.READ_BUYER_SEND_ELIGIBILITY: buff_adapter,
             PlatformCapability.READ_OFFER_STATE: buff_adapter,
             PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: buff_adapter,
             PlatformCapability.READ_STEAM_TRADE_OFFER: trade_offer_adapter,
@@ -1824,15 +1825,17 @@ class HostAutoOfferIntegration:
             ):
                 raise HostAutoOfferIntegrationError("direction_step_invalid")
 
-            send_step = self._bridge.step(current)
+            proof = self._bridge.read_send_authority(current)
+            if proof is None:
+                return deferred_order_ids
+            send_step = self._bridge.send_offer_with_authority(current, proof)
             current = getattr(send_step, "after", None)
             if type(current) is not StoredDelivery:
                 raise HostAutoOfferIntegrationError("send_step_invalid")
 
-            if current.snapshot.delivery_status is DeliveryStatus.RESULT_UNKNOWN:
-                return deferred_order_ids
-            elif current.snapshot.delivery_status is not DeliveryStatus.OFFER_SENT:
+            if current.snapshot.delivery_status is not DeliveryStatus.OFFER_ATTEMPTED:
                 raise HostAutoOfferIntegrationError("send_step_invalid")
+            return deferred_order_ids
         return deferred_order_ids
 
     def _host_pending_by_order(self, host_purchases: object) -> dict[str, Mapping[str, object]]:
@@ -1954,7 +1957,11 @@ class HostAutoOfferIntegration:
             return "accept"
         if (
             snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
-            and snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
+            and snapshot.delivery_status
+            in {
+                DeliveryStatus.AWAITING_OFFER,
+                DeliveryStatus.OFFER_ATTEMPTED,
+            }
         ):
             return "send"
         policy = _persisted_recovery_policy(stored)
@@ -2450,7 +2457,11 @@ class HostAutoOfferIntegration:
             or host_purchase.get("pending_receipt") is not True
             or host_purchase.get("assetid") not in (None, "")
             or snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
-            or snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
+            or snapshot.delivery_status
+            not in {
+                DeliveryStatus.AWAITING_OFFER,
+                DeliveryStatus.OFFER_ATTEMPTED,
+            }
             or snapshot.steam_tradeoffer_id is not None
             or snapshot.counterparty_steam_id is not None
         ):
@@ -2471,7 +2482,90 @@ class HostAutoOfferIntegration:
             )
             if refreshed != current:
                 raise HostAutoOfferIntegrationError("normal_send_store_changed")
+
+            if refreshed.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED:
+                read_step = self._bridge.step(refreshed)
+                read_before = getattr(read_step, "before", refreshed)
+                read_after = getattr(read_step, "after", None)
+                read_persisted = getattr(read_step, "persisted", None)
+                read_decision = getattr(read_step, "decision", None)
+                read_decision_result = getattr(read_decision, "result", None)
+                read_platform_result = getattr(read_step, "platform_result", None)
+                if (
+                    read_before != refreshed
+                    or type(read_after) is not StoredDelivery
+                    or type(read_persisted) is not bool
+                    or type(read_decision_result) is not AutoOfferResult
+                    or type(read_platform_result) is not PlatformResult
+                ):
+                    raise HostAutoOfferIntegrationError(
+                        "normal_realtime_read_invalid"
+                    )
+                read_request = read_platform_result.request
+                if (
+                    read_request.capability is not PlatformCapability.READ_OFFER_STATE
+                    or read_request.revision != refreshed.revision
+                    or read_request.purchase_id != refreshed.snapshot.purchase_id
+                    or read_request.buff_order_id != refreshed.snapshot.buff_order_id
+                    or read_request.account_id != refreshed.snapshot.account_id
+                    or read_request.recipient_steam_id
+                    != refreshed.snapshot.recipient_steam_id
+                    or read_request.steam_tradeoffer_id is not None
+                    or read_request.counterparty_steam_id is not None
+                    or read_request.host_goods_id is not None
+                ):
+                    raise HostAutoOfferIntegrationError(
+                        "normal_realtime_read_invalid"
+                    )
+                if read_decision_result is AutoOfferResult.BLOCKED:
+                    return AutoOfferResult.BLOCKED
+                if read_persisted:
+                    if (
+                        read_after.revision != refreshed.revision + 1
+                        or read_after.snapshot.delivery_status
+                        is not DeliveryStatus.OFFER_SENT
+                        or read_platform_result.status
+                        is not PlatformResultStatus.SUCCESS
+                    ):
+                        raise HostAutoOfferIntegrationError(
+                            "normal_realtime_read_invalid"
+                        )
+                    self._validate_normal_store_state(
+                        read_after,
+                        refreshed.snapshot.buff_order_id,
+                    )
+                    return AutoOfferResult.WAITING
+                if (
+                    read_after != refreshed
+                    or read_decision_result is not AutoOfferResult.WAITING
+                ):
+                    raise HostAutoOfferIntegrationError(
+                        "normal_realtime_read_invalid"
+                    )
+                if (
+                    read_platform_result.status is PlatformResultStatus.RESULT_UNKNOWN
+                    and read_platform_result.detail == "order_not_proven"
+                ):
+                    pass
+                elif read_platform_result.status in {
+                    PlatformResultStatus.RESULT_UNKNOWN,
+                    PlatformResultStatus.TIMEOUT,
+                    PlatformResultStatus.UNSUPPORTED,
+                }:
+                    return AutoOfferResult.WAITING
+                elif read_platform_result.status in {
+                    PlatformResultStatus.FAILURE,
+                    PlatformResultStatus.MALFORMED,
+                }:
+                    return AutoOfferResult.BLOCKED
+                else:
+                    raise HostAutoOfferIntegrationError(
+                        "normal_realtime_read_invalid"
+                    )
+
             proof = self._bridge.read_send_authority(refreshed)
+            if proof is None:
+                return AutoOfferResult.WAITING
             send_result = self._bridge.send_offer_with_authority(refreshed, proof)
 
             before = getattr(send_result, "before", None)
@@ -2483,12 +2577,17 @@ class HostAutoOfferIntegration:
                 or type(attempted) is not StoredDelivery
                 or type(after) is not StoredDelivery
                 or type(platform_result) is not PlatformResult
-                or attempted.revision != refreshed.revision + 1
-                or after.revision != attempted.revision + 1
+                or attempted.revision
+                != refreshed.revision
+                + (
+                    1
+                    if refreshed.snapshot.delivery_status
+                    is DeliveryStatus.AWAITING_OFFER
+                    else 0
+                )
+                or after != attempted
                 or attempted.snapshot.delivery_status
                 is not DeliveryStatus.OFFER_ATTEMPTED
-                or after.snapshot.delivery_status is not DeliveryStatus.RESULT_UNKNOWN
-                or after.snapshot.delivery_error != "write_result_unknown"
                 or attempted.snapshot.steam_tradeoffer_id is not None
                 or attempted.snapshot.counterparty_steam_id is not None
                 or after.snapshot.steam_tradeoffer_id is not None
@@ -2503,7 +2602,7 @@ class HostAutoOfferIntegration:
                 != snapshot.recipient_steam_id
             ):
                 raise HostAutoOfferIntegrationError("normal_send_result_invalid")
-        return AutoOfferResult.RESULT_UNKNOWN
+        return AutoOfferResult.WAITING
 
     def _step_normal_confirm_once(
         self,
@@ -3092,10 +3191,17 @@ class HostAutoOfferIntegration:
                     }:
                         return DeliveryTickOutcome(result, order_id, tuple(visited))
                 elif policy == "send":
+                    before_send = stored_by_order[order_id]
                     result = self._step_normal_send_once(
                         host_pending[order_id],
-                        stored_by_order[order_id],
+                        before_send,
                     )
+                    if result is AutoOfferResult.WAITING:
+                        after_send = self._bridge.get_by_purchase_id(
+                            before_send.snapshot.purchase_id
+                        )
+                        if after_send == before_send:
+                            continue
                     return DeliveryTickOutcome(result, order_id, tuple(visited))
                 elif policy == "confirm":
                     result = self._step_normal_confirm_once(

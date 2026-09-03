@@ -45,6 +45,7 @@ class PlatformCapability(str, Enum):
     READ_STEAM_TRADE_OFFER = "read_steam_trade_offer"
     READ_STEAM_COMPLETED_TRADE = "read_steam_completed_trade"
     READ_BUFF_ORDER_LIFECYCLE = "read_buff_order_lifecycle"
+    READ_BUYER_SEND_ELIGIBILITY = "read_buyer_send_eligibility"
     SEND_OFFER = "send_offer"
     ACCEPT_OFFER = "accept_offer"
     CONFIRM_OFFER = "confirm_offer"
@@ -789,6 +790,7 @@ class PlatformResult:
         expected_evidence = {
             PlatformCapability.READ_DELIVERY_DIRECTION: DeliveryDirectionEvidence,
             PlatformCapability.READ_OFFER_STATE: OfferStateEvidence,
+            PlatformCapability.READ_BUYER_SEND_ELIGIBILITY: DeliveryDirectionEvidence,
             PlatformCapability.READ_SELLER_OFFER_ITEM: SellerOrderItemEvidence,
             PlatformCapability.READ_BUFF_ORDER_LIFECYCLE: BuffOrderLifecycleEvidence,
             PlatformCapability.READ_INVENTORY_STATE: InventoryStateEvidence,
@@ -870,6 +872,7 @@ class PlatformAdapter(Protocol):
 DEFAULT_PLATFORM_CAPABILITIES: Final[frozenset[PlatformCapability]] = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
+        PlatformCapability.READ_BUYER_SEND_ELIGIBILITY,
         PlatformCapability.READ_OFFER_STATE,
         PlatformCapability.READ_INVENTORY_STATE,
     }
