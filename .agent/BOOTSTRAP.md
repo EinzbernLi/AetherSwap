@@ -18,8 +18,10 @@ ordinary_governance:
 lprl:
   version: "v0.2.4-pilot"
   ref: 5f22e63414374b64ebbf4bd91601ede2f54e6f65
-current_product_task: github:EinzbernLi/AetherSwap#233@5510226684
-product_task_state: implementation_complete_unmerged
+latest_completed_product_task: github:EinzbernLi/AetherSwap#233@5518389907
+latest_product_merge: 40817ebf42b16d5702924c3a300211ea43b50ade
+current_product_task: null
+product_task_state: no_next_task_activated
 real_write: CLOSED
 ```
 
@@ -41,8 +43,21 @@ Running execution is bound to the exact activated Task revision. Later comments 
 
 - Current authoritative Lead: G20 claim `#149@5502768640`, activation `#149@5502770266`; always re-read #149 before a terminal Result or other authority-bearing transition.
 - TASK-083/#234 and TASK-084/#236 are completed slimming work already integrated.
-- TASK-082/#233 remains bound to its exact implementation revision `#233@5510226684`; a separate bounded implementation worker completed repository implementation at `#233@5511772049` on `task/082-steamauto-parity`, but that work is not merged into the active integration branch at this state.
-- TASK-085/#240 is governance/control-plane only; it cannot modify, absorb, merge, or reinterpret TASK-082 product code/branch or open any real-write boundary.
+- TASK-085/#240 governance 0.3.18 adoption and PR #242 are completed and accepted.
+- TASK-082/#233 exact implementation revision `#233@5510226684` is completed and accepted through Lead Acceptance `#233@5518389907`.
+- TASK-082 product PR #244 is merged at `40817ebf42b16d5702924c3a300211ea43b50ade`; post-merge CI #385 passed `2282` tests with zero failures/errors/skips and baseline gate PASSED.
+- Independent Validator TASK-087/#245 is completed PASS.
+- No next product Task is activated by this bootstrap state. New work must be frozen in a new/existing exact Task before bounded execution.
+
+## Accepted buyer-send baseline
+
+- BUFF exact `wait_send_offers` evidence owns buyer-send eligibility.
+- First buyer SEND durably enters `OFFER_ATTEMPTED` before one write.
+- SEND response does not fabricate/bind Steam Trade Offer identity and does not create a new unbound buyer `RESULT_UNKNOWN`.
+- Later `OFFER_ATTEMPTED` ticks read realtime `/steam_trade` before any fresh wait-send resend authority.
+- Ordinary absence/wait is per-order SAFE_WAIT and does not block unrelated orders.
+- Legacy unbound buyer `RESULT_UNKNOWN` is not made resendable.
+- Historical buyer-offer identity archaeology, Steam GetTradeOffers/sent-history enumeration, and pre-SEND fingerprint designs are retired from the active production path.
 
 ## Governance layering
 
@@ -55,6 +70,7 @@ Running execution is bound to the exact activated Task revision. Later comments 
 ## Safety boundaries
 
 - `REAL-WRITE` is CLOSED by default.
+- TASK-082 acceptance does not authorize a real-order canary.
 - Real Steam/BUFF writes, payments, SEND/ACCEPT/CONFIRM, separately gated authenticated probes, destructive/protected local-resource actions, scope expansion, Lead handoff, and integration->main require the exact applicable OWNER authorization.
 - Protected historical checkout/runtime state is not a Task workspace.
 - Never publish credentials, cookies, tokens, decrypted session material, raw secret values, or other sensitive authentication material.
