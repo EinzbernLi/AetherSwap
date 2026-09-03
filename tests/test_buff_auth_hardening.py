@@ -262,6 +262,102 @@ def test_changed_cookie_still_cannot_bypass_active_rate_limit(monkeypatch):
     assert status == "rate_limited"
 
 
+def test_browser_recovery_recognizes_exact_legacy_cookie_key(monkeypatch):
+    import buff
+    from app.services import buff_auth
+    from buff.request_policy import account_fingerprint_from_cookie_string
+
+    cookies = "session=legacy; csrf_token=csrf"
+    policy = buff.BuffRequestPolicy(min_interval=0, state_path=None, persist=False)
+    legacy_key = account_fingerprint_from_cookie_string(cookies)
+    policy.trip_verification(legacy_key, "verification")
+    monkeypatch.setattr(buff, "get_global_policy", lambda: policy)
+    monkeypatch.setattr(buff_auth, "get_buff_credentials", lambda: {"cookies": cookies})
+    monkeypatch.setattr(buff_auth, "prepare_buff_egress_binding", lambda: None)
+
+    allowed, status, message = buff_auth.browser_buff_verification_allowed()
+
+    assert allowed is True
+    assert status == "verification_required"
+    assert message == ""
+    with pytest.raises(buff.BuffVerificationRequired):
+        policy.raise_if_blocked(legacy_key)
+
+
+def test_browser_recovery_keeps_preverification_legacy_key_after_cookie_rotation(
+    monkeypatch,
+):
+    import buff
+    from app.services import buff_auth
+    from buff.request_policy import account_fingerprint_from_cookie_string
+
+    admitted_cookies = "session=admitted; csrf_token=csrf"
+    rotated_cookies = "session=rotated; csrf_token=csrf"
+    policy = buff.BuffRequestPolicy(min_interval=0, state_path=None, persist=False)
+    legacy_key = account_fingerprint_from_cookie_string(admitted_cookies)
+    policy.trip_verification(legacy_key, "verification")
+    monkeypatch.setattr(buff, "get_global_policy", lambda: policy)
+    monkeypatch.setattr(
+        buff_auth,
+        "get_buff_credentials",
+        lambda: {"cookies": admitted_cookies},
+    )
+    monkeypatch.setattr(buff_auth, "prepare_buff_egress_binding", lambda: None)
+
+    assert buff_auth.browser_buff_verification_allowed()[0] is True
+    monkeypatch.setattr(
+        buff_auth,
+        "get_buff_credentials",
+        lambda: {"cookies": rotated_cookies},
+    )
+
+    assert buff_auth.clear_buff_request_policy_after_verification() is True
+    assert legacy_key not in policy._circuits
+
+
+def test_verified_recovery_clears_only_canonical_and_exact_legacy_keys(monkeypatch):
+    import buff
+    from app.services import buff_auth
+    from buff.request_policy import account_fingerprint, account_fingerprint_from_cookie_string
+
+    cookies = "session=legacy; csrf_token=csrf"
+    policy = buff.BuffRequestPolicy(min_interval=0, state_path=None, persist=False)
+    canonical_key = account_fingerprint({}, account_id="default")
+    legacy_key = account_fingerprint_from_cookie_string(cookies)
+    unrelated_key = account_fingerprint_from_cookie_string("session=unrelated")
+    for key in (canonical_key, legacy_key, unrelated_key):
+        policy.trip_verification(key, "verification")
+    monkeypatch.setattr(buff, "get_global_policy", lambda: policy)
+
+    assert buff_auth.clear_buff_request_policy_after_verification(
+        credential_cookie_string=cookies
+    ) is True
+
+    assert canonical_key not in policy._circuits
+    assert legacy_key not in policy._circuits
+    assert unrelated_key in policy._circuits
+
+
+def test_legacy_rate_limit_blocks_recovery_and_is_not_cleared(monkeypatch):
+    import buff
+    from app.services import buff_auth
+    from buff.request_policy import account_fingerprint_from_cookie_string
+
+    cookies = "session=legacy; csrf_token=csrf"
+    policy = buff.BuffRequestPolicy(min_interval=0, state_path=None, persist=False)
+    legacy_key = account_fingerprint_from_cookie_string(cookies)
+    policy.trip_rate_limit(legacy_key, 60, "cooldown")
+    monkeypatch.setattr(buff, "get_global_policy", lambda: policy)
+    monkeypatch.setattr(buff_auth, "prepare_buff_egress_binding", lambda: None)
+    monkeypatch.setattr(buff_auth, "get_buff_credentials", lambda: {"cookies": cookies})
+
+    allowed, status, _message = buff_auth.browser_buff_verification_allowed()
+
+    assert allowed is False
+    assert status == "rate_limited"
+    assert legacy_key in policy._circuits
+
+
 def test_verified_clear_targets_default_account_only(monkeypatch):
     import buff
     from app.services import buff_auth
