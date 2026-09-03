@@ -281,6 +281,17 @@ def _run_auto_offer_delivery_tick(
     caller already owns the Host receive cadence and BUFF activity exclusion.
     """
 
+    from app.auto_offer.canary_takeover import get_canary_takeover
+
+    takeover = get_canary_takeover()
+    if takeover.owner_active:
+        outcome = takeover.run_owner_tick(purchases)
+        if type(outcome) is not DeliveryTickOutcome:
+            raise RuntimeError("canary_delivery_tick_outcome_invalid")
+        return outcome
+    if takeover.receive_blocked:
+        return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
+
     integration = build_host_auto_offer_integration(
         config=cfg,
         buff_client=buff_client,
@@ -334,6 +345,32 @@ def receive_worker() -> None:
                     # existing BUFF fences after their safety recheck.
                     pass_cfg = load_app_config_validated()
                     purchases = get_purchases()
+                    from app.auto_offer.canary_takeover import get_canary_takeover
+
+                    takeover = get_canary_takeover()
+                    if takeover.owner_active:
+                        outcome = _run_auto_offer_delivery_tick(
+                            pass_cfg,
+                            buff_client,
+                            purchases,
+                            cursor=auto_offer_cursor,
+                        )
+                        auto_offer_cursor = outcome.next_cursor
+                        if outcome.result is AutoOfferResult.RESULT_UNKNOWN:
+                            log(
+                                "receive_worker: canary Auto Offer 不可逆写结果未知，已停止新的交付写动作",
+                                "error",
+                                category="receive",
+                            )
+                        elif outcome.result is AutoOfferResult.BLOCKED:
+                            log(
+                                "receive_worker: canary Auto Offer 状态不一致或安全门阻止本轮推进",
+                                "error",
+                                category="receive",
+                            )
+                        continue
+                    if takeover.receive_blocked:
+                        continue
                     runtime_state = get_effective_runtime_state(
                         config=pass_cfg,
                         purchases=purchases,
