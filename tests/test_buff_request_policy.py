@@ -30,7 +30,6 @@ from buff.request_policy import (
     DEFAULT_MIN_REQUEST_INTERVAL,
     DEFAULT_RATE_LIMIT_SECONDS,
     account_fingerprint,
-    account_fingerprint_from_cookie_string,
     parse_retry_after,
 )
 
@@ -162,14 +161,6 @@ def test_close_only_releases_an_internally_owned_session(monkeypatch):
     )
     injected.close()
     assert external.close_calls == 0
-
-
-def test_cookie_string_fingerprint_reuses_historical_priority_without_exposing_value():
-    cookie_string = "session=rotating; remember_me=stable; csrf_token=csrf"
-
-    assert account_fingerprint_from_cookie_string(cookie_string) == account_fingerprint(
-        {"session": "rotating", "remember_me": "stable", "csrf_token": "csrf"}
-    )
 
 
 def test_persistent_session_accepts_cookie_and_syncs_csrf_before_write():

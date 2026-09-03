@@ -185,25 +185,6 @@ def account_fingerprint(
     return hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()
 
 
-def account_fingerprint_from_cookie_string(cookie_string: str) -> str:
-    """Return the historical cookie-derived account fingerprint.
-
-    This deliberately mirrors the parser used by the legacy BUFF client while
-    keeping the cookie material in memory only.  The returned value is the
-    same one-way fingerprint used by :func:`account_fingerprint` when no
-    canonical account alias is supplied.
-    """
-
-    cookies: dict[str, str] = {}
-    for item in str(cookie_string or "").split(";"):
-        part = item.strip()
-        if "=" not in part:
-            continue
-        name, _, value = part.partition("=")
-        cookies[name.strip()] = value.strip()
-    return account_fingerprint(cookies)
-
-
 def parse_retry_after(
     value: Optional[str],
     *,
@@ -570,7 +551,6 @@ __all__ = [
     "DEFAULT_MIN_REQUEST_INTERVAL",
     "DEFAULT_POLICY_STATE_PATH",
     "account_fingerprint",
-    "account_fingerprint_from_cookie_string",
     "clear_global_policy",
     "get_global_policy",
     "get_global_request_policy",
