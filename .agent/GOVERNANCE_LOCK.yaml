@@ -3,7 +3,7 @@ schema_version: "0.6"
 governance:
   repository: EinzbernLi/agent-dev-governance
   protocol_version: "0.3.18"
-  pinned_ref: 0000000000000000000000000000000000000000
+  pinned_ref: aff6ff205eca64c594cc10b67a3454a765076bb0
   release_version_path: VERSION
   release_compatibility_path: GOVERNANCE_RELEASE.yaml
 
