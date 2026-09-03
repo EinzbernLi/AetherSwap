@@ -32,6 +32,7 @@ from app.auto_offer.canary_takeover import (
     CanaryTakeoverPhase,
     get_canary_takeover,
 )
+from app.auto_offer.canary_purchase_fence import CanarySinglePurchaseBuffClient
 from app.auto_offer.runtime_lifecycle import (
     get_effective_runtime_state,
     preflight_auto_offer_enable,
@@ -272,6 +273,11 @@ def _process_deals_for_target_impl(
         activity_guard = (
             buff_activity_guard() if canary_takeover is not None else nullcontext()
         )
+        checkout_buyer = (
+            CanarySinglePurchaseBuffClient(buyer)
+            if canary_takeover is not None
+            else buyer
+        )
         with activity_guard:
             try:
                 checkout_kwargs = {
@@ -282,7 +288,7 @@ def _process_deals_for_target_impl(
                     checkout_kwargs["is_time_allowed"] = time_window_is_open
                 with external_write_guard("buff_purchase"):
                     paid = lock_and_confirm_payment(
-                        buyer, chosen, purchase_cfg, target, acc,
+                        checkout_buyer, chosen, purchase_cfg, target, acc,
                         ctx.state.set_pending_payment,
                         ctx.state.wait_payment_confirm,
                         ctx.state.confirm_payment,
@@ -909,7 +915,7 @@ def get_pipeline_start_blocker() -> dict:
     if _shutdown_pending:
         return {
             "code": "APP_SHUTDOWN_PENDING",
-            "message": "应用正在重置数据并等待退出，不能启动流水线",
+            "message": "应用正在重置并等待退出，不能启动流水线",
         }
     if _pipeline_maintenance_reason:
         return {
