@@ -73,11 +73,15 @@ jobs:
       - name: Read configured governance source version
         id: source
         shell: bash
+        env:
+          LOCK_REPOSITORY: ${{ steps.lock.outputs.repository }}
+          LOCK_ACCEPTED_VERSION: ${{ steps.lock.outputs.accepted_version }}
+          LOCK_VERSION_PATH: ${{ steps.lock.outputs.version_path }}
         run: |
           set -u
-          source_repo='${{ steps.lock.outputs.repository }}'
-          accepted_version='${{ steps.lock.outputs.accepted_version }}'
-          version_path='${{ steps.lock.outputs.version_path }}'
+          source_repo="$LOCK_REPOSITORY"
+          accepted_version="$LOCK_ACCEPTED_VERSION"
+          version_path="$LOCK_VERSION_PATH"
           encoded_path=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$version_path")
           tmp="$RUNNER_TEMP/governance-version.txt"
           api="https://api.github.com/repos/${source_repo}/contents/${encoded_path}"
@@ -116,14 +120,21 @@ jobs:
 
       - name: Reconcile downstream-local update signal
         shell: bash
+        env:
+          SOURCE_STATUS: ${{ steps.source.outputs.status }}
+          LOCK_REPOSITORY: ${{ steps.lock.outputs.repository }}
+          LOCK_ACCEPTED_VERSION: ${{ steps.lock.outputs.accepted_version }}
+          LOCK_ACCEPTED_PIN: ${{ steps.lock.outputs.accepted_pin }}
+          SOURCE_OBSERVED_VERSION: ${{ steps.source.outputs.observed_version }}
+          SOURCE_DETAIL: ${{ steps.source.outputs.detail }}
         run: |
           set -eu
-          status='${{ steps.source.outputs.status }}'
-          source_repo='${{ steps.lock.outputs.repository }}'
-          accepted_version='${{ steps.lock.outputs.accepted_version }}'
-          accepted_pin='${{ steps.lock.outputs.accepted_pin }}'
-          observed_version='${{ steps.source.outputs.observed_version }}'
-          detail='${{ steps.source.outputs.detail }}'
+          status="$SOURCE_STATUS"
+          source_repo="$LOCK_REPOSITORY"
+          accepted_version="$LOCK_ACCEPTED_VERSION"
+          accepted_pin="$LOCK_ACCEPTED_PIN"
+          observed_version="$SOURCE_OBSERVED_VERSION"
+          detail="$SOURCE_DETAIL"
 
           existing=$(gh issue list --state open --limit 100 --json number,title \
             | jq -r --arg title "$SIGNAL_TITLE" '.[] | select(.title == $title) | .number' \
