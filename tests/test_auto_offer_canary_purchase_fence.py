@@ -1,9 +1,16 @@
 import time
+from contextlib import nullcontext
 
 import pytest
 
+from app import pipeline as pipeline_module
 from app import pipeline_steps as steps
 from app.auto_offer.canary_purchase_fence import CanarySinglePurchaseBuffClient
+from app.auto_offer.canary_takeover import (
+    CanaryTakeoverIntegration,
+    CanaryTakeoverPhase,
+)
+from app.auto_offer.contracts import AutoOfferResult
 
 
 @pytest.fixture(autouse=True)
@@ -95,3 +102,90 @@ def test_canary_client_forces_real_checkout_path_to_one_committed_purchase(monke
     assert len(purchases) == 1
     assert purchases[0]["buff_order_id"] == "bill-sell-1"
     assert pending[-1] is None
+
+
+def test_prepared_canary_pipeline_callsite_uses_single_purchase_client(monkeypatch):
+    class Controller:
+        purchase_blocked = False
+        owner_active = False
+        phase = CanaryTakeoverPhase.PREPARED
+
+    class NormalIntegration:
+        def next_purchase_result(self, _purchases):
+            return AutoOfferResult.WAITING
+
+    class State:
+        def get_purchases(self):
+            return []
+
+        def set_pending_payment(self, _value):
+            return None
+
+        def wait_payment_confirm(self, **_kwargs):
+            return False
+
+        def confirm_payment(self, _value):
+            return None
+
+        def is_stop_requested(self):
+            return False
+
+        def append_purchase(self, _purchase):
+            raise AssertionError("checkout stub must not commit")
+
+    class Context:
+        def __init__(self):
+            self.state = State()
+            self.verbose = False
+
+        def is_stop_requested(self):
+            return False
+
+        def log(self, *_args, **_kwargs):
+            return None
+
+        def set_status(self, *_args, **_kwargs):
+            return None
+
+        def debug(self, *_args, **_kwargs):
+            return None
+
+    seen = []
+
+    def checkout(client, *_args, **_kwargs):
+        seen.append(client)
+        return steps.TIME_WINDOW_CLOSED
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "pick_stable_item",
+        lambda *_args, **_kwargs: (_item(), set()),
+    )
+    monkeypatch.setattr(pipeline_module, "lock_and_confirm_payment", checkout)
+    monkeypatch.setattr(
+        pipeline_module,
+        "external_write_guard",
+        lambda _operation: nullcontext(),
+    )
+
+    wrapper = CanaryTakeoverIntegration(Controller(), NormalIntegration())
+    result = pipeline_module._process_deals_for_target_impl(
+        Context(),
+        [_item()],
+        _config(),
+        100.0,
+        0.0,
+        0,
+        object(),
+        object(),
+        object(),
+        set(),
+        set(),
+        set(),
+        auto_offer_integration=wrapper,
+        effective_cfg=_config(),
+    )
+
+    assert result[2] is steps.TIME_WINDOW_CLOSED
+    assert len(seen) == 1
+    assert isinstance(seen[0], CanarySinglePurchaseBuffClient)
