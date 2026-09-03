@@ -71,3 +71,22 @@ def test_d3_runtime_source_has_no_history_or_authority_dependencies():
     assert "fetch(" not in render_source
     assert "localStorage" not in render_source
     assert "auto_offer.db" not in render_source
+
+
+def test_operator_truth_scope_and_principal_wait_use_existing_reason_surface():
+    main = _source("web/js/main.js")
+    status = _source("app/routes/status.py")
+    operator = _source("app/auto_offer/operator_status.py")
+
+    assert (
+        "Auto Offer 仅负责交付/收货；购买、支付、库存、上架和售出仍由 Host 处理"
+        in operator
+    )
+    assert "principal_delivery_reason" in operator
+    assert "principal_delivery_reason_count" in operator
+    assert "build_delivery_attention_summary" in status
+    assert "format_operator_runtime_reason" in status
+    assert 'runtime_payload["reason_code"] = runtime_payload["reason"]' in status
+    assert 'runtime_payload["reason"] = format_operator_runtime_reason' in status
+    assert 'reasonEl.textContent = runtime.reason ? `原因：${runtime.reason}` : "";' in main
+    assert main.count("setInterval(refreshStatus") == 1

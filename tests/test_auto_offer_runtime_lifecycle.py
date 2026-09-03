@@ -3,6 +3,7 @@ from __future__ import annotations
 import app.auto_offer.runtime_lifecycle as lifecycle
 import pytest
 from app.auto_offer.contracts import DeliveryMode, DeliverySnapshot, DeliveryStatus
+from app.auto_offer.operator_status import AUTO_OFFER_DELIVERY_SCOPE_TEXT
 from app.auto_offer.runtime_mode import AutoOfferRuntimeMode
 from app.auto_offer.store import AutoOfferStoreError, StoredDelivery
 
@@ -429,6 +430,9 @@ def test_backend_status_uses_sanitized_effective_runtime_payload(monkeypatch):
         "requested_enabled": False,
         "mode": "off",
         "active_delivery_count": 0,
-        "reason": None,
+        "reason": f"职责范围：{AUTO_OFFER_DELIVERY_SCOPE_TEXT}",
+        "reason_code": None,
+        "principal_delivery_reason": None,
+        "principal_delivery_reason_count": 0,
     }
     assert payload["buff_no_cookie"] is True
