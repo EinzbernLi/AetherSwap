@@ -34,9 +34,7 @@ from app.state import (
 
 _buff_auth_lock = threading.RLock()
 _buff_egress_lock = threading.RLock()
-_buff_recovery_keys_lock = threading.RLock()
 _prepared_buff_egress_binding: Optional[BuffEgressBinding] = None
-_pending_buff_recovery_keys: dict[str, tuple[str, ...]] = {}
 _buff_auto_relogin_last_success = 0.0
 BUFF_ACCOUNT_ID = "default"
 BUFF_ORIGIN = "https://buff.163.com/"
@@ -161,89 +159,19 @@ def browser_buff_verification_allowed(
     except BuffEgressError as exc:
         return False, "egress_unavailable", exc.code
 
-    from buff import get_global_policy
+    from buff import BuffRateLimited, BuffRequestBlocked, get_global_policy
+    from buff.request_policy import account_fingerprint
 
-    policy = get_global_policy()
-    account_keys = _buff_policy_account_keys(account_id)
-    allowed, status, message = _check_recovery_policy_keys(
-        policy,
-        account_keys,
-    )
-    if not allowed:
-        return False, status, message
-    _remember_buff_recovery_keys(account_id, account_keys)
-    return True, status, "" if status == "verification_required" else message
-
-
-def _buff_policy_account_keys(
-    account_id: str = BUFF_ACCOUNT_ID,
-    credential_cookie_string: Optional[str] = None,
-) -> tuple[str, ...]:
-    """Return canonical plus exact legacy keys for one admitted BUFF account."""
-
-    from buff.request_policy import (
-        account_fingerprint,
-        account_fingerprint_from_cookie_string,
-    )
-
-    canonical_key = account_fingerprint({}, account_id=account_id)
-    if credential_cookie_string is None:
-        credentials = get_buff_credentials() or {}
-        credential_cookie_string = str(credentials.get("cookies") or "")
-    if not str(credential_cookie_string or "").strip():
-        return (canonical_key,)
-    legacy_key = account_fingerprint_from_cookie_string(credential_cookie_string)
-    if legacy_key == canonical_key:
-        return (canonical_key,)
-    return (canonical_key, legacy_key)
-
-
-def _check_recovery_policy_keys(
-    policy: Any,
-    account_keys: tuple[str, ...],
-) -> tuple[bool, str, str]:
-    """Check every exact same-account key before allowing recovery traffic."""
-
-    from buff import BuffRateLimited, BuffRequestBlocked
-
-    verification_required = False
-    verification_message = ""
-    for account_key in account_keys:
-        try:
-            policy.raise_if_blocked(account_key)
-        except BuffRateLimited as exc:
-            return False, "rate_limited", str(exc)
-        except BuffRequestBlocked as exc:
-            verification_required = True
-            if not verification_message:
-                verification_message = str(exc)
-    if verification_required:
-        return True, "verification_required", verification_message
+    account_key = account_fingerprint({}, account_id=account_id)
+    try:
+        get_global_policy().raise_if_blocked(account_key)
+    except BuffRateLimited as exc:
+        return False, "rate_limited", str(exc)
+    except BuffRequestBlocked:
+        # Risk/verification circuits are exactly what an interactive browser is
+        # expected to resolve.  They remain open until verification succeeds.
+        return True, "verification_required", ""
     return True, "ok", ""
-
-
-def _remember_buff_recovery_keys(
-    account_id: str,
-    account_keys: tuple[str, ...],
-) -> None:
-    with _buff_recovery_keys_lock:
-        _pending_buff_recovery_keys[account_id] = account_keys
-
-
-def _pending_or_derived_buff_recovery_keys(
-    account_id: str,
-    credential_cookie_string: Optional[str],
-) -> tuple[str, ...]:
-    if credential_cookie_string is not None:
-        return _buff_policy_account_keys(account_id, credential_cookie_string)
-    with _buff_recovery_keys_lock:
-        pending = _pending_buff_recovery_keys.get(account_id)
-    return pending or _buff_policy_account_keys(account_id)
-
-
-def _forget_buff_recovery_keys(account_id: str) -> None:
-    with _buff_recovery_keys_lock:
-        _pending_buff_recovery_keys.pop(account_id, None)
 
 
 def _global_policy_and_account_key(
@@ -366,29 +294,31 @@ def _trip_browser_verification(
 
 def clear_buff_request_policy_after_verification(
     account_id: str = BUFF_ACCOUNT_ID,
-    *,
-    credential_cookie_string: Optional[str] = None,
 ) -> bool:
-    """Clear only verified canonical and exact legacy account circuits."""
+    """Clear only one verified account's transport circuit."""
 
     try:
-        from buff import get_global_policy
-        policy = get_global_policy()
-        account_keys = _pending_or_derived_buff_recovery_keys(
-            account_id,
-            credential_cookie_string,
+        from buff import (
+            BuffRateLimited,
+            BuffRequestBlocked,
+            get_global_policy,
         )
-        allowed, _status, message = _check_recovery_policy_keys(policy, account_keys)
-        if not allowed:
+        from buff.request_policy import account_fingerprint
+
+        account_key = account_fingerprint({}, account_id=account_id)
+        policy = get_global_policy()
+        try:
+            policy.raise_if_blocked(account_key)
+        except BuffRateLimited as exc:
             log(
-                f"buff_relogin: 账号仍在服务器冷却期，保留熔断: {message}",
+                f"buff_relogin: 账号仍在服务器冷却期，保留熔断: {exc}",
                 "warn",
                 category="buff",
             )
             return False
-        for account_key in account_keys:
-            _clear_account_circuit_preserving_pacing(policy, account_key)
-        _forget_buff_recovery_keys(account_id)
+        except BuffRequestBlocked:
+            pass
+        _clear_account_circuit_preserving_pacing(policy, account_key)
         return True
     except Exception as exc:
         log(f"buff_relogin: 重置请求策略失败 {exc}", "warn", category="buff")
@@ -644,24 +574,26 @@ def manual_buff_probe_allowed(
 ) -> tuple[bool, str, str]:
     """Prevent manual resubmission from bypassing an existing circuit."""
 
-    del candidate_cookies
-    from buff import get_global_policy
-
-    account_keys = _buff_policy_account_keys(BUFF_ACCOUNT_ID, saved_cookies)
-    allowed, status, message = _check_recovery_policy_keys(
-        get_global_policy(),
-        account_keys,
+    del candidate_cookies, saved_cookies
+    from buff import (
+        BuffRateLimited,
+        BuffRequestBlocked,
+        get_global_policy,
     )
-    if not allowed:
-        return False, status, message
-    if status == "verification_required":
+    from buff.request_policy import account_fingerprint
+
+    account_key = account_fingerprint({}, account_id=BUFF_ACCOUNT_ID)
+    try:
+        get_global_policy().raise_if_blocked(account_key)
+        return True, "ok", ""
+    except BuffRateLimited as exc:
+        return False, "rate_limited", str(exc)
+    except BuffRequestBlocked as exc:
         return (
             False,
             "browser_verification_required",
-            message or "BUFF 安全验证尚未完成，请使用浏览器完成验证。",
+            str(exc) or "BUFF 安全验证尚未完成，请使用浏览器完成验证。",
         )
-    _remember_buff_recovery_keys(BUFF_ACCOUNT_ID, account_keys)
-    return True, "ok", ""
 
 
 def try_buff_auto_relogin() -> tuple[bool, str, str]:
@@ -702,6 +634,7 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
     if not cred.get("cookies"):
         log("buff_relogin: 未保存凭证，无法保活", "warn", category="buff")
         return False, "no_creds", "未配置初始凭证，无法自动保活"
+
     checkout_block = buff_credential_replacement_block_reason()
     if checkout_block:
         return False, "checkout_pending", checkout_block
