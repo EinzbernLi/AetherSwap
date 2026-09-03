@@ -17,7 +17,7 @@ This file is a compact recovery entrypoint. Newer exact GitHub Task/Result/Revie
 
 - Ordinary governance accepted pin: `EinzbernLi/agent-dev-governance` `0.3.18@aff6ff205eca64c594cc10b67a3454a765076bb0`.
 - TASK-085/#240 and governance PR #242 are completed and accepted.
-- Update mode remains `manual_pinned`: no proactive update workflow, no follow-main, no automatic adoption or pin advance.
+- Update mode is `github_native_notify`: downstream-local update discovery is enabled without follow-main, automatic adoption, or pin advance.
 - `.agent/LOCAL_POLICY.yaml` remains the project-specific stricter layer for Owner gates, REAL-WRITE, product safety, concurrency, verification, calibration, and local-resource boundaries.
 - Project-local calibration remains a downstream-local derived routing cache only; it is not Task/Result/Acceptance authority and is not exported upstream.
 - LPRL remains independently pinned exactly to `v0.2.4-pilot@5f22e63414374b64ebbf4bd91601ede2f54e6f65`; ordinary governance does not repin or reinterpret it.

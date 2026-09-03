@@ -27,7 +27,7 @@ modules:
     version_path: docs/local-resource-lifecycle/LPRL_SPEC.md
 
 update_policy:
-  mode: manual_pinned
+  mode: github_native_notify
   owner_choice_required_at_onboarding: true
   recommended_mode: github_native_notify
   auto_follow_main: false
@@ -38,7 +38,7 @@ update_policy:
   require_compatibility_check_before_pin_change: true
   explicit_downstream_pin_update_required: true
   detector_template_path: templates/GOVERNANCE_UPDATE_CHECK.yml
-  installed_workflow_path: null
+  installed_workflow_path: .github/workflows/governance-update-check.yml
   signal_type: github_issue
   signal_marker: "[GOVERNANCE-UPDATE-SIGNAL]"
   optional_private_source_secret: GOVERNANCE_SOURCE_TOKEN

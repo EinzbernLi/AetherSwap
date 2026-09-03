@@ -14,7 +14,7 @@ canonical_lead_sink: github:EinzbernLi/AetherSwap#149
 ordinary_governance:
   version: "0.3.18"
   ref: aff6ff205eca64c594cc10b67a3454a765076bb0
-  update_mode: manual_pinned
+  update_mode: github_native_notify
 lprl:
   version: "v0.2.4-pilot"
   ref: 5f22e63414374b64ebbf4bd91601ede2f54e6f65
@@ -63,7 +63,7 @@ Running execution is bound to the exact activated Task revision. Later comments 
 
 - `.agent/GOVERNANCE_LOCK.yaml` pins one exact accepted ordinary-governance source/revision.
 - `.agent/LOCAL_POLICY.yaml` preserves Aether-specific stricter Owner gates, safety constraints, concurrency, verification, calibration and local-resource rules; central adoption must not weaken them.
-- Update discovery remains `manual_pinned`; ordinary takeover/new Task does not proactively follow upstream main.
+- Update discovery is `github_native_notify`; ordinary takeover/new Task still does not proactively follow upstream main, adopt a release, or advance the pin.
 - Project-local calibration remains downstream-local derived evidence only and does not become Task/Result/Acceptance authority.
 - LPRL is independently pinned to `v0.2.4-pilot@5f22e634...`; ordinary governance must not silently repin it. No Control Snapshot/Gate or lifecycle mutation authority is accepted for the current phase.
 
