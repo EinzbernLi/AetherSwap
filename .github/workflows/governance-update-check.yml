@@ -1,0 +1,183 @@
+name: Governance update check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  governance-update-check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_TOKEN: ${{ secrets.GOVERNANCE_SOURCE_TOKEN }}
+      SIGNAL_TITLE: "[GOVERNANCE-UPDATE-SIGNAL] Governance update check requires attention"
+    steps:
+      - name: Check out downstream repository
+        uses: actions/checkout@v4
+
+      - name: Read downstream governance lock
+        id: lock
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+
+          path = Path('.agent/GOVERNANCE_LOCK.yaml')
+          if not path.is_file():
+              raise SystemExit('missing .agent/GOVERNANCE_LOCK.yaml')
+
+          wanted = {
+              ('governance', 'repository'): 'repository',
+              ('governance', 'protocol_version'): 'accepted_version',
+              ('governance', 'pinned_ref'): 'accepted_pin',
+              ('governance', 'release_version_path'): 'version_path',
+              ('update_policy', 'mode'): 'mode',
+          }
+          found = {}
+          section = None
+          for raw in path.read_text(encoding='utf-8').splitlines():
+              if not raw.strip() or raw.lstrip().startswith('#'):
+                  continue
+              if raw == raw.lstrip() and raw.rstrip().endswith(':'):
+                  section = raw.strip()[:-1]
+                  continue
+              if section and raw.startswith('  ') and not raw.startswith('    ') and ':' in raw:
+                  key, value = raw.strip().split(':', 1)
+                  target = wanted.get((section, key))
+                  if target:
+                      value = value.strip().split(' #', 1)[0].strip()
+                      if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                          value = value[1:-1]
+                      if value in {'null', '~'}:
+                          value = ''
+                      found[target] = value
+
+          required = ['repository', 'accepted_version', 'accepted_pin', 'version_path', 'mode']
+          missing = [key for key in required if not found.get(key)]
+          if missing:
+              raise SystemExit('missing required GOVERNANCE_LOCK fields: ' + ', '.join(missing))
+          if found['mode'] != 'github_native_notify':
+              raise SystemExit('unexpected update mode: ' + found['mode'])
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              for key in required:
+                  print(f'{key}={found[key]}', file=out)
+          PY
+
+      - name: Read configured governance source version
+        id: source
+        shell: bash
+        env:
+          LOCK_REPOSITORY: ${{ steps.lock.outputs.repository }}
+          LOCK_ACCEPTED_VERSION: ${{ steps.lock.outputs.accepted_version }}
+          LOCK_VERSION_PATH: ${{ steps.lock.outputs.version_path }}
+        run: |
+          set -u
+          source_repo="$LOCK_REPOSITORY"
+          accepted_version="$LOCK_ACCEPTED_VERSION"
+          version_path="$LOCK_VERSION_PATH"
+          encoded_path=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$version_path")
+          tmp="$RUNNER_TEMP/governance-version.txt"
+          api="https://api.github.com/repos/${source_repo}/contents/${encoded_path}"
+
+          if [ -z "${SOURCE_TOKEN:-}" ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "detail=MISSING_GOVERNANCE_SOURCE_TOKEN" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          http_code=$(curl -sS -L -w '%{http_code}' -o "$tmp" \
+            -H 'Accept: application/vnd.github.raw+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            "$api" || true)
+
+          if [ "$http_code" != "200" ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "detail=HTTP_${http_code:-curl_error}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          observed_version=$(tr -d '[:space:]' < "$tmp")
+          if [ -z "$observed_version" ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "detail=EMPTY_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "observed_version=$observed_version" >> "$GITHUB_OUTPUT"
+          if [ "$observed_version" = "$accepted_version" ]; then
+            echo "status=match" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=differs" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reconcile downstream-local update signal
+        shell: bash
+        env:
+          SOURCE_STATUS: ${{ steps.source.outputs.status }}
+          LOCK_REPOSITORY: ${{ steps.lock.outputs.repository }}
+          LOCK_ACCEPTED_VERSION: ${{ steps.lock.outputs.accepted_version }}
+          LOCK_ACCEPTED_PIN: ${{ steps.lock.outputs.accepted_pin }}
+          SOURCE_OBSERVED_VERSION: ${{ steps.source.outputs.observed_version }}
+          SOURCE_DETAIL: ${{ steps.source.outputs.detail }}
+        run: |
+          set -eu
+          status="$SOURCE_STATUS"
+          source_repo="$LOCK_REPOSITORY"
+          accepted_version="$LOCK_ACCEPTED_VERSION"
+          accepted_pin="$LOCK_ACCEPTED_PIN"
+          observed_version="$SOURCE_OBSERVED_VERSION"
+          detail="$SOURCE_DETAIL"
+
+          existing=$(gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg title "$SIGNAL_TITLE" '.[] | select(.title == $title) | .number' \
+            | head -n 1)
+
+          if [ "$status" = "match" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" >/dev/null
+            fi
+            exit 0
+          fi
+
+          detected_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          body="$RUNNER_TEMP/governance-update-signal.md"
+
+          if [ "$status" = "differs" ]; then
+            cat > "$body" <<EOF
+          <!-- governance-update-signal -->
+          status: VERSION_DIFFERS
+          governance_source: $source_repo
+          accepted_version: $accepted_version
+          accepted_pin: $accepted_pin
+          observed_source_version: $observed_version
+          observed_at: $detected_at
+
+          This is a downstream-local discovery signal only. It does not adopt the observed version, edit ".agent/GOVERNANCE_LOCK.yaml", advance a pin, or grant governance authority. Ask the project Lead/Owner to perform compatibility review before any governance upgrade.
+          EOF
+          else
+            cat > "$body" <<EOF
+          <!-- governance-update-signal -->
+          status: CHECK_FAILED
+          governance_source: $source_repo
+          accepted_version: $accepted_version
+          accepted_pin: $accepted_pin
+          check_detail: ${detail:-UNKNOWN}
+          observed_at: $detected_at
+
+          The configured governance source could not be checked. The project's existing accepted pin remains authority. This local signal does not authorize an upgrade or block already accepted work unless the project's LOCAL_POLICY says otherwise.
+          EOF
+          fi
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$body" >/dev/null
+          else
+            gh issue create --title "$SIGNAL_TITLE" --body-file "$body" >/dev/null
+          fi

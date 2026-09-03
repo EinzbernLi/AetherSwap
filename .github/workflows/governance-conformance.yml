@@ -1,0 +1,134 @@
+name: Governance conformance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - integration/auto-buyer-offer
+
+permissions:
+  contents: read
+
+jobs:
+  governance-conformance:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_TOKEN: ${{ secrets.GOVERNANCE_SOURCE_TOKEN }}
+      GOVERNANCE_REPOSITORY: EinzbernLi/agent-dev-governance
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Resolve exact pinned governance source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SOURCE_TOKEN:-}" ]; then
+            echo 'GOVERNANCE_SOURCE_TOKEN is required for the private pinned governance source.' >&2
+            exit 1
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          path = Path('.agent/GOVERNANCE_LOCK.yaml')
+          if not path.is_file():
+              raise SystemExit('missing .agent/GOVERNANCE_LOCK.yaml')
+          wanted = {}
+          section = None
+          for raw in path.read_text(encoding='utf-8').splitlines():
+              if not raw.strip() or raw.lstrip().startswith('#'):
+                  continue
+              if raw == raw.lstrip() and raw.rstrip().endswith(':'):
+                  section = raw.strip()[:-1]
+                  continue
+              if section == 'governance' and raw.startswith('  ') and not raw.startswith('    ') and ':' in raw:
+                  key, value = raw.strip().split(':', 1)
+                  value = value.strip().split(' #', 1)[0].strip()
+                  if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                      value = value[1:-1]
+                  wanted[key] = value
+
+          repository = wanted.get('repository', '')
+          pinned_ref = wanted.get('pinned_ref', '')
+          if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+              raise SystemExit('malformed governance repository')
+          if not re.fullmatch(r'[0-9a-f]{40}', pinned_ref):
+              raise SystemExit('governance.pinned_ref must be an exact 40-hex commit')
+          if repository != os.environ['GOVERNANCE_REPOSITORY']:
+              raise SystemExit('unexpected governance repository')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              print(f'repository={repository}', file=out)
+              print(f'pinned_ref={pinned_ref}', file=out)
+          PY
+
+      - name: Fetch exact pinned governance evaluator and policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir=$(mktemp -d "$RUNNER_TEMP/governance-conformance.XXXXXX")
+          echo "source_dir=$source_dir" >> "$GITHUB_ENV"
+          curl -fsSL \
+            -H 'Accept: application/vnd.github.raw+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            "https://api.github.com/repos/${{ steps.source.outputs.repository }}/contents/templates/GOVERNANCE_CONFORMANCE_CHECK.py?ref=${{ steps.source.outputs.pinned_ref }}" \
+            -o "$source_dir/GOVERNANCE_CONFORMANCE_CHECK.py"
+          curl -fsSL \
+            -H 'Accept: application/vnd.github.raw+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            "https://api.github.com/repos/${{ steps.source.outputs.repository }}/contents/config/CONFORMANCE_POLICY.yaml?ref=${{ steps.source.outputs.pinned_ref }}" \
+            -o "$source_dir/CONFORMANCE_POLICY.yaml"
+          test -s "$source_dir/GOVERNANCE_CONFORMANCE_CHECK.py"
+          test -s "$source_dir/CONFORMANCE_POLICY.yaml"
+
+      - name: Build ephemeral downstream facts
+        id: facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$source_dir/GOVERNANCE_CONFORMANCE_INPUT.yaml"
+          state_digest=$(sha256sum .agent/PROJECT_STATE.md | awk '{print $1}')
+          cat > "$input" <<EOF
+          schema_version: "0.2"
+          mode: downstream_project
+          central_profile: current_candidate
+          project:
+            name: AetherSwap
+            root: $GITHUB_WORKSPACE
+            root_source: owner_confirmed
+            governance_lock_path: .agent/GOVERNANCE_LOCK.yaml
+            local_policy_path: .agent/LOCAL_POLICY.yaml
+            project_state_path: .agent/PROJECT_STATE.md
+          durable_facts:
+            lead_ref: "github:EinzbernLi/AetherSwap#149@5502768640"
+            lead_digest: "5502768640"
+            task_ref: "github:EinzbernLi/AetherSwap#246@5518448530"
+            task_digest: "5518448530"
+            lead_current: true
+            task_current: true
+            project_state_digest: $state_digest
+            copied_governance_semantics_weakened: false
+            accepted_governance_pin: ${{ steps.source.outputs.pinned_ref }}
+            governance_pin_valid: true
+            accepted_module_pin: 5f22e63414374b64ebbf4bd91601ede2f54e6f65
+            module_compatible: true
+            update_available: false
+          EOF
+          echo "input=$input" >> "$GITHUB_ENV"
+
+      - name: Run exact pinned downstream conformance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$source_dir/GOVERNANCE_CONFORMANCE_CHECK.py" \
+            --root "$GITHUB_WORKSPACE" \
+            --policy "$source_dir/CONFORMANCE_POLICY.yaml" \
+            --input "$input" \
+            --pretty
