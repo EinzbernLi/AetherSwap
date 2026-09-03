@@ -70,3 +70,24 @@ def test_auto_offer_has_no_background_scheduler_entrypoint():
                     violations.append((path.relative_to(ROOT).as_posix(), name))
 
     assert violations == []
+
+
+def test_canary_doc_scopes_no_resend_to_canary_and_defers_normal_path_to_task082():
+    """Prevent historical one-shot wording from becoming a production rule."""
+
+    doc = (ROOT / ".agent" / "AUTO_OFFER_CANARY_ISOLATION.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "The `OFFER_ATTEMPTED` no-resend rule is the stricter outer-fence rule" in doc
+    assert "It is not a claim that the normal Auto Offer state machine can" in doc
+    assert "Normal production semantics remain owned by TASK-082" in doc
+    assert "a fresh `wait_send_offers`" in doc
+    assert "realtime `steam_trade` is tried first" in doc
+    assert "only an exact realtime miss followed by fresh exact BUFF wait-send eligibility" in doc
+    assert "may permit a later `SEND`" in doc
+    assert "The canary has no such normal resend branch" in doc
+    assert "ambiguous ACCEPT/CONFIRM evidence" in doc
+    assert "historical provenance, not a" in doc
+    assert "change to that normal state machine" in doc
+    assert "- persisted attempted/`RESULT_UNKNOWN` states never resend or reconfirm;" not in doc
