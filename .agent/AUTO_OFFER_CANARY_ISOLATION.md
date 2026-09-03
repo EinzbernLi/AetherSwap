@@ -4,6 +4,27 @@ TASK-036 is a safety-boundary task for a **future** first live Auto Offer canary
 
 This revision closes both the same-process owner-context self-mint bypass reported by Terra High Max in Issue #92 comment `5267532563` and the caller-selected production authority/root partition bypass reported in comment `5274521923`, while preserving the earlier TOCTOU, generation/replay, competing-writer, and exact-target protections.
 
+## Current-version TASK-094 canary-vs-normal boundary
+
+The `OFFER_ATTEMPTED` no-resend rule is the stricter outer-fence rule for this
+one-shot canary. It is not a claim that the normal Auto Offer state machine can
+never send again. Normal production semantics remain owned by TASK-082 and
+`.agent/AUTO_OFFER_BUYER_PRIMARY_PATH.md`: a fresh `wait_send_offers`
+authority permits a bounded `SEND` and realtime `steam_trade` is tried first;
+only an exact realtime miss followed by fresh exact BUFF wait-send eligibility
+may permit a later `SEND`. The canary has no such normal resend branch and
+remains fail-closed for `RESULT_UNKNOWN` or ambiguous ACCEPT/CONFIRM evidence.
+The older task identities and comments below are historical provenance, not a
+change to that normal state machine.
+
+The current-version takeover coordinator is process-local before owner
+activation. A failed capture/activation remains an explicit fail-closed fence
+for the process lifetime; it has no speculative pre-owner durable recovery
+protocol. Restarting the process clears only that ephemeral coordinator state,
+not durable canary authority metadata. Any such existing authority fence must
+still be resolved through its existing lifecycle before a new read-only prepare
+can succeed.
+
 ## Guarantee boundary
 
 Within **current-version AetherSwap processes running under the same OS user on the same host**:
@@ -179,7 +200,7 @@ Normal gift flow still holds one normal-writer slot across cart-clear/add/modify
 
 - `AWAITING_OFFER -> OFFER_ATTEMPTED` is persisted before SEND guard/adapter;
 - `OFFER_CONFIRMATION_REQUIRED -> OFFER_CONFIRMATION_ATTEMPTED` is persisted before CONFIRM guard/adapter, but canary-configured Coordinator confirmation additionally requires the single-use fresh identity proof described above;
-- persisted attempted/`RESULT_UNKNOWN` states never resend or reconfirm;
+- canary owner persisted attempted/`RESULT_UNKNOWN` states never resend or reconfirm;
 - later recovery is exact Steam Trade Offer read only.
 
 The Coordinator's canary write-guard closure is bound to the target Host's opaque owner session, not to the public authority object.

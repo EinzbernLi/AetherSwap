@@ -4,7 +4,7 @@ import threading
 import time
 import uuid
 import copy
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, tzinfo
 from pathlib import Path
 import sys
@@ -27,6 +27,12 @@ from app.auto_offer.host_integration import (
     build_host_auto_offer_integration,
     is_auto_offer_enabled,
 )
+from app.auto_offer.canary_takeover import (
+    CanaryTakeoverIntegration,
+    CanaryTakeoverPhase,
+    get_canary_takeover,
+)
+from app.auto_offer.canary_purchase_fence import CanarySinglePurchaseBuffClient
 from app.auto_offer.runtime_lifecycle import (
     get_effective_runtime_state,
     preflight_auto_offer_enable,
@@ -180,11 +186,35 @@ def _process_deals_for_target_impl(
             return False
 
     purchase_cfg = effective_cfg if effective_cfg is not None else cfg
+    canary_takeover = (
+        auto_offer_integration
+        if isinstance(auto_offer_integration, CanaryTakeoverIntegration)
+        else None
+    )
+    pending_canary_commits: list[dict] = []
 
     def append_purchase(purchase: dict) -> None:
         ctx.state.append_purchase(purchase)
         if auto_offer_integration is not None:
             auto_offer_integration.register_committed_purchase(purchase)
+        if canary_takeover is not None:
+            pending_canary_commits.append(dict(purchase))
+
+    def capture_pending_canary_commits() -> None:
+        if canary_takeover is None or not pending_canary_commits:
+            return
+        canary_takeover.capture_committed_purchases(
+            tuple(pending_canary_commits),
+            build_canary_integration=lambda permit: build_host_auto_offer_integration(
+                config=cfg,
+                buff_client=buyer,
+                complete_purchase_receipt_by_id=ctx.state.complete_purchase_receipt_by_id,
+                delete_refund_cleanup_purchase=ctx.state.delete_refund_cleanup_purchase,
+                canary_permit=permit,
+            ),
+            reconcile_checkout=lambda: reconcile_order_created_pending(buyer),
+        )
+        pending_canary_commits.clear()
 
     while acc < target:
         if ctx.is_stop_requested():
@@ -240,66 +270,79 @@ def _process_deals_for_target_impl(
         def on_entering_payment() -> None:
             ctx.set_status("running", "CHECKOUT_PENDING", progress_item=chosen.get("name", ""))
 
-        try:
-            checkout_kwargs = {
-                "log_fn": buff_log,
-                "on_entering_payment": on_entering_payment,
-            }
-            if is_time_allowed is not None:
-                checkout_kwargs["is_time_allowed"] = time_window_is_open
-            with external_write_guard("buff_purchase"):
-                paid = lock_and_confirm_payment(
-                    buyer, chosen, purchase_cfg, target, acc,
-                    ctx.state.set_pending_payment,
-                    ctx.state.wait_payment_confirm,
-                    ctx.state.confirm_payment,
-                    ctx.state.is_stop_requested,
-                    append_purchase,
-                    **checkout_kwargs,
+        activity_guard = (
+            buff_activity_guard() if canary_takeover is not None else nullcontext()
+        )
+        checkout_buyer = (
+            CanarySinglePurchaseBuffClient(buyer)
+            if canary_takeover is not None
+            else buyer
+        )
+        with activity_guard:
+            try:
+                checkout_kwargs = {
+                    "log_fn": buff_log,
+                    "on_entering_payment": on_entering_payment,
+                }
+                if is_time_allowed is not None:
+                    checkout_kwargs["is_time_allowed"] = time_window_is_open
+                with external_write_guard("buff_purchase"):
+                    paid = lock_and_confirm_payment(
+                        checkout_buyer, chosen, purchase_cfg, target, acc,
+                        ctx.state.set_pending_payment,
+                        ctx.state.wait_payment_confirm,
+                        ctx.state.confirm_payment,
+                        ctx.state.is_stop_requested,
+                        append_purchase,
+                        **checkout_kwargs,
+                    )
+            except CanaryAuthorityError:
+                capture_pending_canary_commits()
+                ctx.log(
+                    "Canary authority fenced BUFF purchase before payment call",
+                    "error",
+                    category="buff",
                 )
-        except CanaryAuthorityError:
-            ctx.log(
-                "Canary authority fenced BUFF purchase before payment call",
-                "error",
-                category="buff",
-            )
-            ctx.set_status("error", "CANARY_WRITE_FENCED")
-            return acc, bought, True
-        except Exception as exc:
-            committed_amount = float(
-                getattr(exc, "committed_amount", 0.0) or 0.0
-            )
-            if committed_amount <= 0:
-                raise
-            committed_orders = max(
-                1,
-                int(getattr(exc, "committed_orders", 1) or 1),
-            )
-            acc = round(acc + committed_amount, 2)
-            bought += committed_orders
-            ctx.log(
-                f"成交记录已落库 本笔={committed_amount:.2f} "
-                f"累计={acc:.2f}/{target}；后续 BUFF 写请求已停止",
-                "error",
-                category="buff",
-            )
-            if isinstance(exc, PurchaseWriteResultUnknown):
-                ctx.set_status("error", "BUFF_POST_COMMIT_WRITE_UNKNOWN")
-            elif isinstance(exc, PurchaseOrderCreatedPending):
-                ctx.set_status("error", "BUFF_ORDER_CREATED_PENDING")
-            elif isinstance(exc, BuffRateLimited):
-                ctx.set_status("error", "BUFF_RATE_LIMITED")
-            elif isinstance(exc, BuffVerificationRequired):
-                ctx.state.set_buff_verification_required(True, str(exc))
-                ctx.set_status("error", "BUFF_VERIFICATION_REQUIRED")
-            elif isinstance(exc, BuffAuthExpired):
-                ctx.state.set_buff_auth_expired(True)
-                ctx.set_status("error", "BUFF_AUTH_EXPIRED")
-            elif isinstance(exc, BuffRequestBlocked):
-                ctx.set_status("error", "BUFF_REQUEST_BLOCKED")
+                ctx.set_status("error", "CANARY_WRITE_FENCED")
+                return acc, bought, True
+            except Exception as exc:
+                capture_pending_canary_commits()
+                committed_amount = float(
+                    getattr(exc, "committed_amount", 0.0) or 0.0
+                )
+                if committed_amount <= 0:
+                    raise
+                committed_orders = max(
+                    1,
+                    int(getattr(exc, "committed_orders", 1) or 1),
+                )
+                acc = round(acc + committed_amount, 2)
+                bought += committed_orders
+                ctx.log(
+                    f"成交记录已落库 本笔={committed_amount:.2f} "
+                    f"累计={acc:.2f}/{target}；后续 BUFF 写请求已停止",
+                    "error",
+                    category="buff",
+                )
+                if isinstance(exc, PurchaseWriteResultUnknown):
+                    ctx.set_status("error", "BUFF_POST_COMMIT_WRITE_UNKNOWN")
+                elif isinstance(exc, PurchaseOrderCreatedPending):
+                    ctx.set_status("error", "BUFF_ORDER_CREATED_PENDING")
+                elif isinstance(exc, BuffRateLimited):
+                    ctx.set_status("error", "BUFF_RATE_LIMITED")
+                elif isinstance(exc, BuffVerificationRequired):
+                    ctx.state.set_buff_verification_required(True, str(exc))
+                    ctx.set_status("error", "BUFF_VERIFICATION_REQUIRED")
+                elif isinstance(exc, BuffAuthExpired):
+                    ctx.state.set_buff_auth_expired(True)
+                    ctx.set_status("error", "BUFF_AUTH_EXPIRED")
+                elif isinstance(exc, BuffRequestBlocked):
+                    ctx.set_status("error", "BUFF_REQUEST_BLOCKED")
+                else:
+                    ctx.set_status("error", "BUFF_POST_COMMIT_HALT")
+                return acc, bought, True
             else:
-                ctx.set_status("error", "BUFF_POST_COMMIT_HALT")
-            return acc, bought, True
+                capture_pending_canary_commits()
 
         if ctx.is_stop_requested():
             ctx.set_status("stopped", "已停止")
@@ -373,6 +416,9 @@ def _process_deals_for_target(
             else None
         ),
     )
+    takeover = get_canary_takeover()
+    if integration is not None and takeover.is_prepared:
+        integration = CanaryTakeoverIntegration(takeover, integration)
     try:
         effective_cfg = cfg
         if integration is not None:
@@ -869,12 +915,18 @@ def get_pipeline_start_blocker() -> dict:
     if _shutdown_pending:
         return {
             "code": "APP_SHUTDOWN_PENDING",
-            "message": "应用正在重置数据并等待退出，不能启动流水线",
+            "message": "应用正在重置并等待退出，不能启动流水线",
         }
     if _pipeline_maintenance_reason:
         return {
             "code": "PIPELINE_MAINTENANCE_ACTIVE",
             "message": "配置或数据维护正在进行，暂不能启动流水线",
+        }
+    takeover = get_canary_takeover()
+    if takeover.phase is CanaryTakeoverPhase.ABORTED:
+        return {
+            "code": "CANARY_TAKEOVER_ABORTED",
+            "message": "canary takeover 已安全中止，需清理本次接管状态后才能启动流水线",
         }
     try:
         if canary_metadata_present():
@@ -1006,6 +1058,13 @@ def start_pipeline(
                             "user_reconciled_before_pipeline_restart",
                         )
                     except BuffCheckoutGuardMismatch:
+                        return False
+                takeover = get_canary_takeover()
+                if takeover.is_prepared:
+                    try:
+                        if not is_auto_offer_enabled(config):
+                            return False
+                    except Exception:
                         return False
                 if get_pipeline_start_blocker():
                     return False
