@@ -797,6 +797,22 @@ def test_canary_owner_session_does_not_gain_accept_authority(tmp_path):
     session.release_keep_fence()
 
 
+def test_canary_seller_owner_session_gains_exact_accept_authority(tmp_path):
+    db_path = _host_db_with_goods(tmp_path / "host.db")
+    authority = CanaryAuthority(
+        _root=tmp_path / "authority-seller",
+        _host_db_path=db_path,
+    )
+    session = authority._arm_owner_session(
+        _permit(expected_is_our_offer=False)
+    )
+    calls = []
+    with session.external_write_guard(_target("auto_offer_accept")):
+        calls.append("accept")
+    assert calls == ["accept"]
+    session.release_keep_fence()
+
+
 @pytest.mark.parametrize("action", ["auto_offer_send", "auto_offer_confirm"])
 def test_active_and_stale_canary_authority_block_normal_delivery_barrier(
     tmp_path,

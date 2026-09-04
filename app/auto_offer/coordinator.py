@@ -213,8 +213,12 @@ def _validate_trade_offer_expectations(
     counterparty_steam_id: object,
     is_our_offer: object,
 ) -> tuple[str | None, bool | None]:
-    if counterparty_steam_id is None and is_our_offer is None:
-        return None, None
+    if counterparty_steam_id is None:
+        if is_our_offer is None:
+            return None, None
+        if is_our_offer is not True:
+            raise ReadOnlyCoordinatorError("invalid_expected_trade_offer_direction")
+        return None, True
     if (
         type(counterparty_steam_id) is not str
         or not counterparty_steam_id
@@ -1614,10 +1618,7 @@ class DeliveryCoordinator:
         self._confirmation_identity_proof = None
         _validate_delivery(delivery)
         self._read_current(delivery)
-        if (
-            self._expected_trade_offer_counterparty_steam_id is None
-            or self._expected_trade_offer_is_our_offer is None
-        ):
+        if self._expected_trade_offer_is_our_offer is not True:
             raise ReadOnlyCoordinatorBlockedError("confirmation_identity_guard_required")
         if (
             delivery.snapshot.delivery_status

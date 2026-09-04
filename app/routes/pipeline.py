@@ -1,6 +1,6 @@
 """Pipeline start/stop routes."""
 from fastapi import APIRouter
-from pydantic import BaseModel, StrictBool, StrictStr
+from pydantic import BaseModel
 from app.pipeline import get_pipeline_start_blocker, start_pipeline
 from app.state import request_stop, set_status, log
 router = APIRouter()
@@ -8,11 +8,6 @@ class ConfigBody(BaseModel):
     config: dict
     acknowledge_buff_reconciliation: bool = False
     buff_reconciliation_intent_id: str = ""
-
-
-class CanaryTakeoverPrepareBody(BaseModel):
-    expected_counterparty_steam_id: StrictStr
-    expected_is_our_offer: StrictBool
 
 
 def _buff_egress_start_blocker() -> dict:
@@ -113,7 +108,7 @@ def api_canary_takeover_status():
 
 
 @router.post("/api/pipeline/canary_takeover/prepare")
-def api_canary_takeover_prepare(body: CanaryTakeoverPrepareBody):
+def api_canary_takeover_prepare():
     from app.auto_offer.canary_takeover import CanaryTakeoverError, get_canary_takeover
     from app.auto_offer.host_integration import is_auto_offer_enabled
     from app.config_loader import load_app_config_validated
@@ -140,10 +135,7 @@ def api_canary_takeover_prepare(body: CanaryTakeoverPrepareBody):
             "error": "无法安全确认 Auto Offer 配置，不能准备 canary takeover",
         }
     try:
-        prepared = get_canary_takeover().prepare(
-            expected_counterparty_steam_id=body.expected_counterparty_steam_id,
-            expected_is_our_offer=body.expected_is_our_offer,
-        )
+        prepared = get_canary_takeover().prepare()
     except CanaryTakeoverError as exc:
         return {"ok": False, "code": str(exc), "error": "canary takeover 准备失败"}
     return {"ok": True, **prepared.as_dict()}

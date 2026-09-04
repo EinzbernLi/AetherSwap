@@ -381,7 +381,7 @@ def preflight_canary_permit(
     target_buff_order_id: str,
     account_id: str,
     recipient_steam_id: str,
-    expected_counterparty_steam_id: str,
+    expected_counterparty_steam_id: str | None,
     expected_is_our_offer: bool,
     permit_id: str,
     owner_nonce: str,
@@ -403,11 +403,16 @@ def preflight_canary_permit(
     if type(account_id) is not str or not account_id or account_id.strip() != account_id:
         raise HostAutoOfferIntegrationError("canary_account_invalid")
     recipient = _canonical_steam_id(recipient_steam_id)
-    counterparty = _canonical_steam_id(expected_counterparty_steam_id)
-    if counterparty == recipient:
-        raise HostAutoOfferIntegrationError("canary_counterparty_invalid")
     if type(expected_is_our_offer) is not bool:
         raise HostAutoOfferIntegrationError("canary_direction_invalid")
+    if expected_counterparty_steam_id is None:
+        if expected_is_our_offer is not True:
+            raise HostAutoOfferIntegrationError("canary_counterparty_invalid")
+        counterparty = None
+    else:
+        counterparty = _canonical_steam_id(expected_counterparty_steam_id)
+        if counterparty == recipient:
+            raise HostAutoOfferIntegrationError("canary_counterparty_invalid")
 
     pending = _preflight_host_pending_by_order(host_purchases)
     if set(pending) != {order_id} or pending[order_id].get("_db_id") != db_id:
@@ -813,12 +818,10 @@ def _build_active_host_auto_offer_bridge(
             session=session,
             timeout=timeout,
         )
-        accept_transport = None
-        if canary_permit is None:
-            accept_transport = SteamIncomingOfferAcceptTransport(
-                cookie_string,
-                session=session,
-            )
+        accept_transport = SteamIncomingOfferAcceptTransport(
+            cookie_string,
+            session=session,
+        )
         if (
             trade_offer_reader.bound_account_steam_id != recipient
             or completed_trade_reader.bound_account_steam_id != recipient
@@ -2187,12 +2190,16 @@ class HostAutoOfferIntegration:
         evidence = platform_result.evidence
         if platform_result.status is not PlatformResultStatus.SUCCESS:
             return AutoOfferResult.WAITING, current, False
+        expected_counterparty = (
+            permit.expected_counterparty_steam_id
+            or current.snapshot.counterparty_steam_id
+        )
         if (
-            type(evidence) is not SteamTradeOfferEvidence
+            expected_counterparty is None
+            or type(evidence) is not SteamTradeOfferEvidence
             or evidence.steam_tradeoffer_id != current.snapshot.steam_tradeoffer_id
             or evidence.account_steam_id != permit.recipient_steam_id
-            or evidence.counterparty_steam_id
-            != permit.expected_counterparty_steam_id
+            or evidence.counterparty_steam_id != expected_counterparty
             or evidence.is_our_offer is not permit.expected_is_our_offer
             or permit.expected_is_our_offer is not True
             or evidence.items_to_give != ()
@@ -2202,8 +2209,174 @@ class HostAutoOfferIntegration:
             return AutoOfferResult.BLOCKED, current, False
         return AutoOfferResult.WAITING, current, True
 
+    def _step_canary_send_once(
+        self,
+        host_purchase: Mapping[str, object],
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        """Run the canary's only first SEND from fresh exact BUFF authority."""
+
+        permit = self._canary_permit
+        snapshot = current.snapshot
+        db_id = _exact_db_id(host_purchase.get("_db_id"))
+        if (
+            permit is None
+            or permit.expected_is_our_offer is not True
+            or permit.expected_counterparty_steam_id is not None
+            or db_id != permit.host_db_id
+            or host_purchase.get("buff_order_id") != permit.buff_order_id
+            or host_purchase.get("pending_receipt") is not True
+            or host_purchase.get("assetid") not in (None, "")
+            or snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
+            or snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
+            or snapshot.offer_attempted_at is not None
+            or snapshot.offer_sent_at is not None
+            or snapshot.steam_tradeoffer_id is not None
+            or snapshot.counterparty_steam_id is not None
+        ):
+            raise HostAutoOfferIntegrationError("canary_send_target_invalid")
+        refreshed = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+        if refreshed != current:
+            raise HostAutoOfferIntegrationError("canary_send_store_changed")
+        proof = self._bridge.read_send_authority(refreshed)
+        if proof is None:
+            return AutoOfferResult.WAITING
+        send_result = self._bridge.send_offer_with_authority(refreshed, proof)
+        before = getattr(send_result, "before", None)
+        attempted = getattr(send_result, "attempted", None)
+        after = getattr(send_result, "after", None)
+        platform_result = getattr(send_result, "platform_result", None)
+        if (
+            before != refreshed
+            or type(attempted) is not StoredDelivery
+            or type(after) is not StoredDelivery
+            or type(platform_result) is not PlatformResult
+            or attempted.revision != refreshed.revision + 1
+            or after != attempted
+            or attempted.snapshot.delivery_status is not DeliveryStatus.OFFER_ATTEMPTED
+            or attempted.snapshot.offer_attempted_at is None
+            or attempted.snapshot.steam_tradeoffer_id is not None
+            or attempted.snapshot.counterparty_steam_id is not None
+            or platform_result.request.capability is not PlatformCapability.SEND_OFFER
+            or platform_result.request.revision != attempted.revision
+            or platform_result.request.purchase_id != snapshot.purchase_id
+            or platform_result.request.buff_order_id != snapshot.buff_order_id
+            or platform_result.request.account_id != snapshot.account_id
+            or platform_result.request.recipient_steam_id != snapshot.recipient_steam_id
+        ):
+            raise HostAutoOfferIntegrationError("canary_send_result_invalid")
+        return AutoOfferResult.WAITING
+
+    def _step_canary_accept_once(
+        self,
+        host_purchase: Mapping[str, object],
+        current: StoredDelivery,
+    ) -> AutoOfferResult:
+        """Use the existing exact seller evidence for the canary's only ACCEPT."""
+
+        permit = self._canary_permit
+        snapshot = current.snapshot
+        db_id = _exact_db_id(host_purchase.get("_db_id"))
+        goods_id = _exact_goods_id(host_purchase.get("goods_id"))
+        if (
+            permit is None
+            or permit.expected_is_our_offer is not False
+            or permit.expected_counterparty_steam_id is None
+            or permit.expected_counterparty_steam_id != snapshot.counterparty_steam_id
+            or db_id != permit.host_db_id
+            or goods_id is None
+            or host_purchase.get("buff_order_id") != permit.buff_order_id
+            or host_purchase.get("pending_receipt") is not True
+            or host_purchase.get("assetid") not in (None, "")
+            or snapshot.delivery_mode is not DeliveryMode.SELLER_SENDS_OFFER
+            or snapshot.delivery_status is not DeliveryStatus.OFFER_CONFIRMED
+            or snapshot.steam_tradeoffer_id is None
+            or snapshot.counterparty_steam_id is None
+            or snapshot.offer_attempted_at is not None
+            or snapshot.offer_sent_at is not None
+        ):
+            raise HostAutoOfferIntegrationError("canary_accept_target_invalid")
+        refreshed = self._bridge.get_by_purchase_id(snapshot.purchase_id)
+        if refreshed != current:
+            raise HostAutoOfferIntegrationError("canary_accept_store_changed")
+        authority_result = self._bridge.read_seller_accept_authority(
+            refreshed,
+            goods_id,
+        )
+        if (
+            type(authority_result) is not SellerAcceptAuthorityReadResult
+            or authority_result.before != refreshed
+            or authority_result.host_goods_id != goods_id
+        ):
+            raise HostAutoOfferIntegrationError("canary_accept_authority_invalid")
+        steam_result = authority_result.steam_result
+        proof = authority_result.proof
+        if steam_result is None:
+            if proof is not None:
+                raise HostAutoOfferIntegrationError("canary_accept_authority_invalid")
+            return AutoOfferResult.WAITING
+        decision_result = steam_result.decision.result
+        if decision_result is AutoOfferResult.BLOCKED:
+            if steam_result.persisted or steam_result.after != refreshed or proof is not None:
+                raise HostAutoOfferIntegrationError("canary_accept_authority_invalid")
+            return AutoOfferResult.BLOCKED
+        if steam_result.persisted:
+            after = steam_result.after
+            if (
+                proof is not None
+                or decision_result is not AutoOfferResult.WAITING
+                or after.revision != refreshed.revision + 1
+                or after.snapshot.delivery_status not in {
+                    DeliveryStatus.AWAITING_INVENTORY,
+                    DeliveryStatus.OFFER_TERMINATED,
+                }
+                or after.snapshot.steam_tradeoffer_id != refreshed.snapshot.steam_tradeoffer_id
+                or after.snapshot.counterparty_steam_id != refreshed.snapshot.counterparty_steam_id
+            ):
+                raise HostAutoOfferIntegrationError("canary_accept_authority_invalid")
+            return AutoOfferResult.WAITING
+        if steam_result.after != refreshed or decision_result is not AutoOfferResult.WAITING:
+            raise HostAutoOfferIntegrationError("canary_accept_authority_invalid")
+        if proof is None:
+            return AutoOfferResult.WAITING
+        accept_result = self._bridge.accept_offer_with_authority(refreshed, proof)
+        if type(accept_result) is not AcceptOfferStepResult:
+            raise HostAutoOfferIntegrationError("canary_accept_result_invalid")
+        attempted = accept_result.attempted
+        after = accept_result.after
+        platform_result = accept_result.platform_result
+        request = platform_result.request
+        if (
+            accept_result.before != refreshed
+            or attempted.revision != refreshed.revision + 1
+            or attempted.snapshot.delivery_status is not DeliveryStatus.OFFER_ACCEPT_ATTEMPTED
+            or request.capability is not PlatformCapability.ACCEPT_OFFER
+            or request.purchase_id != snapshot.purchase_id
+            or request.buff_order_id != snapshot.buff_order_id
+            or request.account_id != snapshot.account_id
+            or request.recipient_steam_id != snapshot.recipient_steam_id
+            or request.steam_tradeoffer_id != snapshot.steam_tradeoffer_id
+            or request.counterparty_steam_id != snapshot.counterparty_steam_id
+        ):
+            raise HostAutoOfferIntegrationError("canary_accept_result_invalid")
+        if (
+            platform_result.status is PlatformResultStatus.FAILURE
+            and platform_result.detail == "write_preflight_failed"
+        ):
+            if after != attempted:
+                raise HostAutoOfferIntegrationError("canary_accept_result_invalid")
+            return AutoOfferResult.WAITING
+        if (
+            after.revision != attempted.revision + 1
+            or after.snapshot.delivery_status is not DeliveryStatus.RESULT_UNKNOWN
+            or after.snapshot.delivery_error != "write_result_unknown"
+        ):
+            raise HostAutoOfferIntegrationError("canary_accept_result_invalid")
+        return AutoOfferResult.RESULT_UNKNOWN
+
     def _recover_canary_persisted_delivery(
         self,
+        host_purchase: Mapping[str, object],
         delivery: StoredDelivery,
     ) -> tuple[AutoOfferResult, StoredDelivery]:
         current = delivery
@@ -2213,6 +2386,24 @@ class HostAutoOfferIntegration:
         ):
             return AutoOfferResult.RESULT_UNKNOWN, current
         for _step_index in range(_MAX_CANARY_RECOVERY_STEPS_PER_DELIVERY):
+            if (
+                current.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+                and current.snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER
+            ):
+                result = self._step_canary_send_once(host_purchase, current)
+                refreshed = self._bridge.get_by_purchase_id(current.snapshot.purchase_id)
+                if type(refreshed) is not StoredDelivery:
+                    raise HostAutoOfferIntegrationError("canary_send_store_missing")
+                return result, refreshed
+            if (
+                current.snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER
+                and current.snapshot.delivery_status is DeliveryStatus.OFFER_CONFIRMED
+            ):
+                result = self._step_canary_accept_once(host_purchase, current)
+                refreshed = self._bridge.get_by_purchase_id(current.snapshot.purchase_id)
+                if type(refreshed) is not StoredDelivery:
+                    raise HostAutoOfferIntegrationError("canary_accept_store_missing")
+                return result, refreshed
             policy = _persisted_recovery_policy(current)
             if policy == "wait":
                 return AutoOfferResult.WAITING, current
@@ -3281,7 +3472,10 @@ class HostAutoOfferIntegration:
 
         stored = recoverable[target]
         if target not in deferred_fresh:
-            result, current = self._recover_canary_persisted_delivery(stored)
+            result, current = self._recover_canary_persisted_delivery(
+                host_pending[target],
+                stored,
+            )
             if result in {
                 AutoOfferResult.BLOCKED,
                 AutoOfferResult.RESULT_UNKNOWN,
