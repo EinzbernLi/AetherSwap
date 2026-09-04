@@ -766,7 +766,7 @@ class CanaryAuthority:
                 permit.expected_is_our_offer is not False
                 or permit.expected_counterparty_steam_id is None
             ):
-                raise CanaryWriteBlockedError("canary_direction_mismatch")
+                raise CanaryWriteBlockedError("write_not_allowlisted")
         if target.action == "host_receipt":
             if target.host_db_id != permit.host_db_id or target.assetid is None:
                 raise CanaryWriteBlockedError("canary_host_receipt_identity_required")
