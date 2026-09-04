@@ -1,4 +1,5 @@
 from pathlib import Path
+# TASK098 patch-executor repair, retry 2
 p = Path('.agent/tmp_task098_late_binding_patch.py')
 s = p.read_text(encoding='utf-8')
 old = '''s = replace_once(
