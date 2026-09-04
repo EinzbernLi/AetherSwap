@@ -289,6 +289,12 @@ def _run_auto_offer_delivery_tick(
         if type(outcome) is not DeliveryTickOutcome:
             raise RuntimeError("canary_delivery_tick_outcome_invalid")
         return outcome
+    from app.auto_offer.canary_takeover import CanaryTakeoverPhase
+    if takeover.phase is CanaryTakeoverPhase.TARGET_CAPTURED:
+        outcome = takeover.run_capture_binding_tick(purchases)
+        if type(outcome) is not DeliveryTickOutcome:
+            raise RuntimeError("canary_binding_tick_outcome_invalid")
+        return outcome
     if takeover.receive_blocked:
         return DeliveryTickOutcome(AutoOfferResult.BLOCKED, cursor, ())
 
@@ -348,7 +354,11 @@ def receive_worker() -> None:
                     from app.auto_offer.canary_takeover import get_canary_takeover
 
                     takeover = get_canary_takeover()
-                    if takeover.owner_active:
+                    from app.auto_offer.canary_takeover import CanaryTakeoverPhase
+                    if (
+                        takeover.owner_active
+                        or takeover.phase is CanaryTakeoverPhase.TARGET_CAPTURED
+                    ):
                         outcome = _run_auto_offer_delivery_tick(
                             pass_cfg,
                             buff_client,

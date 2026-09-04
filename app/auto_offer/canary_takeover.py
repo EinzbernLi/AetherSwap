@@ -117,6 +117,8 @@ class CanaryTakeover:
         self._reason: str | None = None
         self._permit = None
         self._active_integration = None
+        self._captured_integration = None
+        self._build_canary_integration = None
 
     def status(self) -> CanaryTakeoverStatus:
         with self._lock:
@@ -169,14 +171,9 @@ class CanaryTakeover:
     def prepare(
         self,
         *,
-        expected_counterparty_steam_id: str,
-        expected_is_our_offer: bool,
         host_purchases: Sequence[Mapping[str, object]] | None = None,
         store_rows: Sequence[object] | None = None,
     ) -> CanaryTakeoverStatus:
-        counterparty = _canonical_steam_id(expected_counterparty_steam_id)
-        if type(expected_is_our_offer) is not bool:
-            raise CanaryTakeoverError("invalid_expected_is_our_offer")
         with self._lock:
             if self._phase is not CanaryTakeoverPhase.IDLE:
                 raise CanaryTakeoverError("canary_takeover_not_idle")
@@ -211,12 +208,14 @@ class CanaryTakeover:
                 raise
             except Exception as exc:
                 raise CanaryTakeoverError("canary_prepare_snapshot_failed") from exc
-            self._expected_counterparty = counterparty
-            self._expected_is_our_offer = expected_is_our_offer
+            self._expected_counterparty = None
+            self._expected_is_our_offer = None
             self._target = {}
             self._reason = None
             self._permit = None
             self._active_integration = None
+            self._captured_integration = None
+            self._build_canary_integration = None
             self._phase = CanaryTakeoverPhase.PREPARED
             return self.status()
 
@@ -237,6 +236,140 @@ class CanaryTakeover:
         self._reason = None
         self._permit = None
         self._active_integration = None
+        self._captured_integration = None
+        self._build_canary_integration = None
+
+    def _abort_locked(self, reason: str) -> None:
+        normal = self._captured_integration
+        self._captured_integration = None
+        self._build_canary_integration = None
+        self._active_integration = None
+        self._permit = None
+        self._reason = reason
+        self._phase = CanaryTakeoverPhase.ABORTED
+        if normal is not None:
+            close = getattr(normal, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    def _validate_captured_host_locked(self, host_purchases: object) -> list[Mapping[str, object]]:
+        order_id = self._target.get("buff_order_id")
+        db_id = self._target.get("host_db_id")
+        if not isinstance(host_purchases, Sequence) or isinstance(host_purchases, (str, bytes)):
+            raise CanaryTakeoverError("canary_host_snapshot_invalid")
+        pending = [
+            item
+            for item in host_purchases
+            if isinstance(item, Mapping)
+            and item.get("pending_receipt") is True
+            and item.get("assetid") in (None, "")
+        ]
+        matches = [
+            item
+            for item in pending
+            if item.get("buff_order_id") == order_id and item.get("_db_id") == db_id
+        ]
+        if len(pending) != 1 or len(matches) != 1:
+            raise CanaryTakeoverError("canary_host_target_not_exclusive")
+        return list(host_purchases)
+
+    def _activate_if_direction_bound_locked(
+        self,
+        host_purchases: list[Mapping[str, object]],
+        *,
+        run_direction_read: bool,
+    ) -> bool:
+        normal = self._captured_integration
+        builder = self._build_canary_integration
+        if normal is None or not callable(builder):
+            raise CanaryTakeoverError("canary_capture_context_missing")
+        order_id = self._target.get("buff_order_id")
+        purchase_id = self._target.get("purchase_id")
+        db_id = self._target.get("host_db_id")
+        account_id = self._target.get("account_id")
+        recipient = self._target.get("recipient_steam_id")
+        if (
+            type(order_id) is not str
+            or type(purchase_id) is not str
+            or type(db_id) is not int
+            or type(account_id) is not str
+            or type(recipient) is not str
+        ):
+            raise CanaryTakeoverError("canary_target_invalid")
+
+        stored = normal.get_by_purchase_id(purchase_id)
+        if type(stored) is not StoredDelivery:
+            raise CanaryTakeoverError("canary_store_target_missing")
+        if stored.snapshot.delivery_status is DeliveryStatus.PENDING_DIRECTION and run_direction_read:
+            outcome = normal.run_delivery_tick(host_purchases, cursor=None)
+            result = getattr(outcome, "result", None)
+            if result in {AutoOfferResult.BLOCKED, AutoOfferResult.RESULT_UNKNOWN}:
+                raise CanaryTakeoverError("canary_direction_read_blocked")
+            if result not in {AutoOfferResult.WAITING, AutoOfferResult.COMPLETE}:
+                raise CanaryTakeoverError("canary_direction_read_invalid")
+            stored = normal.get_by_purchase_id(purchase_id)
+            if type(stored) is not StoredDelivery:
+                raise CanaryTakeoverError("canary_store_target_missing")
+
+        snapshot = stored.snapshot
+        if snapshot.delivery_status is DeliveryStatus.PENDING_DIRECTION:
+            return False
+        if snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER:
+            raise CanaryTakeoverError("canary_direction_state_invalid")
+
+        from .contracts import DeliveryMode
+        if snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER:
+            if snapshot.counterparty_steam_id is not None:
+                raise CanaryTakeoverError("canary_buyer_counterparty_premature")
+            counterparty = None
+            is_our_offer = True
+        elif snapshot.delivery_mode is DeliveryMode.SELLER_SENDS_OFFER:
+            counterparty = _canonical_steam_id(snapshot.counterparty_steam_id)
+            if counterparty == _canonical_steam_id(recipient):
+                raise CanaryTakeoverError("canary_counterparty_invalid")
+            is_our_offer = False
+        else:
+            raise CanaryTakeoverError("canary_direction_state_invalid")
+
+        recoverable = tuple(normal.list_recoverable())
+        if recoverable != (stored,):
+            raise CanaryTakeoverError("canary_store_target_not_exclusive")
+        if self._checkout_provider() is not None:
+            raise CanaryTakeoverError("canary_checkout_unresolved")
+
+        from .host_integration import preflight_canary_permit
+        permit = preflight_canary_permit(
+            host_purchases=host_purchases,
+            unresolved_checkout=None,
+            recoverable_deliveries=recoverable,
+            target_stored=stored,
+            target_db_id=db_id,
+            target_buff_order_id=order_id,
+            account_id=account_id,
+            recipient_steam_id=recipient,
+            expected_counterparty_steam_id=counterparty,
+            expected_is_our_offer=is_our_offer,
+            permit_id=uuid.uuid4().hex,
+            owner_nonce=uuid.uuid4().hex,
+            created_at=float(self._clock()),
+        )
+        self._expected_counterparty = counterparty
+        self._expected_is_our_offer = is_our_offer
+        close = getattr(normal, "close", None)
+        if callable(close):
+            close()
+        self._captured_integration = None
+        active = builder(permit)
+        if active is None:
+            raise CanaryTakeoverError("canary_owner_integration_missing")
+        self._permit = permit
+        self._active_integration = active
+        self._build_canary_integration = None
+        self._phase = CanaryTakeoverPhase.OWNER_ACTIVE
+        return True
 
     def capture_committed_purchases(
         self,
@@ -246,7 +379,7 @@ class CanaryTakeover:
         build_canary_integration: Callable[[object], object],
         reconcile_checkout: Callable[[], object] | None = None,
     ) -> CanaryTakeoverStatus:
-        """Capture exactly one committed Host target and activate its owner."""
+        """Capture one committed target, then late-bind its exact direction."""
 
         if not isinstance(purchases, Sequence) or isinstance(purchases, (str, bytes)):
             raise CanaryTakeoverError("canary_commit_snapshot_invalid")
@@ -261,11 +394,7 @@ class CanaryTakeover:
                 if not isinstance(committed, Mapping):
                     raise CanaryTakeoverError("canary_commit_snapshot_invalid")
                 order_id = committed.get("buff_order_id")
-                if (
-                    type(order_id) is not str
-                    or not order_id
-                    or order_id.strip() != order_id
-                ):
+                if type(order_id) is not str or not order_id or order_id.strip() != order_id:
                     raise CanaryTakeoverError("canary_target_invalid")
                 host_purchases = list(self._host_purchases_provider())
                 pending = [
@@ -273,68 +402,72 @@ class CanaryTakeover:
                     for item in host_purchases
                     if isinstance(item, Mapping)
                     and item.get("pending_receipt") is True
-                    and item.get("buff_order_id") == order_id
+                    and item.get("assetid") in (None, "")
                 ]
-                if len(pending) != 1:
+                matches = [item for item in pending if item.get("buff_order_id") == order_id]
+                if len(pending) != 1 or len(matches) != 1:
                     raise CanaryTakeoverError("canary_host_target_not_exclusive")
-                target = pending[0]
+                target = matches[0]
                 db_id = target.get("_db_id")
                 if type(db_id) is not int or db_id <= 0:
                     raise CanaryTakeoverError("canary_host_target_invalid")
-
-                target_stored = normal_integration.get_by_purchase_id(f"buff:{order_id}")
-                recoverable = tuple(normal_integration.list_recoverable())
                 unresolved = self._checkout_provider()
                 if unresolved is not None and reconcile_checkout is not None:
                     reconcile_checkout()
                     unresolved = self._checkout_provider()
                 if unresolved is not None:
                     raise CanaryTakeoverError("canary_checkout_unresolved")
-
                 account_id = normal_integration.account_id
                 recipient = normal_integration.recipient_steam_id
-                from .host_integration import preflight_canary_permit
-
-                permit = preflight_canary_permit(
-                    host_purchases=host_purchases,
-                    unresolved_checkout=None,
-                    recoverable_deliveries=recoverable,
-                    target_stored=target_stored,
-                    target_db_id=db_id,
-                    target_buff_order_id=order_id,
-                    account_id=account_id,
-                    recipient_steam_id=recipient,
-                    expected_counterparty_steam_id=self._expected_counterparty,
-                    expected_is_our_offer=self._expected_is_our_offer,
-                    permit_id=uuid.uuid4().hex,
-                    owner_nonce=uuid.uuid4().hex,
-                    created_at=float(self._clock()),
-                )
                 self._target = {
-                    "host_db_id": permit.host_db_id,
-                    "buff_order_id": permit.buff_order_id,
-                    "purchase_id": permit.purchase_id,
-                    "account_id": permit.account_id,
-                    "recipient_steam_id": permit.recipient_steam_id,
+                    "host_db_id": db_id,
+                    "buff_order_id": order_id,
+                    "purchase_id": f"buff:{order_id}",
+                    "account_id": account_id,
+                    "recipient_steam_id": recipient,
                 }
-                close = getattr(normal_integration, "close", None)
-                if callable(close):
-                    close()
-                active = build_canary_integration(permit)
-                if active is None:
-                    raise CanaryTakeoverError("canary_owner_integration_missing")
-                self._permit = permit
-                self._active_integration = active
-                self._phase = CanaryTakeoverPhase.OWNER_ACTIVE
+                self._captured_integration = normal_integration
+                self._build_canary_integration = build_canary_integration
+                self._activate_if_direction_bound_locked(
+                    host_purchases,
+                    run_direction_read=True,
+                )
                 return self.status()
             except CanaryTakeoverError as exc:
-                self._reason = str(exc) or type(exc).__name__
-                self._phase = CanaryTakeoverPhase.ABORTED
+                self._abort_locked(str(exc) or type(exc).__name__)
                 raise
             except Exception as exc:
-                self._reason = type(exc).__name__
-                self._phase = CanaryTakeoverPhase.ABORTED
+                self._abort_locked(type(exc).__name__)
                 raise CanaryTakeoverError("canary_takeover_activation_failed") from exc
+
+    def run_capture_binding_tick(self, host_purchases: object):
+        """Run one existing production read step while the captured target is fenced."""
+
+        from .host_integration import DeliveryTickOutcome
+        with self._lock:
+            if self._phase is not CanaryTakeoverPhase.TARGET_CAPTURED:
+                return DeliveryTickOutcome(AutoOfferResult.BLOCKED, None, ())
+            order_id = self._target.get("buff_order_id")
+            try:
+                current_host = self._validate_captured_host_locked(host_purchases)
+                self._activate_if_direction_bound_locked(
+                    current_host,
+                    run_direction_read=True,
+                )
+                return DeliveryTickOutcome(
+                    AutoOfferResult.WAITING,
+                    order_id if isinstance(order_id, str) else None,
+                    (order_id,) if isinstance(order_id, str) else (),
+                )
+            except CanaryTakeoverError as exc:
+                self._abort_locked(str(exc) or type(exc).__name__)
+            except Exception as exc:
+                self._abort_locked(type(exc).__name__)
+            return DeliveryTickOutcome(
+                AutoOfferResult.BLOCKED,
+                order_id if isinstance(order_id, str) else None,
+                (order_id,) if isinstance(order_id, str) else (),
+            )
 
     def run_owner_tick(self, host_purchases: object):
         from .host_integration import DeliveryTickOutcome

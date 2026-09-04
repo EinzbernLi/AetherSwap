@@ -67,6 +67,15 @@ class _NormalIntegration:
     def list_recoverable(self):
         return self.recoverable
 
+    def run_delivery_tick(self, purchases, *, cursor=None):
+        if (
+            self.stored is not None
+            and self.stored.snapshot.delivery_status is DeliveryStatus.PENDING_DIRECTION
+        ):
+            self.stored = _stored(DeliveryStatus.AWAITING_OFFER)
+            self.recoverable = (self.stored,)
+        return DeliveryTickOutcome(AutoOfferResult.WAITING, ORDER_ID, (ORDER_ID,))
+
     def close(self):
         self.closed += 1
 
@@ -96,10 +105,7 @@ def _prepare(controller: CanaryTakeover) -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(takeover_module, "canary_metadata_present", lambda: False)
     try:
-        controller.prepare(
-            expected_counterparty_steam_id=COUNTERPARTY,
-            expected_is_our_offer=True,
-        )
+        controller.prepare()
     finally:
         monkeypatch.undo()
 
@@ -239,3 +245,44 @@ def test_wrapper_blocks_any_second_purchase_after_capture():
     assert wrapper.next_purchase_result(host_rows) is AutoOfferResult.BLOCKED
     with pytest.raises(CanaryTakeoverError, match="canary_second_purchase_forbidden"):
         wrapper.register_committed_purchase({"buff_order_id": "buff-order-8"})
+
+
+
+def test_prepare_has_no_target_specific_identity_or_direction():
+    controller = _controller([])
+    _prepare(controller)
+    status = controller.status()
+    assert status.phase is CanaryTakeoverPhase.PREPARED
+    assert status.expected_counterparty_steam_id is None
+    assert status.expected_is_our_offer is None
+
+
+def test_capture_waits_fenced_until_existing_direction_read_proves_target():
+    host_rows: list[dict] = []
+    controller = _controller(host_rows)
+    _prepare(controller)
+    host_rows.append(_host_row())
+
+    class WaitingNormal(_NormalIntegration):
+        def run_delivery_tick(self, purchases, *, cursor=None):
+            return DeliveryTickOutcome(AutoOfferResult.WAITING, ORDER_ID, (ORDER_ID,))
+
+    normal = WaitingNormal(_stored(), (_stored(),))
+    built = []
+    status = controller.capture_committed_purchases(
+        ({"buff_order_id": ORDER_ID},),
+        normal_integration=normal,
+        build_canary_integration=lambda permit: (built.append(permit) or _OwnerIntegration()),
+    )
+    assert status.phase is CanaryTakeoverPhase.TARGET_CAPTURED
+    assert controller.purchase_blocked is True
+    assert built == []
+
+    normal.stored = _stored(DeliveryStatus.AWAITING_OFFER)
+    normal.recoverable = (normal.stored,)
+    outcome = controller.run_capture_binding_tick(host_rows)
+    assert outcome.result is AutoOfferResult.WAITING
+    assert controller.phase is CanaryTakeoverPhase.OWNER_ACTIVE
+    assert len(built) == 1
+    assert built[0].expected_counterparty_steam_id is None
+    assert built[0].expected_is_our_offer is True

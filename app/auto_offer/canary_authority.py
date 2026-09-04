@@ -23,8 +23,8 @@ _METADATA_VERSION = 3
 _MAX_USED_PERMIT_IDS = 128
 _PRODUCTION_HOST_DB_PATH = Path(__file__).resolve().parents[2] / "config" / "app.db"
 _ACTIVE_PHASES = frozenset({"armed", "completed"})
-_ALLOWED_OWNER_ACTIONS = frozenset({"auto_offer_send", "auto_offer_confirm", "host_receipt"})
-_NORMAL_ONLY_ACTIONS = frozenset({"auto_offer_accept"})
+_ALLOWED_OWNER_ACTIONS = frozenset({"auto_offer_send", "auto_offer_confirm", "auto_offer_accept", "host_receipt"})
+_NORMAL_ONLY_ACTIONS = frozenset()
 _DENIED_DURING_CANARY_ACTIONS = frozenset({
     "buff_purchase",
     "host_transaction_mutation",
@@ -109,7 +109,7 @@ class CanaryPermit:
     purchase_id: str
     account_id: str
     recipient_steam_id: str
-    expected_counterparty_steam_id: str
+    expected_counterparty_steam_id: str | None
     expected_is_our_offer: bool
     expected_host_order_ids: tuple[str, ...]
     expected_store_present: bool
@@ -127,14 +127,21 @@ class CanaryPermit:
             raise CanaryAuthorityError("invalid_purchase_id")
         _exact_text(self.account_id, field="account_id")
         recipient = _exact_text(self.recipient_steam_id, field="recipient_steam_id")
-        counterparty = _exact_steam_id(
-            self.expected_counterparty_steam_id,
-            field="expected_counterparty_steam_id",
-        )
-        if counterparty == recipient:
-            raise CanaryAuthorityError("invalid_expected_counterparty_steam_id")
         if type(self.expected_is_our_offer) is not bool:
             raise CanaryAuthorityError("invalid_expected_is_our_offer")
+        raw_counterparty = self.expected_counterparty_steam_id
+        if raw_counterparty is None:
+            # Source-native buyer-send authority proves direction before SEND,
+            # but counterparty only becomes exact after the resulting Trade Offer.
+            if self.expected_is_our_offer is not True:
+                raise CanaryAuthorityError("invalid_expected_counterparty_steam_id")
+        else:
+            counterparty = _exact_steam_id(
+                raw_counterparty,
+                field="expected_counterparty_steam_id",
+            )
+            if counterparty == recipient:
+                raise CanaryAuthorityError("invalid_expected_counterparty_steam_id")
         if type(self.expected_host_order_ids) is not tuple or self.expected_host_order_ids != (order_id,):
             raise CanaryAuthorityError("invalid_expected_host_order_ids")
         if type(self.expected_store_present) is not bool:
@@ -603,7 +610,7 @@ class CanaryAuthority:
 
     @contextmanager
     def _host_db_write_barrier(self, target: CanaryWriteTarget) -> Iterator[None]:
-        if target.action not in {"auto_offer_send", "auto_offer_confirm"}:
+        if target.action not in {"auto_offer_send", "auto_offer_confirm", "auto_offer_accept"}:
             yield
             return
         if self._host_db_path is None:
@@ -751,6 +758,15 @@ class CanaryAuthority:
             or target.recipient_steam_id != permit.recipient_steam_id
         ):
             raise CanaryWriteBlockedError("canary_target_mismatch")
+        if target.action in {"auto_offer_send", "auto_offer_confirm"}:
+            if permit.expected_is_our_offer is not True:
+                raise CanaryWriteBlockedError("canary_direction_mismatch")
+        elif target.action == "auto_offer_accept":
+            if (
+                permit.expected_is_our_offer is not False
+                or permit.expected_counterparty_steam_id is None
+            ):
+                raise CanaryWriteBlockedError("canary_direction_mismatch")
         if target.action == "host_receipt":
             if target.host_db_id != permit.host_db_id or target.assetid is None:
                 raise CanaryWriteBlockedError("canary_host_receipt_identity_required")
