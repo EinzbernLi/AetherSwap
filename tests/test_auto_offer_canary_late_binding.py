@@ -108,3 +108,6 @@ def test_preflight_accepts_late_bound_buyer_but_rejects_unbound_seller():
             owner_nonce="nonce-3",
             created_at=3.0,
         )
+
+
+# Keep this file as the focused regression boundary for TASK-098 late binding.
