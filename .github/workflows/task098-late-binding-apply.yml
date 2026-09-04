@@ -32,7 +32,7 @@ jobs:
             tests/test_auto_offer_canary_takeover.py \
             tests/test_auto_offer_canary_late_binding.py
       - name: Remove temporary executor
-        run: git rm .agent/tmp_task098_late_binding_patch.py .agent/tmp_task098_patch_fix.py .github/workflows/task098-late-binding-apply.yml
+        run: git rm -f .agent/tmp_task098_late_binding_patch.py .agent/tmp_task098_patch_fix.py .github/workflows/task098-late-binding-apply.yml
       - name: Commit patched tree
         run: |
           git config user.name "github-actions[bot]"
