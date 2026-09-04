@@ -28,5 +28,5 @@ s = s.replace(_takeover_state_old, _takeover_state_new, 1)
 '''
 if s.count(old) != 1:
     raise SystemExit(f'fix anchor count={s.count(old)}')
-p.write_text(s.replace(old, new, 1), encoding='utf-8', newline='\\n')
+p.write_text(s.replace(old, new, 1), encoding='utf-8')
 print('executor fixed')
