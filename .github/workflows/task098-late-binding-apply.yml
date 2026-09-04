@@ -1,0 +1,41 @@
+name: TASK098 late-binding apply
+
+on:
+  push:
+    branches:
+      - task/098-canary-late-binding
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]' && contains(github.event.head_commit.message, 'TASK098 apply late binding')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact patch
+        run: python .agent/tmp_task098_late_binding_patch.py
+      - name: Syntax check touched Python
+        run: |
+          python -m py_compile \
+            app/auto_offer/canary_authority.py \
+            app/auto_offer/coordinator.py \
+            app/auto_offer/host_integration.py \
+            app/auto_offer/canary_takeover.py \
+            app/routes/pipeline.py \
+            app/services/workers.py \
+            tests/test_auto_offer_canary_takeover.py \
+            tests/test_auto_offer_canary_late_binding.py
+      - name: Remove temporary executor
+        run: git rm .agent/tmp_task098_late_binding_patch.py .github/workflows/task098-late-binding-apply.yml
+      - name: Commit patched tree
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "TASK-098: late-bind canary delivery authority"
+          git push origin HEAD:task/098-canary-late-binding
