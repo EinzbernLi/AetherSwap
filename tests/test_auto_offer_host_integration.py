@@ -942,6 +942,41 @@ def _patch_identity(monkeypatch, *, account_id=ACCOUNT_ID, steam_id=STEAM_ID):
     )
 
 
+def test_real_host_facade_exposes_store_reads_without_writes(monkeypatch, tmp_path):
+    _patch_identity(monkeypatch)
+    authority = host_integration.CanaryAuthority(_root=tmp_path / "authority")
+    monkeypatch.setattr(host_integration, "get_canary_authority", lambda: authority)
+    stored = _stored("order-1")
+
+    class ReadOnlyBridge:
+        account_id = ACCOUNT_ID
+        recipient_steam_id = STEAM_ID
+
+        def __init__(self):
+            self.calls = []
+
+        def list_recoverable(self):
+            self.calls.append(("list_recoverable",))
+            return (stored,)
+
+        def get_by_purchase_id(self, purchase_id):
+            self.calls.append(("get_by_purchase_id", purchase_id))
+            return stored if purchase_id == stored.snapshot.purchase_id else None
+
+        def close(self):
+            self.calls.append(("close",))
+
+    bridge = ReadOnlyBridge()
+    integration = host_integration.HostAutoOfferIntegration(bridge)
+
+    assert integration.list_recoverable() == (stored,)
+    assert integration.get_by_purchase_id(stored.snapshot.purchase_id) is stored
+    assert bridge.calls == [
+        ("list_recoverable",),
+        ("get_by_purchase_id", stored.snapshot.purchase_id),
+    ]
+
+
 def test_default_off_and_invalid_flag_are_fail_closed(monkeypatch):
     assert host_integration.is_auto_offer_enabled({}) is False
     assert host_integration.is_auto_offer_enabled({"auto_offer": {}}) is False
