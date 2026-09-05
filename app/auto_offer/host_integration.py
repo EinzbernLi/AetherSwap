@@ -1734,6 +1734,26 @@ class HostAutoOfferIntegration:
     def canary_completed(self) -> bool:
         return self._canary_completed
 
+    def list_recoverable(self) -> tuple[StoredDelivery, ...]:
+        """Expose the owned Store's recoverable rows to takeover logic."""
+
+        try:
+            return tuple(self._bridge.list_recoverable())
+        except HostAutoOfferIntegrationError:
+            raise
+        except Exception:
+            raise HostAutoOfferIntegrationError("store_read_failed") from None
+
+    def get_by_purchase_id(self, purchase_id: str) -> StoredDelivery | None:
+        """Read one exact Store row through the owned bridge."""
+
+        try:
+            return self._bridge.get_by_purchase_id(purchase_id)
+        except HostAutoOfferIntegrationError:
+            raise
+        except Exception:
+            raise HostAutoOfferIntegrationError("store_read_failed") from None
+
     def register_committed_purchase(self, purchase: Mapping[str, object]) -> None:
         if not self._registration_enabled:
             raise HostAutoOfferIntegrationError(
