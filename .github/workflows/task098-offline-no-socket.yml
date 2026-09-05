@@ -37,3 +37,7 @@ jobs:
             tests/test_task042_refund_cleanup.py \
             tests/test_task050_steamauto_primary_path.py \
             tests/test_sync_sold_auto_offer_isolation.py
+
+      - name: Run full repository suite with sockets disabled
+        run: |
+          python -m pytest -q --disable-socket
