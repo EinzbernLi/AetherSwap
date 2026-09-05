@@ -321,7 +321,9 @@ def test_capture_rejects_unresolved_checkout_after_bounded_reconcile():
             reconcile_checkout=lambda: None,
         )
     assert controller.phase is CanaryTakeoverPhase.ABORTED
-    assert normal.closed == 1
+    # Capture failed before the controller retained the integration; the
+    # caller/wrapper still owns normal lifecycle at this point.
+    assert normal.closed == 0
 
 
 def test_wrapper_does_not_close_retained_normal_target_integration():
