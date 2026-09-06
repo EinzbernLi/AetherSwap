@@ -604,6 +604,8 @@ def test_real_sqlite_connections_are_never_crossed_between_pipeline_and_receive(
     close_threads: list[int] = []
     receive_threads: list[int] = []
     holder = {}
+    pipeline_closed = threading.Event()
+    release_pipeline = threading.Event()
 
     class StoreIntegration:
         account_id = ACCOUNT_ID
@@ -645,11 +647,13 @@ def test_real_sqlite_connections_are_never_crossed_between_pipeline_and_receive(
             normal_integration=integration,
         )
         wrapper.close()
+        pipeline_closed.set()
+        release_pipeline.wait(timeout=5)
 
     pipeline = threading.Thread(target=pipeline_thread)
     pipeline.start()
-    pipeline.join(timeout=5)
-    assert not pipeline.is_alive()
+    assert pipeline_closed.wait(timeout=5)
+    assert pipeline.is_alive()
     assert controller.phase is CanaryTakeoverPhase.TARGET_CAPTURED
 
     def receive_tick(_target, _rows, *, cursor=None):
@@ -683,13 +687,19 @@ def test_real_sqlite_connections_are_never_crossed_between_pipeline_and_receive(
             host_rows
         )
 
-    receive = threading.Thread(target=receive_thread)
-    receive.start()
-    receive.join(timeout=5)
-    assert not receive.is_alive()
+    try:
+        receive = threading.Thread(target=receive_thread)
+        receive.start()
+        receive.join(timeout=5)
+        assert not receive.is_alive()
+        assert pipeline.is_alive()
 
-    assert holder["outcome"].result is AutoOfferResult.WAITING
-    assert controller.phase is CanaryTakeoverPhase.OWNER_ACTIVE
-    assert close_threads == [holder["pipeline_id"]]
-    assert receive_threads == [holder["receive_id"]]
-    assert holder["pipeline_id"] != holder["receive_id"]
+        assert holder["outcome"].result is AutoOfferResult.WAITING
+        assert controller.phase is CanaryTakeoverPhase.OWNER_ACTIVE
+        assert close_threads == [holder["pipeline_id"]]
+        assert receive_threads == [holder["receive_id"]]
+        assert holder["pipeline_id"] != holder["receive_id"]
+    finally:
+        release_pipeline.set()
+        pipeline.join(timeout=5)
+        assert not pipeline.is_alive()
