@@ -1,13 +1,13 @@
 """Thin Host-owned fresh-canary target fence.
 
 The canary owns only admission, one exact target identity, a one-purchase fence,
-and a small secret-free crash marker.  It never carries a Store, Coordinator,
+and a small secret-free crash marker. It never carries a Store, Coordinator,
 Steam session, BUFF client, or Host integration across threads.
 
-Purchase registration/capture happens in the buy-pipeline thread.  Once a target
-is captured, that thread closes its ordinary Host integration.  The existing
-Host receive worker remains the sole delivery scheduler; each canary delivery
-tick provisions a fresh ordinary Host integration in the receive-worker thread.
+Purchase registration/capture happens in the buy-pipeline thread. Once a target
+is captured, that thread closes its ordinary Host integration. The existing Host
+receive worker remains the sole delivery scheduler; each canary delivery tick
+provisions a fresh ordinary Host integration in the receive-worker thread.
 """
 
 from __future__ import annotations
@@ -189,7 +189,20 @@ class CanaryTakeover:
 
     @property
     def is_prepared(self) -> bool:
-        return self.phase is CanaryTakeoverPhase.PREPARED
+        """Compatibility surface used by the buy-pipeline canary wrapper.
+
+        Once the one target is captured, later pipeline-start attempts must
+        remain wrapped so they stop at the existing target fence rather than
+        falling back to the normal multi-purchase path. COMPLETE is included so
+        a second start reports the completed canary instead of buying again.
+        """
+
+        return self.phase in {
+            CanaryTakeoverPhase.PREPARED,
+            CanaryTakeoverPhase.TARGET_CAPTURED,
+            CanaryTakeoverPhase.OWNER_ACTIVE,
+            CanaryTakeoverPhase.COMPLETE,
+        }
 
     @property
     def owner_active(self) -> bool:
@@ -283,10 +296,10 @@ class CanaryTakeover:
         path = self._target_fence_path
         if path is None:
             return
-        temp_name: str | None = None
+        temporary_name: str | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temp_name = tempfile.mkstemp(
+            fd, temporary_name = tempfile.mkstemp(
                 prefix=f".{path.name}.",
                 suffix=".tmp",
                 dir=str(path.parent),
@@ -301,16 +314,16 @@ class CanaryTakeover:
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_name, path)
-            temp_name = None
+            os.replace(temporary_name, path)
+            temporary_name = None
         except Exception as exc:
             raise CanaryTakeoverError(
                 "canary_target_fence_write_failed"
             ) from exc
         finally:
-            if temp_name is not None:
+            if temporary_name is not None:
                 try:
-                    os.unlink(temp_name)
+                    os.unlink(temporary_name)
                 except OSError:
                     pass
 
@@ -654,6 +667,18 @@ class CanaryTakeover:
         self._phase = CanaryTakeoverPhase.COMPLETE
         self._reason = None
 
+    @staticmethod
+    def _receive_failure_reason(exc: Exception) -> str:
+        from .canary_receive import CanaryReceiveTickError
+
+        if isinstance(exc, CanaryReceiveTickError):
+            reason = str(exc)
+            if reason and reason.strip() == reason and not any(
+                ord(character) < 32 for character in reason
+            ):
+                return reason
+        return f"canary_receive_unexpected_{type(exc).__name__}"
+
     def capture_committed_purchases(
         self,
         purchases: Sequence[Mapping[str, object]],
@@ -828,7 +853,7 @@ class CanaryTakeover:
         try:
             tick = self._run_receive_tick(current_host)
         except Exception as exc:
-            reason = str(exc) or type(exc).__name__
+            reason = self._receive_failure_reason(exc)
             with self._lock:
                 self._abort_locked(reason)
             return DeliveryTickOutcome(
@@ -941,7 +966,7 @@ class CanaryTakeover:
         try:
             tick = self._run_receive_tick(current_host)
         except Exception as exc:
-            reason = str(exc) or type(exc).__name__
+            reason = self._receive_failure_reason(exc)
             with self._lock:
                 self._abort_locked(reason)
             return DeliveryTickOutcome(
