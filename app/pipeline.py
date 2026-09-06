@@ -225,10 +225,29 @@ def _process_deals_for_target_impl(
             ctx.log("购买时间窗已关闭，暂停候选分析与下单", "info", category="pipeline")
             return acc, bought, TIME_WINDOW_CLOSED
 
+        if canary_takeover is not None and canary_takeover.purchase_fence_active:
+            ctx.log(
+                "Auto Offer live-canary target already captured; stopping purchases while Host receive worker continues delivery",
+                "info",
+                category="buff",
+            )
+            ctx.set_status("stopped", "AUTO_OFFER_CANARY_TARGET_ACTIVE")
+            return acc, bought, True
+
         if auto_offer_integration is not None:
             host_purchases = ctx.state.get_purchases()
             result = auto_offer_integration.next_purchase_result(host_purchases)
-            if getattr(auto_offer_integration, "is_canary", False) and result is AutoOfferResult.COMPLETE:
+            if (
+                result is AutoOfferResult.COMPLETE
+                and (
+                    getattr(auto_offer_integration, "is_canary", False)
+                    or getattr(
+                        auto_offer_integration,
+                        "canary_completed",
+                        False,
+                    )
+                )
+            ):
                 ctx.log(
                     "Auto Offer live-canary target complete; pipeline stopped before any next purchase",
                     "info",

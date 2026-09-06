@@ -360,10 +360,8 @@ def test_wrapper_blocks_any_second_purchase_after_capture():
         build_canary_integration=_never_build,
     )
 
-    assert (
-        wrapper.next_purchase_result(host_rows)
-        is AutoOfferResult.BLOCKED
-    )
+    assert wrapper.purchase_fence_active is True
+    assert wrapper.next_purchase_result(host_rows) is AutoOfferResult.WAITING
     with pytest.raises(
         CanaryTakeoverError,
         match="canary_second_purchase_forbidden",
@@ -405,6 +403,17 @@ def test_capture_waits_fenced_until_same_integration_proves_direction():
     assert controller.active_integration() is None
     assert normal.closed == 0
     assert normal.ticks == 1
+
+    wrapper = CanaryTakeoverIntegration(controller, normal)
+    assert wrapper.purchase_fence_active is True
+    assert wrapper.next_purchase_result(host_rows) is AutoOfferResult.WAITING
+    with pytest.raises(
+        CanaryTakeoverError,
+        match="canary_second_purchase_forbidden",
+    ):
+        wrapper.register_committed_purchase(
+            {"buff_order_id": "buff-order-8"}
+        )
 
     normal.direction_wait = False
     outcome = controller.run_capture_binding_tick(host_rows)
@@ -493,3 +502,63 @@ def test_active_target_allows_host_row_to_disappear_only_for_normal_terminal_che
     assert outcome.result is AutoOfferResult.COMPLETE
     assert controller.phase is CanaryTakeoverPhase.COMPLETE
     assert normal.closed == 1
+
+
+def test_wrapper_reports_complete_and_keeps_owner_delivery_tick_available():
+    host_rows: list[dict] = []
+    controller = _controller(host_rows)
+    _prepare(controller)
+    host_rows.append(_host_row())
+    normal = _NormalIntegration(
+        _stored(),
+        (_stored(),),
+        post_direction_result=AutoOfferResult.COMPLETE,
+    )
+
+    controller.capture_committed_purchases(
+        ({"buff_order_id": ORDER_ID},),
+        normal_integration=normal,
+        build_canary_integration=_never_build,
+    )
+    wrapper = CanaryTakeoverIntegration(controller, normal)
+
+    assert wrapper.purchase_fence_active is True
+    assert wrapper.run_delivery_tick(host_rows).result is AutoOfferResult.COMPLETE
+    assert wrapper.purchase_fence_active is False
+    assert wrapper.canary_completed is True
+    assert wrapper.next_purchase_result(host_rows) is AutoOfferResult.COMPLETE
+    with pytest.raises(
+        CanaryTakeoverError,
+        match="canary_second_purchase_forbidden",
+    ):
+        wrapper.register_committed_purchase(
+            {"buff_order_id": "buff-order-8"}
+        )
+
+
+def test_wrapper_reports_aborted_as_blocked_without_active_purchase_fence():
+    controller = _controller([])
+    _prepare(controller)
+    normal = _NormalIntegration(_stored(), (_stored(),))
+    wrapper = CanaryTakeoverIntegration(controller, normal)
+
+    with pytest.raises(
+        CanaryTakeoverError,
+        match="canary_multiple_committed_purchases",
+    ):
+        controller.capture_committed_purchases(
+            (),
+            normal_integration=normal,
+            build_canary_integration=_never_build,
+        )
+
+    assert controller.phase is CanaryTakeoverPhase.ABORTED
+    assert wrapper.purchase_fence_active is False
+    assert wrapper.next_purchase_result([]) is AutoOfferResult.BLOCKED
+    with pytest.raises(
+        CanaryTakeoverError,
+        match="canary_second_purchase_forbidden",
+    ):
+        wrapper.register_committed_purchase(
+            {"buff_order_id": "buff-order-8"}
+        )
