@@ -8,6 +8,7 @@ before their exact adapter invocation.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Mapping
@@ -55,6 +56,7 @@ from .store import (
 )
 
 
+_LOGGER = logging.getLogger(__name__)
 _READ_CAPABILITIES = frozenset(
     {
         PlatformCapability.READ_DELIVERY_DIRECTION,
@@ -196,6 +198,33 @@ def _validate_timestamp(value: object) -> float:
     ):
         raise ReadOnlyCoordinatorError("invalid_clock_value")
     return float(value)
+
+
+def _post_send_binding_detail(platform_result: PlatformResult) -> str:
+    """Return one fixed secret-free class for buyer post-SEND diagnostics."""
+
+    status = platform_result.status
+    if status is PlatformResultStatus.SUCCESS:
+        return (
+            "offer_bound"
+            if type(platform_result.evidence) is OfferStateEvidence
+            else "success"
+        )
+    if status is PlatformResultStatus.RESULT_UNKNOWN:
+        return (
+            "order_not_proven"
+            if platform_result.detail == "order_not_proven"
+            else "result_unknown"
+        )
+    if status is PlatformResultStatus.TIMEOUT:
+        return "timeout"
+    if status is PlatformResultStatus.UNSUPPORTED:
+        return "unsupported"
+    if status is PlatformResultStatus.FAILURE:
+        return "failure"
+    if status is PlatformResultStatus.MALFORMED:
+        return "malformed"
+    return "other"
 
 
 def _validate_delivery(delivery: object) -> None:
@@ -610,20 +639,10 @@ class SendOfferStepResult:
         if (
             self.before.snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
             or self.before.snapshot.delivery_status
-            not in {
-                DeliveryStatus.AWAITING_OFFER,
-                DeliveryStatus.OFFER_ATTEMPTED,
-            }
+            is not DeliveryStatus.AWAITING_OFFER
             or self.attempted.snapshot.delivery_status
             is not DeliveryStatus.OFFER_ATTEMPTED
-            or self.attempted.revision
-            != self.before.revision
-            + (
-                1
-                if self.before.snapshot.delivery_status
-                is DeliveryStatus.AWAITING_OFFER
-                else 0
-            )
+            or self.attempted.revision != self.before.revision + 1
             or not _same_delivery_identity(self.before, self.attempted)
             or not _same_delivery_identity(self.attempted, self.after)
             or not _request_matches_delivery(
@@ -1175,7 +1194,21 @@ class DeliveryCoordinator:
             platform_result = self._execute(adapter, request)
         platform_result = self._guard_trade_offer_identity(delivery, platform_result)
         decision = self._plan(delivery, platform_result)
-        return self._persist_read(delivery, decision, platform_result)
+        result = self._persist_read(delivery, decision, platform_result)
+        if (
+            capability is PlatformCapability.READ_OFFER_STATE
+            and delivery.snapshot.delivery_mode is DeliveryMode.BUYER_SENDS_OFFER
+            and delivery.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED
+        ):
+            _LOGGER.info(
+                "auto_offer_post_send_binding capability=read_offer_state "
+                "status=%s detail=%s persisted=%s decision=%s",
+                platform_result.status.value,
+                _post_send_binding_detail(platform_result),
+                str(result.persisted).lower(),
+                result.decision.result.value,
+            )
+        return result
 
     def read_send_authority(
         self,
@@ -1193,14 +1226,13 @@ class DeliveryCoordinator:
         snapshot = delivery.snapshot
         if (
             snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
-            or snapshot.delivery_status
-            not in {
-                DeliveryStatus.AWAITING_OFFER,
-                DeliveryStatus.OFFER_ATTEMPTED,
-            }
             or snapshot.steam_tradeoffer_id is not None
             or snapshot.counterparty_steam_id is not None
         ):
+            raise ReadOnlyCoordinatorBlockedError("send_authority_not_available")
+        if snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED:
+            return None
+        if snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER:
             raise ReadOnlyCoordinatorBlockedError("send_authority_not_available")
         capability = PlatformCapability.READ_BUYER_SEND_ELIGIBILITY
         adapter = self._adapters.get(capability)
@@ -1650,19 +1682,16 @@ class DeliveryCoordinator:
         adapter = self._adapters.get(PlatformCapability.SEND_OFFER)
         if adapter is None:
             raise ReadOnlyCoordinatorBlockedError("send_offer_adapter_required")
-
-        if delivery.snapshot.delivery_status is DeliveryStatus.AWAITING_OFFER:
-            attempted_at = self._now()
-            attempted_target = replace(
-                delivery.snapshot,
-                delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
-                offer_attempted_at=attempted_at,
-            )
-            attempted = self._advance(delivery, attempted_target)
-        elif delivery.snapshot.delivery_status is DeliveryStatus.OFFER_ATTEMPTED:
-            attempted = delivery
-        else:
+        if delivery.snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER:
             raise ReadOnlyCoordinatorBlockedError("send_authority_not_available")
+
+        attempted_at = self._now()
+        attempted_target = replace(
+            delivery.snapshot,
+            delivery_status=DeliveryStatus.OFFER_ATTEMPTED,
+            offer_attempted_at=attempted_at,
+        )
+        attempted = self._advance(delivery, attempted_target)
 
         request = self._make_request(attempted, PlatformCapability.SEND_OFFER)
         platform_result = self._execute(adapter, request)
@@ -1679,7 +1708,7 @@ class DeliveryCoordinator:
         delivery: StoredDelivery,
         proof: object,
     ) -> SendOfferStepResult:
-        """Consume one exact normal proof and perform one bounded SEND."""
+        """Consume one exact normal proof and perform one bounded first SEND."""
 
         current_proof = self._normal_send_proof
         self._normal_send_proof = None
@@ -1705,11 +1734,7 @@ class DeliveryCoordinator:
         snapshot = delivery.snapshot
         if (
             snapshot.delivery_mode is not DeliveryMode.BUYER_SENDS_OFFER
-            or snapshot.delivery_status
-            not in {
-                DeliveryStatus.AWAITING_OFFER,
-                DeliveryStatus.OFFER_ATTEMPTED,
-            }
+            or snapshot.delivery_status is not DeliveryStatus.AWAITING_OFFER
             or snapshot.steam_tradeoffer_id is not None
             or snapshot.counterparty_steam_id is not None
         ):
