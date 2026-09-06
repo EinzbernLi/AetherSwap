@@ -731,6 +731,15 @@ class CanaryTakeoverIntegration:
         )
 
     @property
+    def purchase_fence_active(self) -> bool:
+        """Whether the captured target forbids starting another purchase."""
+
+        return self._controller.phase in {
+            CanaryTakeoverPhase.TARGET_CAPTURED,
+            CanaryTakeoverPhase.OWNER_ACTIVE,
+        }
+
+    @property
     def registration_enabled(self) -> bool:
         return bool(
             getattr(
@@ -768,7 +777,15 @@ class CanaryTakeoverIntegration:
         self,
         host_purchases: object,
     ) -> AutoOfferResult:
-        if self._controller.purchase_blocked:
+        phase = self._controller.phase
+        if phase in {
+            CanaryTakeoverPhase.TARGET_CAPTURED,
+            CanaryTakeoverPhase.OWNER_ACTIVE,
+        }:
+            return AutoOfferResult.WAITING
+        if phase is CanaryTakeoverPhase.COMPLETE:
+            return AutoOfferResult.COMPLETE
+        if phase is CanaryTakeoverPhase.ABORTED:
             return AutoOfferResult.BLOCKED
         return self._normal.next_purchase_result(
             host_purchases

@@ -189,3 +189,131 @@ def test_prepared_canary_pipeline_callsite_uses_single_purchase_client(monkeypat
     assert result[2] is steps.TIME_WINDOW_CLOSED
     assert len(seen) == 1
     assert isinstance(seen[0], CanarySinglePurchaseBuffClient)
+
+
+def test_active_canary_target_stops_pipeline_before_candidate_selection(monkeypatch):
+    class Controller:
+        phase = CanaryTakeoverPhase.OWNER_ACTIVE
+        purchase_blocked = True
+        owner_active = True
+
+    class NormalIntegration:
+        def __init__(self):
+            self.next_calls = 0
+
+        def next_purchase_result(self, _purchases):
+            self.next_calls += 1
+            return AutoOfferResult.WAITING
+
+    class State:
+        def get_purchases(self):
+            raise AssertionError("active canary fence must stop before snapshot")
+
+    class Context:
+        def __init__(self):
+            self.state = State()
+            self.statuses = []
+            self.logs = []
+
+        def is_stop_requested(self):
+            return False
+
+        def log(self, *args, **kwargs):
+            self.logs.append((args, kwargs))
+
+        def set_status(self, *args, **kwargs):
+            self.statuses.append((args, kwargs))
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("active canary fence must stop before candidate selection")
+
+    monkeypatch.setattr(pipeline_module, "pick_stable_item", unexpected)
+    monkeypatch.setattr(pipeline_module, "lock_and_confirm_payment", unexpected)
+
+    normal = NormalIntegration()
+    context = Context()
+    result = pipeline_module._process_deals_for_target_impl(
+        context,
+        [_item()],
+        _config(),
+        100.0,
+        0.0,
+        0,
+        object(),
+        object(),
+        object(),
+        set(),
+        set(),
+        set(),
+        auto_offer_integration=CanaryTakeoverIntegration(
+            Controller(),
+            normal,
+        ),
+        effective_cfg=_config(),
+    )
+
+    assert result == (0.0, 0, True)
+    assert context.statuses[-1][0] == (
+        "stopped",
+        "AUTO_OFFER_CANARY_TARGET_ACTIVE",
+    )
+    assert normal.next_calls == 0
+
+
+@pytest.mark.parametrize(
+    "global_result",
+    [AutoOfferResult.BLOCKED, AutoOfferResult.RESULT_UNKNOWN],
+)
+def test_global_purchase_blockers_still_stop_pipeline_as_errors(
+    monkeypatch,
+    global_result,
+):
+    class Integration:
+        def next_purchase_result(self, _purchases):
+            return global_result
+
+    class State:
+        def get_purchases(self):
+            return []
+
+    class Context:
+        def __init__(self):
+            self.state = State()
+            self.statuses = []
+
+        def is_stop_requested(self):
+            return False
+
+        def log(self, *_args, **_kwargs):
+            return None
+
+        def set_status(self, *args, **kwargs):
+            self.statuses.append((args, kwargs))
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("global blocker must stop before candidate selection")
+
+    monkeypatch.setattr(pipeline_module, "pick_stable_item", unexpected)
+    context = Context()
+    result = pipeline_module._process_deals_for_target_impl(
+        context,
+        [_item()],
+        _config(),
+        100.0,
+        0.0,
+        0,
+        object(),
+        object(),
+        object(),
+        set(),
+        set(),
+        set(),
+        auto_offer_integration=Integration(),
+        effective_cfg=_config(),
+    )
+
+    assert result == (0.0, 0, True)
+    assert context.statuses[-1][0] == (
+        "error",
+        f"AUTO_OFFER_{global_result.value.upper()}",
+    )
